@@ -1,0 +1,19 @@
+[package]
+name = "olm-interop-harness"
+version = "0.1.0"
+edition = "2021"
+
+# Dev-only interop oracle for MatrixKitCrypto (Tier B verification).
+# Never shipped: drives vodozemac (the audited Rust Olm/Megolm
+# implementation) over a JSON-line protocol so Swift test fixtures can
+# be harvested and live two-way exchanges scripted.
+
+[dependencies]
+vodozemac = "0.10.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Debug-KDF command only: re-derive Olm stage values from fixed keys.
+x25519-dalek = "2"
+hkdf = "0.12"
+hmac = "0.12"
+sha2 = "0.10"

@@ -1,0 +1,8 @@
+version: 1
+documentation:
+  targets:
+    MatrixKit: {}
+    MatrixKitCrypto: {}
+    MatrixKitSQLite: {}
+    MatrixKitSwiftData: {}
+    MatrixRTC: {}

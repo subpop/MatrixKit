@@ -1,0 +1,15 @@
+{
+  "description": "Deterministic Megolm message: fixed ratchet parts + Ed25519 seed. vodozemac 0.10 (GroupSessionPickle surgery) encrypts 'megolm hello vodozemac' at index 0; Swift must decrypt it and reproduce identical payload+MAC bytes (signature excluded: Ed25519 signing is randomized).",
+  "ed25519_seed": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+  "parts": [
+    "5050505050505050505050505050505050505050505050505050505050505050",
+    "5151515151515151515151515151515151515151515151515151515151515151",
+    "5252525252525252525252525252525252525252525252525252525252525252",
+    "5353535353535353535353535353535353535353535353535353535353535353"
+  ],
+  "counter": 0,
+  "session_id": "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo",
+  "plaintext": "megolm hello vodozemac",
+  "session_key_b64": "AgAAAABQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU9damAGCsQq31Uv+08lkBzoO4XLz2qYjJa8CGmj3B1Ean36/EZtYzzldSyNrIVUKJpHiy4FiljbYCw7zoc/Pb4ZWBJhhbPa8eHhRnGnCfN0TB8ijis6hrPvgER8SR1SjDg==",
+  "vodozemac_message_b64": "AwgAEiBNI+Qf2nuxSNGZGtsHKO+NSjVYCj5P88s+5epB/vrshsAR9lnqk6jAiV2MIK0Cu+UHONrcWQYcFOiKkWiQnLx+80iv9w2Sb6NkDsmZR7vlnQqliv2GCyOASxeSrxJ0yTteBb8Dfm00Cw=="
+}

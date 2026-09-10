@@ -1,0 +1,11 @@
+{
+  "description": "Deterministic Olm pre-key message: Swift (MatrixKitCrypto) encrypts with fixed keys, vodozemac 0.10 decrypts to 'hello bob'. Byte-identical reproduction proves wire compatibility.",
+  "alice_id_priv": "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a",
+  "bob_id_priv": "5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb",
+  "bob_otk_priv": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+  "alice_eph_priv": "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb",
+  "first_ratchet_priv": "c5aa8df43f9f837bedb7442f31dcb7b166d38535076f094b85ce3a2e0b4458f7",
+  "plaintext": "hello bob",
+  "prekey_b64": "Awogt1XO1k1KJ84yr88Znxij7R8xiXAosP9uVRkepEnbJkQSILbGGS5mMA9Lu049hwv9AuQWFU67BmYacKhOo3YkSzwgGiCFIPAJiTCnVHSLfdy0PvdaDb86DSY4GvTrpKmOqptOaiI/AwogPsCahj+B+a3G7xyGUpX62mRVBDC0sxqkDvbJtZMpC18QACIQE+VEPFbFCOkG/Tfkh7lQFf1pEMb7iF42",
+  "vodozemac_decrypts": true
+}
