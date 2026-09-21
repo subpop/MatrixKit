@@ -38,6 +38,14 @@ jobs:
             --transform-for-static-hosting \
             --hosting-base-path "${{ github.event.repository.name }}"
           touch ./docs/.nojekyll
+          # swift-docc-render has no route for the bare root URL; serve a
+          # redirect stub to the combined-documentation landing page instead.
+          cat > ./docs/index.html << 'EOF'
+          <!doctype html><meta charset="utf-8">
+          <script>location.replace(document.baseURI.slice(0, document.baseURI.lastIndexOf("/")) + "/documentation/")</script>
+          <meta http-equiv="refresh" content="0;url=documentation/">
+          <link rel="canonical" href="documentation/">
+          EOF
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
