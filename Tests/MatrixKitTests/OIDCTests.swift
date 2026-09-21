@@ -19,10 +19,10 @@ private let sampleMetadataJSON = """
 
 private let sampleTokenJSON = """
     {
-      "access_token": "2YotnFZFEjr1zCsicMWpAA",
+      "access_token": "swordfish",
       "token_type": "Bearer",
       "expires_in": 299,
-      "refresh_token": "tGz3JOkF0XG5Qx2TlKWIA",
+      "refresh_token": "swordfish",
       "scope": "urn:matrix:client:api:* urn:matrix:client:device:AAABBBCCCDDD",
       "device_id": "AAABBBCCCDDD"
     }
@@ -78,9 +78,9 @@ struct OIDCTests {
     func token() throws {
         let tokens = try JSONDecoder().decode(
             OIDCTokenResponse.self, from: Data(sampleTokenJSON.utf8))
-        #expect(tokens.accessToken == "2YotnFZFEjr1zCsicMWpAA")
+        #expect(tokens.accessToken == "swordfish")
         #expect(tokens.expiresIn == 299)
-        #expect(tokens.refreshToken == "tGz3JOkF0XG5Qx2TlKWIA")
+        #expect(tokens.refreshToken == "swordfish")
         #expect(tokens.deviceId == "AAABBBCCCDDD")
     }
 
