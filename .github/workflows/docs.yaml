@@ -26,15 +26,18 @@ jobs:
 
       - name: Build DocC site
         run: |
-          for target in MatrixKit MatrixKitCrypto MatrixKitSQLite MatrixKitSwiftData MatrixRTC; do
-            mkdir -p "./docs/$target"
-            swift package --allow-writing-to-directory "./docs/$target" \
-              generate-documentation --target "$target" \
-              --output-path "./docs/$target" \
-              --transform-for-static-hosting \
-              --hosting-base-path "${{ github.event.repository.name }}/$target"
-            touch "./docs/$target/.nojekyll"
-          done
+          swift package --allow-writing-to-directory ./docs \
+            generate-documentation \
+            --target MatrixKit \
+            --target MatrixKitCrypto \
+            --target MatrixKitSQLite \
+            --target MatrixKitSwiftData \
+            --target MatrixRTC \
+            --enable-experimental-combined-documentation \
+            --output-path ./docs \
+            --transform-for-static-hosting \
+            --hosting-base-path "${{ github.event.repository.name }}"
+          touch ./docs/.nojekyll
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
