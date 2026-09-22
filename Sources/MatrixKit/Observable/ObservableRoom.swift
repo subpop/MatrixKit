@@ -691,7 +691,11 @@ public final class ObservableRoom {
             }
         }
         let memberInfos = try await rooms.members(roomId)
-        let members = memberInfos.map { info in
+        // Only active members belong in the member list: joined users plus
+        // pending invites. Banned, departed, and knocking users are excluded.
+        let members = memberInfos
+            .filter { $0.content.membership == .join || $0.content.membership == .invite }
+            .map { info in
             let userId = UserId(unchecked: info.stateKey)
             let level = powerContent.map {
                 RoomPermissions.powerLevel(of: userId, in: $0)
