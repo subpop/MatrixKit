@@ -118,7 +118,7 @@ public final class ObservableRoom {
     /// nothing here, but the client must not be retained by its cache.
     @ObservationIgnored
     var encryptSender:
-        ((RoomId, String, Mentions?, EventId?, TransactionId) async throws -> EventId)?
+        ((RoomId, any Encodable & Sendable, TransactionId) async throws -> EventId)?
     /// On-demand member-profile resolver installed by `MatrixClient`
     /// (backed by `GET /profile/{userId}`). Heals senders whose
     /// `m.room.member` sync omitted under lazy member loading. Stored
@@ -185,22 +185,23 @@ public final class ObservableRoom {
 
     // MARK: - Actions
 
-    /// Send a plain-text message.
-    /// Send a plain-text message with local echo. Transport failures
-    /// mark the echo failed instead of throwing; sync confirms the echo
-    /// when the server echoes the transaction ID back. Returns the echo
-    /// event ID, or nil when logged out.
+    /// Send a markdown message (`body` plus generated `formatted_body`)
+    /// with local echo. Transport failures mark the echo failed instead
+    /// of throwing; sync confirms the echo when the server echoes the
+    /// transaction ID back. Returns the echo event ID, or nil when
+    /// logged out.
     @discardableResult
     public func send(text: String, mentions: Mentions? = nil) async -> EventId? {
         guard let localUser else { return nil }
         let txn = TransactionId.random()
+        let content = MessageContent.markdown(text, mentions: mentions)
         let echo = MessageEvent(
             type: EventType.roomMessage.rawValue,
             eventId: EventId(unchecked: "local:\(txn.value)"),
             sender: localUser,
             roomId: roomId,
             originServerTs: Int(Date.now.timeIntervalSince1970 * 1000),
-            content: echoContent(MessageContent.text(text, mentions: mentions)),
+            content: echoContent(content),
             unsigned: ["transaction_id": .string(txn.value)])
         await room.stageEcho(echo, transactionId: txn)
         do {
@@ -208,10 +209,10 @@ public final class ObservableRoom {
                 guard let encryptSender else {
                     throw MatrixError.notAuthenticated
                 }
-                _ = try await encryptSender(roomId, text, mentions, nil, txn)
+                _ = try await encryptSender(roomId, content, txn)
             } else {
-                _ = try await messages.sendText(
-                    roomId, text, mentions: mentions, transactionId: txn)
+                _ = try await messages.send(
+                    roomId, content: content, transactionId: txn)
             }
         } catch {
             await room.failEcho(
@@ -313,7 +314,12 @@ public final class ObservableRoom {
             guard let encryptSender else {
                 throw MatrixError.notAuthenticated
             }
-            _ = try await encryptSender(roomId, text, mentions, eventId, .random())
+            _ = try await encryptSender(
+                roomId,
+                MessageContent.markdown(
+                    text, relatesTo: .reply(to: eventId),
+                    mentions: mentions),
+                .random())
             return
         }
         try await messages.reply(roomId, to: eventId, body: text, mentions: mentions)
@@ -324,6 +330,20 @@ public final class ObservableRoom {
         rootEventId: EventId, parentEventId: EventId? = nil, text: String,
         mentions: Mentions? = nil
     ) async throws {
+        if await room.isEncrypted {
+            guard let encryptSender else {
+                throw MatrixError.notAuthenticated
+            }
+            _ = try await encryptSender(
+                roomId,
+                MessageContent.markdown(
+                    text,
+                    relatesTo: .thread(
+                        root: rootEventId, replyTo: parentEventId),
+                    mentions: mentions),
+                .random())
+            return
+        }
         try await messages.threadReply(
             roomId, root: rootEventId, parent: parentEventId, body: text,
             mentions: mentions)
@@ -333,6 +353,17 @@ public final class ObservableRoom {
     public func edit(
         _ eventId: EventId, newText: String, mentions: Mentions? = nil
     ) async throws {
+        if await room.isEncrypted {
+            guard let encryptSender else {
+                throw MatrixError.notAuthenticated
+            }
+            _ = try await encryptSender(
+                roomId,
+                EditContent.markdown(
+                    editing: eventId, newText, mentions: mentions),
+                .random())
+            return
+        }
         try await messages.edit(roomId, eventId: eventId, newBody: newText, mentions: mentions)
     }
 

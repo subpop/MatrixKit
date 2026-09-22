@@ -972,15 +972,14 @@ public final class MatrixClient {
         return outcome
     }
 
-    /// Send an encrypted text message: share the room's Megolm session
+    /// Send encrypted content: share the room's Megolm session
     /// with joined members (once per session), then send ciphertext.
     /// Shares include our own other devices (they need the session to
     /// read what we send); only our current device is skipped. Pass the
     /// staged local-echo transaction ID so sync confirms the echo.
     @discardableResult
-    public func sendEncryptedText(
-        _ roomId: RoomId, _ body: String, mentions: Mentions? = nil,
-        inReplyTo: EventId? = nil,
+    public func sendEncryptedContent(
+        _ roomId: RoomId, _ content: any Encodable & Sendable,
         transactionId: TransactionId = .random()
     ) async throws -> EventId {
         let members = try await rooms.joinedMembers(roomId)
@@ -988,10 +987,8 @@ public final class MatrixClient {
         try await roomCrypto.ensureShared(
             roomId: roomId, users: Array(members.keys),
             excludingDevice: ownDevice)
-        return try await roomCrypto.sendEncryptedText(
-            roomId, body, mentions: mentions,
-            relatesTo: inReplyTo.map(RelatesTo.reply(to:)),
-            transactionId: transactionId)
+        return try await roomCrypto.sendEncryptedContent(
+            roomId, content, transactionId: transactionId)
     }
 
     /// (Re-)share the room's Megolm session with all joined members,
@@ -1035,11 +1032,10 @@ public final class MatrixClient {
             media: media,
             localUser: userId
         )
-        observable.encryptSender = { [weak self] roomId, body, mentions, inReplyTo, txn in
+        observable.encryptSender = { [weak self] roomId, content, txn in
             guard let self else { throw MatrixError.notAuthenticated }
-            return try await self.sendEncryptedText(
-                roomId, body, mentions: mentions, inReplyTo: inReplyTo,
-                transactionId: txn)
+            return try await self.sendEncryptedContent(
+                roomId, content, transactionId: txn)
         }
         // Heal senders whose `m.room.member` sync omitted under lazy
         // member loading. `GET /profile/{userId}` reports no membership,

@@ -175,8 +175,8 @@ public actor RoomCrypto {
 
     // MARK: - Send
 
-    /// Encrypt `body` as `m.room.message`/`m.text` under the room's
-    /// outbound session (created on first use) and send it as
+    /// Encrypt `content` as `m.room.message` under the room's outbound
+    /// session (created on first use) and send it as
     /// `m.room.encrypted`. Call `ensureShared(roomId:users:)` first so
     /// recipients hold the session. The outbound session is also
     /// registered for self-decryption: the sender never receives its own
@@ -184,9 +184,8 @@ public actor RoomCrypto {
     /// stay undecryptable. Pass the staged local-echo transaction ID so
     /// sync confirms the echo instead of duplicating it.
     @discardableResult
-    public func sendEncryptedText(
-        _ roomId: RoomId, _ body: String, mentions: Mentions? = nil,
-        relatesTo: RelatesTo? = nil,
+    public func sendEncryptedContent(
+        _ roomId: RoomId, _ content: any Encodable & Sendable,
         transactionId: TransactionId = .random()
     ) async throws(MatrixError) -> EventId {
         var session = outbound[roomId.value] ?? MegolmSession.create()
@@ -209,12 +208,10 @@ public actor RoomCrypto {
         }
         let plaintext: Data
         do {
-            // Encode through MessageContent so the encrypted payload
-            // matches plaintext wire shape (msgtype/body plus optional
-            // m.relates_to for replies and m.mentions).
-            let encoded = try JSONEncoder().encode(
-                MessageContent.text(
-                    body, relatesTo: relatesTo, mentions: mentions))
+            // Encode the caller's content as-is so the encrypted payload
+            // matches plaintext wire shape (msgtype/body plus formatted
+            // body, m.relates_to, m.mentions as carried by the content).
+            let encoded = try JSONEncoder().encode(content)
             guard
                 let content = try JSONSerialization.jsonObject(with: encoded)
                     as? [String: Any]
@@ -322,7 +319,7 @@ public actor RoomCrypto {
 
     /// Share only when the current outbound session hasn't been shared
     /// yet (first send per room/session). Backs the
-    /// `MatrixClient.sendEncryptedText` convenience.
+    /// `MatrixClient.sendEncryptedContent` convenience.
     public func ensureShared(
         roomId: RoomId, users: [UserId], excludingDevice: DeviceId? = nil
     ) async throws(MatrixError) {

@@ -161,6 +161,16 @@ public struct MessageContent: Hashable, Sendable, Codable {
         )
     }
 
+    /// Markdown message: `body` carries the raw markdown; `formatted_body`
+    /// carries the generated Matrix HTML subset (always present).
+    public static func markdown(
+        _ body: String, relatesTo: RelatesTo? = nil, mentions: Mentions? = nil
+    ) -> MessageContent {
+        html(
+            body, formattedBody: MatrixHTMLGenerator.html(fromMarkdown: body),
+            relatesTo: relatesTo, mentions: mentions)
+    }
+
     private enum CodingKeys: String, CodingKey {
         case msgtype
         case body
@@ -462,5 +472,272 @@ public struct ReactionRelation: Hashable, Sendable, Codable {
         case eventId = "event_id"
         case relType = "rel_type"
         case key
+    }
+}
+
+// MARK: - Markdown to Matrix HTML (formatted_body generation)
+
+/// Generates the Matrix HTML subset from markdown for `formatted_body`.
+///
+/// Block constructs: paragraphs, headings, bullet and ordered lists,
+/// block quotes, fenced code blocks, and thematic breaks. Inline
+/// constructs: bold, italic, strikethrough, inline code, and links.
+///
+/// Literal text — including anything that looks like inline HTML — is
+/// HTML-escaped, and bare URLs are not autolinked; compose links with
+/// explicit markdown `[text](url)` syntax. Nested lists render as
+/// sibling list items.
+public enum MatrixHTMLGenerator {
+    /// HTML-escapes literal text.
+    static func escape(_ text: String) -> String {
+        text.replacing("&", with: "&amp;")
+            .replacing("<", with: "&lt;")
+            .replacing(">", with: "&gt;")
+            .replacing("\"", with: "&quot;")
+    }
+
+    /// Converts markdown to the Matrix HTML subset. Unparseable input is
+    /// escaped verbatim.
+    public static func html(fromMarkdown markdown: String) -> String {
+        let attributed: AttributedString
+        do {
+            attributed = try AttributedString(
+                markdown: markdown, options: .init(interpretedSyntax: .full))
+        } catch {
+            return escape(markdown)
+        }
+        guard !attributed.runs.isEmpty else { return "" }
+        return renderBlocks(blocks(in: attributed))
+    }
+
+    // MARK: - Block splitting
+
+    /// Normalized block kind (associated values lifted out separately).
+    private enum BlockKind: Hashable {
+        case paragraph
+        case header
+        case listItem
+        case orderedList
+        case unorderedList
+        case codeBlock
+        case blockQuote
+        case thematicBreak
+        case other
+    }
+
+    /// One presentation-intent component: its kind, the identity shared
+    /// by all runs of its block, and kind-specific payloads.
+    private struct BlockComponent {
+        var kind: BlockKind
+        var identity: Int
+        var level: Int?
+        var ordinal: Int?
+        var languageHint: String?
+    }
+
+    /// One styled run of the parsed markdown.
+    private struct SourceRun {
+        var text: String
+        var components: [BlockComponent]
+        var inline: InlinePresentationIntent
+        var link: URL?
+    }
+
+    private static func blockComponent(
+        from component: PresentationIntent.IntentType
+    ) -> BlockComponent {
+        switch component.kind {
+        case .paragraph:
+            return BlockComponent(
+                kind: .paragraph, identity: component.identity, level: nil,
+                ordinal: nil, languageHint: nil)
+        case .header(let level):
+            return BlockComponent(
+                kind: .header, identity: component.identity, level: level,
+                ordinal: nil, languageHint: nil)
+        case .listItem(let ordinal):
+            return BlockComponent(
+                kind: .listItem, identity: component.identity, level: nil,
+                ordinal: ordinal, languageHint: nil)
+        case .orderedList:
+            return BlockComponent(
+                kind: .orderedList, identity: component.identity, level: nil,
+                ordinal: nil, languageHint: nil)
+        case .unorderedList:
+            return BlockComponent(
+                kind: .unorderedList, identity: component.identity, level: nil,
+                ordinal: nil, languageHint: nil)
+        case .codeBlock(let languageHint):
+            return BlockComponent(
+                kind: .codeBlock, identity: component.identity, level: nil,
+                ordinal: nil, languageHint: languageHint)
+        case .blockQuote:
+            return BlockComponent(
+                kind: .blockQuote, identity: component.identity, level: nil,
+                ordinal: nil, languageHint: nil)
+        case .thematicBreak:
+            return BlockComponent(
+                kind: .thematicBreak, identity: component.identity, level: nil,
+                ordinal: nil, languageHint: nil)
+        @unknown default:
+            return BlockComponent(
+                kind: .other, identity: component.identity, level: nil,
+                ordinal: nil, languageHint: nil)
+        }
+    }
+
+    /// Splits runs into blocks. Runs belonging to one block share the same
+    /// presentation-intent component identities; a change marks a boundary.
+    private static func blocks(in attributed: AttributedString) -> [[SourceRun]] {
+        var current: [SourceRun] = []
+        var blocks: [[SourceRun]] = []
+        var currentIdentities: [Int] = []
+
+        for run in attributed.runs {
+            let sourceRun = SourceRun(
+                text: String(attributed[run.range].characters),
+                components: (run.presentationIntent?.components ?? []).map(
+                    blockComponent(from:)),
+                inline: run.inlinePresentationIntent ?? [],
+                link: run.link)
+            let identities = sourceRun.components.map(\.identity)
+            if !current.isEmpty && identities != currentIdentities {
+                blocks.append(current)
+                current = []
+            }
+            if current.isEmpty { currentIdentities = identities }
+            current.append(sourceRun)
+        }
+        if !current.isEmpty { blocks.append(current) }
+        return blocks
+    }
+
+    // MARK: - Block rendering
+
+    private static func renderBlocks(_ blocks: [[SourceRun]]) -> String {
+        var output: [String] = []
+        var index = 0
+        while index < blocks.count {
+            let block = blocks[index]
+            let components = block.first?.components ?? []
+            let kinds = Set(components.map(\.kind))
+
+            if kinds.contains(.codeBlock) {
+                output.append(renderCodeBlock(block, components: components))
+                index += 1
+            } else if kinds.contains(.thematicBreak) {
+                output.append("<hr />")
+                index += 1
+            } else if kinds.contains(.listItem) {
+                let (list, next) = renderList(blocks, from: index)
+                output.append(list)
+                index = next
+            } else if kinds.contains(.blockQuote) {
+                let (quote, next) = renderQuote(blocks, from: index)
+                output.append(quote)
+                index = next
+            } else if kinds.contains(.header) {
+                let level = min(
+                    max(components.compactMap(\.level).first ?? 1, 1), 6)
+                output.append("<h\(level)>\(renderInline(block))</h\(level)>")
+                index += 1
+            } else {
+                output.append("<p>\(renderInline(block))</p>")
+                index += 1
+            }
+        }
+        return output.joined(separator: "\n")
+    }
+
+    private static func renderCodeBlock(
+        _ block: [SourceRun], components: [BlockComponent]
+    ) -> String {
+        var code = "<pre><code"
+        if let hint = components.compactMap(\.languageHint).first {
+            code += " class=\"language-\(escape(hint))\""
+        }
+        code += ">\(escape(block.map(\.text).joined()))</code></pre>"
+        return code
+    }
+
+    /// Renders consecutive `listItem` blocks sharing one list container
+    /// identity as a single `<ul>`/`<ol>`.
+    private static func renderList(
+        _ blocks: [[SourceRun]], from start: Int
+    ) -> (String, Int) {
+        let firstComponents = blocks[start].first?.components ?? []
+        let ordered = Set(firstComponents.map(\.kind)).contains(.orderedList)
+        let containerIdentity = firstComponents.last?.identity
+
+        var items: [String] = []
+        var index = start
+        while index < blocks.count {
+            let components = blocks[index].first?.components ?? []
+            guard Set(components.map(\.kind)).contains(.listItem),
+                components.last?.identity == containerIdentity
+            else { break }
+            items.append("<li>\(renderInline(blocks[index]))</li>")
+            index += 1
+        }
+
+        let tag = ordered ? "ol" : "ul"
+        var openTag = "<\(tag)"
+        if ordered, let ordinal = firstComponents.compactMap(\.ordinal).first,
+            ordinal > 1
+        {
+            openTag += " start=\"\(ordinal)\""
+        }
+        return ("\(openTag)>\n\(items.joined(separator: "\n"))\n</\(tag)>", index)
+    }
+
+    /// Renders consecutive blocks sharing a `blockQuote` container identity
+    /// as a single `<blockquote>`.
+    private static func renderQuote(
+        _ blocks: [[SourceRun]], from start: Int
+    ) -> (String, Int) {
+        let quoteIdentity = blocks[start].first?.components.last?.identity
+        var inner: [[SourceRun]] = []
+        var index = start
+        while index < blocks.count {
+            let components = blocks[index].first?.components ?? []
+            guard Set(components.map(\.kind)).contains(.blockQuote),
+                components.last?.identity == quoteIdentity
+            else { break }
+            inner.append(
+                blocks[index].map { run in
+                    var run = run
+                    run.components = .init(run.components.dropLast())
+                    return run
+                })
+            index += 1
+        }
+        return ("<blockquote>\n\(renderBlocks(inner))\n</blockquote>", index)
+    }
+
+    // MARK: - Inline rendering
+
+    private static func renderInline(_ runs: [SourceRun]) -> String {
+        runs.map(renderRun).joined()
+    }
+
+    private static func renderRun(_ run: SourceRun) -> String {
+        if run.inline.contains(.softBreak) && run.link == nil {
+            return "\n"
+        }
+
+        if run.inline.contains(.code) {
+            return "<code>\(escape(run.text))</code>"
+        }
+
+        var text = escape(run.text)
+        if run.inline.contains(.strikethrough) { text = "<del>\(text)</del>" }
+        if run.inline.contains(.emphasized) { text = "<em>\(text)</em>" }
+        if run.inline.contains(.stronglyEmphasized) {
+            text = "<strong>\(text)</strong>"
+        }
+        if let link = run.link {
+            text = "<a href=\"\(escape(link.absoluteString))\">\(text)</a>"
+        }
+        return text
     }
 }

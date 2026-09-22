@@ -110,9 +110,7 @@ struct SendPipelineTests {
     func encryptedMentions() async throws {        let room = RoomId(unchecked: "!r:x")
         let sender = FakeRoomSender()
         let alice = RoomCrypto(sharer: FakeSharer(), sender: sender)
-        _ = try await alice.sendEncryptedText(
-            room, "hi",
-            mentions: Mentions(userIds: [UserId(unchecked: "@bob:x")]))
+        _ = try await alice.sendEncryptedContent(room, MessageContent.markdown("hi", mentions: Mentions(userIds: [UserId(unchecked: "@bob:x")])))
         let sent = await sender.sent
         #expect(sent.count == 1)
         let wire = MessageEvent(
@@ -124,6 +122,7 @@ struct SendPipelineTests {
             content: sent[0].content)
         let decrypted = await alice.decryptRoomEvent(wire, in: room)
         #expect(decrypted?.content["body"] == .string("hi"))
+        #expect(decrypted?.content["formatted_body"] == .string("<p>hi</p>"))
         #expect(
             decrypted?.content["m.mentions"]?["user_ids"]?.arrayValue?.first?.stringValue
                 == "@bob:x")
@@ -134,8 +133,9 @@ struct SendPipelineTests {
         let room = RoomId(unchecked: "!r:x")
         let sender = FakeRoomSender()
         let alice = RoomCrypto(sharer: FakeSharer(), sender: sender)
-        _ = try await alice.sendEncryptedText(
-            room, "hi", transactionId: TransactionId("staged-txn"))
+        _ = try await alice.sendEncryptedContent(
+            room, MessageContent.markdown("hi"),
+            transactionId: TransactionId("staged-txn"))
         let sent = await sender.sent
         #expect(sent.count == 1)
         // The staged echo's txn must reach the wire, or sync can never
@@ -149,8 +149,9 @@ struct SendPipelineTests {
         let sender = FakeRoomSender()
         let alice = RoomCrypto(sharer: FakeSharer(), sender: sender)
         let target = EventId(unchecked: "$target:x")
-        _ = try await alice.sendEncryptedText(
-            room, "reply hi", relatesTo: .reply(to: target))
+        _ = try await alice.sendEncryptedContent(
+            room,
+            MessageContent.markdown("reply hi", relatesTo: .reply(to: target)))
         let sent = await sender.sent
         #expect(sent.count == 1)
         let wire = MessageEvent(

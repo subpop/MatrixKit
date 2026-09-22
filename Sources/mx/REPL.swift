@@ -193,7 +193,8 @@ final class REPL {
             }
         case .esend(let text):
             await requireRoom { client, roomId in
-                try await client.sendEncryptedText(roomId, text)
+                try await client.sendEncryptedContent(
+                    roomId, MessageContent.markdown(text))
             }
         case .sharekey:
             await requireRoom { client, roomId in

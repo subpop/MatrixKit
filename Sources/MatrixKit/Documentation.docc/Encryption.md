@@ -18,7 +18,8 @@ try await client.configureEncryption()
 try await room.send(text: "Secret hello")
 
 // Or explicitly:
-try await client.sendEncryptedText("Secret hello", in: roomId)
+try await client.sendEncryptedContent(
+    roomId, MessageContent.markdown("Secret hello"))
 ```
 
 `ObservableRoom.isEncrypted` reports whether a room encrypts; undecryptable
@@ -73,7 +74,7 @@ its README for the protocol and fixture-harvesting workflow.
 ### Facade entry points
 
 - ``MatrixClient/configureEncryption()``
-- ``MatrixClient/sendEncryptedText(_:_:mentions:inReplyTo:transactionId:)``
+- ``MatrixClient/sendEncryptedContent(_:_:transactionId:)``
 - ``MatrixClient/shareRoomKey(_:)``
 - ``MatrixClient/retryTimelineDecryption()``
 - ``MatrixClient/recover(withRecoveryKey:)``

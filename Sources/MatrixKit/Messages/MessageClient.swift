@@ -92,9 +92,11 @@ public actor MessageClient {
         _ roomId: RoomId, to eventId: EventId, body: String,
         mentions: Mentions? = nil, transactionId: TransactionId = .random()
     ) async throws(MatrixError) -> EventId {
-        try await sendText(
-            roomId, body, relatesTo: .reply(to: eventId),
-            mentions: mentions, transactionId: transactionId)
+        try await send(
+            roomId,
+            content: .markdown(
+                body, relatesTo: .reply(to: eventId), mentions: mentions),
+            transactionId: transactionId)
     }
 
     /// Reply inside a thread (`m.thread` rooted at `root`, with an
@@ -104,9 +106,12 @@ public actor MessageClient {
         _ roomId: RoomId, root: EventId, parent: EventId? = nil, body: String,
         mentions: Mentions? = nil, transactionId: TransactionId = .random()
     ) async throws(MatrixError) -> EventId {
-        try await sendText(
-            roomId, body, relatesTo: .thread(root: root, replyTo: parent),
-            mentions: mentions, transactionId: transactionId)
+        try await send(
+            roomId,
+            content: .markdown(
+                body, relatesTo: .thread(root: root, replyTo: parent),
+                mentions: mentions),
+            transactionId: transactionId)
     }
 
     /// Edit a message (`m.replace` relation + `m.new_content`).
@@ -115,11 +120,8 @@ public actor MessageClient {
         _ roomId: RoomId, eventId: EventId, newBody: String,
         mentions: Mentions? = nil
     ) async throws(MatrixError) -> EventId {
-        let content = EditContent(
-            body: " * \(newBody)",
-            newContent: .text(newBody, mentions: mentions),
-            relatesTo: .edit(of: eventId)
-        )
+        let content = EditContent.markdown(
+            editing: eventId, newBody, mentions: mentions)
         return try await sendEvent(roomId, content: content)
     }
 
@@ -376,5 +378,18 @@ public struct EditContent: Hashable, Sendable, Codable {
         case body
         case newContent = "m.new_content"
         case relatesTo = "m.relates_to"
+    }
+}
+
+extension EditContent {
+    /// Replacement content for editing a markdown text message.
+    /// `m.new_content` repeats the full formatted content per spec.
+    public static func markdown(
+        editing eventId: EventId, _ newBody: String, mentions: Mentions? = nil
+    ) -> EditContent {
+        EditContent(
+            body: " * \(newBody)",
+            newContent: .markdown(newBody, mentions: mentions),
+            relatesTo: .edit(of: eventId))
     }
 }

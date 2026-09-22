@@ -170,7 +170,7 @@ struct RoomCryptoTests {
     func sendShape() async throws {
         let (room, _, _) = try roomFixture()
         let (alice, _, _, sender) = try wirePair()
-        let eventId = try await alice.sendEncryptedText(room, "hello")
+        let eventId = try await alice.sendEncryptedContent(room, MessageContent.markdown("hello"))
         #expect(eventId.value == "$fake1")
         let sent = await sender.sent
         #expect(sent.count == 1)
@@ -194,7 +194,7 @@ struct RoomCryptoTests {
         await bob.receiveRoomKey(BasicEvent(
             type: "m.room_key", sender: aliceUser,
             content: shares[0].content))
-        _ = try await alice.sendEncryptedText(room, "hello megolm")
+        _ = try await alice.sendEncryptedContent(room, MessageContent.markdown("hello megolm"))
         let sent = await aliceSender.sent
         let wire = MessageEvent(
             type: sent[0].type, eventId: EventId(unchecked: "$e1"),
@@ -210,8 +210,8 @@ struct RoomCryptoTests {
     func selfDecrypt() async throws {
         let (room, aliceUser, _) = try roomFixture()
         let (alice, _, _, sender) = try wirePair()
-        _ = try await alice.sendEncryptedText(room, "hello self")
-        _ = try await alice.sendEncryptedText(room, "hello again")
+        _ = try await alice.sendEncryptedContent(room, MessageContent.markdown("hello self"))
+        _ = try await alice.sendEncryptedContent(room, MessageContent.markdown("hello again"))
         let sent = await sender.sent
         #expect(sent.count == 2)
         for (index, body) in ["hello self", "hello again"].enumerated() {
@@ -285,7 +285,7 @@ struct RoomCryptoTests {
         await bob.receiveRoomKey(BasicEvent(
             type: "m.room_key", sender: aliceUser,
             content: shares[0].content))
-        _ = try await alice.sendEncryptedText(room, "persistent")
+        _ = try await alice.sendEncryptedContent(room, MessageContent.markdown("persistent"))
         // Fresh actor, same keystore: inbound session restored.
         let revived = RoomCrypto(
             sharer: FakeSharer(), sender: FakeRoomSender(),
@@ -337,7 +337,7 @@ struct RoomCryptoTests {
         #expect(inners[0].type == "m.room_key")
         await bob.receiveRoomKey(inners[0])
 
-        _ = try await alice.sendEncryptedText(room, "hello over olm-shared key")
+        _ = try await alice.sendEncryptedContent(room, MessageContent.markdown("hello over olm-shared key"))
         let sent = await aliceSender.sent
         #expect(sent.count == 1)
         let wire = MessageEvent(
@@ -589,7 +589,7 @@ struct TimelinePagingTests {
         let (alice, bob, aliceSharer, aliceSender) = try wirePair()
         await aliceSharer.setDevices([bobUser.value: ["BOB"]])
         try await alice.shareRoomKey(roomId: roomId, users: [bobUser])
-        _ = try await alice.sendEncryptedText(roomId, "late key")
+        _ = try await alice.sendEncryptedContent(roomId, MessageContent.markdown("late key"))
         let sent = await aliceSender.sent
         let wire = MessageEvent(
             type: sent[0].type, eventId: EventId(unchecked: "$late"),
