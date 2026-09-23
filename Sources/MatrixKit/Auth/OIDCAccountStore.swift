@@ -13,13 +13,21 @@ public struct OIDCAccountStore: Sendable {
 
     /// `<caches>/MatrixKit/`, shared by all users (the account itself
     /// records which user it belongs to). Nil when unavailable.
+    ///
+    /// Debug builds use `<caches>/MatrixKit/Debug/`, so debug snapshots and
+    /// caches never touch release data (`SQLiteCache` and `SwiftDataCache`
+    /// both derive their paths from here).
     public static func defaultDirectory() -> URL? {
         guard
             let caches = FileManager.default.urls(
                 for: .cachesDirectory, in: .userDomainMask
             ).first
         else { return nil }
+        #if DEBUG
+        return caches.appendingPathComponent("MatrixKit/Debug", isDirectory: true)
+        #else
         return caches.appendingPathComponent("MatrixKit", isDirectory: true)
+        #endif
     }
 
     /// Atomically write the account with owner-only permissions.
