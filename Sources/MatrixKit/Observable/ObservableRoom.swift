@@ -221,8 +221,19 @@ public final class ObservableRoom {
         return echo.eventId
     }
 
-    /// Send an HTML message with plain-text fallback.
+    /// Send an HTML message with plain-text fallback. Encrypted
+    /// rooms encrypt it like any other content.
     public func sendHTML(body: String, formattedBody: String) async throws {
+        if await room.isEncrypted {
+            guard let encryptSender else {
+                throw MatrixError.notAuthenticated
+            }
+            _ = try await encryptSender(
+                roomId,
+                MessageContent.html(body, formattedBody: formattedBody),
+                .random())
+            return
+        }
         try await messages.sendHTML(roomId, body: body, formattedBody: formattedBody)
     }
 
@@ -269,13 +280,16 @@ public final class ObservableRoom {
                         filename: "\(filename)-thumbnail")
                     encryptedInfo.thumbnailUrl = nil
                 }
-                _ = try await messages.send(
+                guard let encryptSender else {
+                    throw MatrixError.notAuthenticated
+                }
+                _ = try await encryptSender(
                     roomId,
-                    content: MessageContent(
+                    MessageContent(
                         msgtype: msgtype, body: caption ?? filename,
                         relatesTo: inReplyTo.map(RelatesTo.reply(to:)),
                         file: file, info: encryptedInfo),
-                    transactionId: txn)
+                    txn)
             } else {
                 let mxc = try await media.upload(
                     data, mimeType: mimeType, filename: filename)

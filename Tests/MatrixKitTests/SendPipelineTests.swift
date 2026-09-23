@@ -167,6 +167,44 @@ struct SendPipelineTests {
                 == .string("$target:x"))
     }
 
+    @Test("Encrypted attachment carries file and info through decrypt")
+    func encryptedAttachment() async throws {
+        let room = RoomId(unchecked: "!r:x")
+        let sender = FakeRoomSender()
+        let alice = RoomCrypto(sharer: FakeSharer(), sender: sender)
+        let content = MessageContent(
+            msgtype: .image,
+            body: "photo.png",
+            file: EncryptedFile(
+                url: "mxc://x/cipher",
+                key: AttachmentKey(key: "k"),
+                iv: "iv",
+                hashes: ["sha256": "h"]),
+            info: MediaInfo(
+                mimeType: "image/png", size: 4, width: 2, height: 2))
+        _ = try await alice.sendEncryptedContent(room, content)
+        let sent = await sender.sent
+        #expect(sent.count == 1)
+        // The outer event must be Megolm-wrapped: a bare m.room.message
+        // never decrypts in encrypted rooms.
+        #expect(sent[0].type == "m.room.encrypted")
+        let wire = MessageEvent(
+            type: sent[0].type,
+            eventId: EventId(unchecked: "$e:x"),
+            sender: UserId(unchecked: "@alice:x"),
+            roomId: room,
+            originServerTs: 1,
+            content: sent[0].content)
+        let decrypted = await alice.decryptRoomEvent(wire, in: room)
+        #expect(decrypted?.content["msgtype"] == .string("m.image"))
+        #expect(decrypted?.content["body"] == .string("photo.png"))
+        #expect(
+            decrypted?.content["file"]?["url"] == .string("mxc://x/cipher"))
+        #expect(
+            decrypted?.content["info"]?["mimetype"] == .string("image/png"))
+        #expect(decrypted?.content["info"]?["w"]?.intValue == 2)
+    }
+
     @Test("Encrypted echo confirms on sync like plaintext")
     func encryptedEchoConfirm() async {
         let room = RoomActor(roomId: RoomId(unchecked: "!r:x"))
