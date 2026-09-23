@@ -34,6 +34,10 @@ public enum MatrixError: Error, Sendable, Hashable {
     case noReachableDevices(String)
     /// 4S recovery failed (wrong recovery key/passphrase, missing secrets).
     case recoveryFailed(String)
+    /// A cooperative cancellation (`Task.cancel()`) stopped the operation
+    /// before it finished. Partial work (e.g. already-imported backup
+    /// sessions) is kept; retrying resumes from the start.
+    case cancelled
     /// HTTP 401 UIAA challenge — the operation needs interactive approval.
     /// Inspect `flows` for completable stages, then retry with `UIAAuth`.
     case uiaa(UIAAChallenge)
@@ -59,6 +63,7 @@ extension MatrixError: CustomStringConvertible {
         case .verificationFailed(let msg): return "Verification failed: \(msg)"
         case .noReachableDevices(let msg): return "No devices could be reached: \(msg)"
         case .recoveryFailed(let msg): return "Recovery failed: \(msg)"
+        case .cancelled: return "Operation cancelled"
         case .uiaa(let challenge):
             let stages = challenge.flows.map { $0.stages.joined(separator: "+") }
                 .joined(separator: ", ")
@@ -94,6 +99,9 @@ extension MatrixError {
     /// requests (paging chains, view teardown) should treat this as
     /// "never happened" instead of reporting it.
     public var isCancellation: Bool {
+        if case .cancelled = self {
+            return true
+        }
         if case .networkError(let message) = self {
             return message.localizedStandardContains("CancellationError")
         }

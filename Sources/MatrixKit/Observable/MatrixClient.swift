@@ -876,38 +876,96 @@ public final class MatrixClient {
     /// return the backup private key for the separate
     /// `restoreKeyBackup` step. Passphrase unlock is CPU-heavy by
     /// design — call `recover(withPassphrase:)` off the main actor.
-    public func recover(withRecoveryKey key: String) async throws(MatrixError) -> RecoveryOutcome {
-        let (storageKey, keyId) = try await secretStorage.unlock(recoveryKey: key)
-        return try await recover(storageKey: storageKey, keyId: keyId)
+    public func recover(
+        withRecoveryKey key: String,
+        progress: (@Sendable (KeyFetchProgress) async -> Void)? = nil
+    ) async throws(MatrixError) -> RecoveryOutcome {
+        do {
+            await progress?(.init(phase: .unlocking))
+            let (storageKey, keyId) = try await secretStorage.unlock(recoveryKey: key)
+            return try await recover(storageKey: storageKey, keyId: keyId, progress: progress)
+        } catch {
+            try rethrowAsCancelledIfCancelled(error)
+        }
     }
 
     /// Recover 4S secrets with the account passphrase. See
     /// `recover(withRecoveryKey:)`; prefer a detached task.
-    public func recover(withPassphrase passphrase: String) async throws(MatrixError) -> RecoveryOutcome {
-        let (storageKey, keyId) = try await secretStorage.unlock(passphrase: passphrase)
-        return try await recover(storageKey: storageKey, keyId: keyId)
+    public func recover(
+        withPassphrase passphrase: String,
+        progress: (@Sendable (KeyFetchProgress) async -> Void)? = nil
+    ) async throws(MatrixError) -> RecoveryOutcome {
+        do {
+            await progress?(.init(phase: .unlocking))
+            let (storageKey, keyId) = try await secretStorage.unlock(passphrase: passphrase)
+            return try await recover(storageKey: storageKey, keyId: keyId, progress: progress)
+        } catch {
+            try rethrowAsCancelledIfCancelled(error)
+        }
+    }
+
+    /// Report task cancellation as `.cancelled` instead of the raw
+    /// failure: the transport wraps `CancellationError` in
+    /// `.networkError`, and callers cancelling `restoreKeyBackup` or
+    /// `recover` branch on the stable case, not message sniffing.
+    /// `Never` return keeps `catch` sites to one line; a non-cancelled
+    /// error is rethrown unchanged.
+    private func rethrowAsCancelledIfCancelled(_ error: any Error) throws(MatrixError) -> Never {
+        if Task.isCancelled || error is CancellationError {
+            throw MatrixError.cancelled
+        }
+        if let matrixError = error as? MatrixError {
+            if matrixError.isCancellation {
+                throw MatrixError.cancelled
+            }
+            throw matrixError
+        }
+        // Unreachable: every throwing call above is typed
+        // `throws(MatrixError)`. Wrap rather than drop, so a future
+        // untyped throw still surfaces with its message.
+        throw MatrixError.networkError(String(describing: error))
     }
 
     /// Download and import every backed-up megolm session. Separate
     /// from `recover` — restores are large and belong behind their own
     /// progress UI. Returns the number of sessions imported.
+    /// Cooperative cancellation: `Task.cancel()` stops the import loop
+    /// (already-imported sessions are kept) and surfaces as
+    /// `MatrixError.cancelled`. An in-flight download aborts with the
+    /// task when the transport honors cancellation, otherwise it
+    /// reports `.cancelled` as soon as the download returns.
     @discardableResult
-    public func restoreKeyBackup(privateKey: Data) async throws(MatrixError) -> Int {
-        guard let info = try await backup.backupInfo(), let version = info.version else {
-            throw MatrixError.recoveryFailed("No key backup on this account")
+    public func restoreKeyBackup(
+        privateKey: Data,
+        progress: (@Sendable (KeyFetchProgress) async -> Void)? = nil
+    ) async throws(MatrixError) -> Int {
+        do {
+            guard let info = try await backup.backupInfo(), let version = info.version else {
+                throw MatrixError.recoveryFailed("No key backup on this account")
+            }
+            await progress?(.init(phase: .fetching))
+            let sessions = try await backup.downloadSessions(
+                version: version, privateKey: privateKey)
+            if Task.isCancelled { throw MatrixError.cancelled }
+            for (index, session) in sessions.enumerated() {
+                if Task.isCancelled { throw MatrixError.cancelled }
+                try await roomCrypto.importSession(
+                    roomId: session.roomId, sessionId: session.sessionId,
+                    export: session.export)
+                await progress?(
+                    .init(phase: .importing, completed: index + 1, total: sessions.count))
+            }
+            if Task.isCancelled { throw MatrixError.cancelled }
+            await progress?(
+                .init(phase: .finishing, completed: sessions.count, total: sessions.count))
+            // Imported keys alone change nothing on screen: stored
+            // ciphertext must be re-run through the decryptor so the
+            // timeline rebuilds with the new sessions.
+            _ = await retryTimelineDecryption()
+            return sessions.count
+        } catch {
+            try rethrowAsCancelledIfCancelled(error)
         }
-        let sessions = try await backup.downloadSessions(
-            version: version, privateKey: privateKey)
-        for session in sessions {
-            try await roomCrypto.importSession(
-                roomId: session.roomId, sessionId: session.sessionId,
-                export: session.export)
-        }
-        // Imported keys alone change nothing on screen: stored
-        // ciphertext must be re-run through the decryptor so the
-        // timeline rebuilds with the new sessions.
-        _ = await retryTimelineDecryption()
-        return sessions.count
     }
 
     /// Ask a peer device for the `m.megolm_backup.v1` private key
@@ -927,49 +985,68 @@ public final class MatrixClient {
     /// cross-signing private keys, self-signs this device so the
     /// recovery key verifies the session directly, and returns the
     /// backup private key for the separate `restoreKeyBackup` step.
+    /// Cooperative cancellation works between the sequential secret
+    /// fetches and surfaces as `MatrixError.cancelled` (see
+    /// `restoreKeyBackup`).
     public func recover(
-        storageKey: Data, keyId: String
+        storageKey: Data, keyId: String,
+        progress: (@Sendable (KeyFetchProgress) async -> Void)? = nil
     ) async throws(MatrixError) -> RecoveryOutcome {
         // Sequential: `async let` erases typed throws to `any Error`.
-        let masterKey = try await secretStorage.secret(
-            SecretName.master, keyId: keyId, storageKey: storageKey)
-        let selfKey = try await secretStorage.secret(
-            SecretName.selfSigning, keyId: keyId, storageKey: storageKey)
-        let userKey = try await secretStorage.secret(
-            SecretName.userSigning, keyId: keyId, storageKey: storageKey)
-        let backupKey = try await secretStorage.secret(
-            "m.megolm_backup.v1", keyId: keyId, storageKey: storageKey)
-        var outcome = RecoveryOutcome(crossSigningImported: false)
-        if let masterKey, let selfKey, let userKey {
-            try await crossSigning.importPrivateKeys(
-                master: masterKey, selfSigning: selfKey, userSigning: userKey)
-            outcome.crossSigningImported = true
-            // Persist immediately: without this the keys live only in
-            // memory and the session is unverified again after restart
-            // (the `m.secret.send` path persists on receipt, but
-            // recovery never went through it).
-            guard await secrets.persist() else {
-                throw MatrixError.recoveryFailed(
-                    "Keys recovered but could not be saved on this device")
+        do {
+            if Task.isCancelled { throw MatrixError.cancelled }
+            await progress?(.init(phase: .fetching, total: 4))
+            let masterKey = try await secretStorage.secret(
+                SecretName.master, keyId: keyId, storageKey: storageKey)
+            await progress?(.init(phase: .fetching, completed: 1, total: 4))
+            if Task.isCancelled { throw MatrixError.cancelled }
+            let selfKey = try await secretStorage.secret(
+                SecretName.selfSigning, keyId: keyId, storageKey: storageKey)
+            await progress?(.init(phase: .fetching, completed: 2, total: 4))
+            if Task.isCancelled { throw MatrixError.cancelled }
+            let userKey = try await secretStorage.secret(
+                SecretName.userSigning, keyId: keyId, storageKey: storageKey)
+            await progress?(.init(phase: .fetching, completed: 3, total: 4))
+            if Task.isCancelled { throw MatrixError.cancelled }
+            let backupKey = try await secretStorage.secret(
+                "m.megolm_backup.v1", keyId: keyId, storageKey: storageKey)
+            await progress?(.init(phase: .fetching, completed: 4, total: 4))
+            if Task.isCancelled { throw MatrixError.cancelled }
+            await progress?(.init(phase: .finishing))
+            var outcome = RecoveryOutcome(crossSigningImported: false)
+            if let masterKey, let selfKey, let userKey {
+                try await crossSigning.importPrivateKeys(
+                    master: masterKey, selfSigning: selfKey, userSigning: userKey)
+                outcome.crossSigningImported = true
+                // Persist immediately: without this the keys live only in
+                // memory and the session is unverified again after restart
+                // (the `m.secret.send` path persists on receipt, but
+                // recovery never went through it).
+                guard await secrets.persist() else {
+                    throw MatrixError.recoveryFailed(
+                        "Keys recovered but could not be saved on this device")
+                }
             }
+            if let backupKey, let privateKey = Primitives.base64UnpaddedDecode(backupKey) {
+                outcome.backupPrivateKey = privateKey
+                // Hold the key in memory so this device can answer peers'
+                // `m.megolm_backup.v1` share requests (request-driven only —
+                // never persisted).
+                await secrets.cacheBackupKey(privateKey)
+            }
+            if outcome.crossSigningImported, let userId, let deviceId {
+                // Unlike the opportunistic heal in
+                // `refreshVerificationState` (which swallows upload
+                // failures), this propagates: a failed self-signature
+                // surfaces as an error, not a silent "still unverified".
+                try await crossSigning.signDevice(
+                    userId: userId, deviceId: deviceId)
+            }
+            await refreshVerificationState()
+            return outcome
+        } catch {
+            try rethrowAsCancelledIfCancelled(error)
         }
-        if let backupKey, let privateKey = Primitives.base64UnpaddedDecode(backupKey) {
-            outcome.backupPrivateKey = privateKey
-            // Hold the key in memory so this device can answer peers'
-            // `m.megolm_backup.v1` share requests (request-driven only —
-            // never persisted).
-            await secrets.cacheBackupKey(privateKey)
-        }
-        if outcome.crossSigningImported, let userId, let deviceId {
-            // Unlike the opportunistic heal in
-            // `refreshVerificationState` (which swallows upload
-            // failures), this propagates: a failed self-signature
-            // surfaces as an error, not a silent "still unverified".
-            try await crossSigning.signDevice(
-                userId: userId, deviceId: deviceId)
-        }
-        await refreshVerificationState()
-        return outcome
     }
 
     /// Send encrypted content: share the room's Megolm session

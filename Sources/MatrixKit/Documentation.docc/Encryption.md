@@ -77,9 +77,9 @@ its README for the protocol and fixture-harvesting workflow.
 - ``MatrixClient/sendEncryptedContent(_:_:transactionId:)``
 - ``MatrixClient/shareRoomKey(_:)``
 - ``MatrixClient/retryTimelineDecryption()``
-- ``MatrixClient/recover(withRecoveryKey:)``
-- ``MatrixClient/recover(withPassphrase:)``
-- ``MatrixClient/restoreKeyBackup(privateKey:)``
+- ``MatrixClient/recover(withRecoveryKey:progress:)``
+- ``MatrixClient/recover(withPassphrase:progress:)``
+- ``MatrixClient/restoreKeyBackup(privateKey:progress:)``
 - ``MatrixClient/requestBackupKey(from:deviceId:)``
 - ``MatrixClient/encryptionStatus()``
 - ``MatrixClient/hasDevicesToVerifyAgainst()``

@@ -289,3 +289,37 @@ public struct RecoveryOutcome: Hashable, Sendable {
         self.backupPrivateKey = backupPrivateKey
     }
 }
+
+/// A progress snapshot emitted while `MatrixClient.restoreKeyBackup`
+/// or `MatrixClient.recover` fetch and import keys. Totals are known
+/// only once the work is enumerated (importing backed-up sessions),
+/// so `total` is nil — and the snapshot indeterminate — until then.
+public struct KeyFetchProgress: Sendable {
+    /// Which stage the operation is in.
+    public enum Phase: String, Sendable, Hashable {
+        /// Unlocking 4S secret storage (recovery key or passphrase).
+        case unlocking
+        /// Fetching secrets or downloading backed-up sessions.
+        case fetching
+        /// Importing sessions or keys into the local store.
+        case importing
+        /// Re-running timeline decryption with the new keys.
+        case finishing
+    }
+
+    public var phase: Phase
+    public var completed: Int
+    public var total: Int?
+
+    public init(phase: Phase, completed: Int = 0, total: Int? = nil) {
+        self.phase = phase
+        self.completed = completed
+        self.total = total
+    }
+
+    /// Determinate fraction in 0...1, or nil while the total is unknown.
+    public var fraction: Double? {
+        guard let total, total > 0 else { return nil }
+        return min(1, Double(completed) / Double(total))
+    }
+}

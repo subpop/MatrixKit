@@ -33,10 +33,20 @@ struct MatrixErrorTests {
             .serverError(code: "M_X", message: "y", retryAfter: nil),
             .rateLimited(retryAfter: nil), .unknownToken,
             .unexpectedStatus(418, body: nil), .syncFailed("x"),
-            .noReachableDevices("x"),
+            .noReachableDevices("x"), .cancelled,
         ]
         for error in errors {
             #expect(!error.description.isEmpty)
         }
+    }
+
+    @Test("Cancelled reads as cancellation, never as failure")
+    func cancelled() {
+        #expect(MatrixError.cancelled.isCancellation)
+        #expect(!MatrixError.cancelled.isRetryable)
+        #expect(
+            MatrixError.networkError("cancelled: \(CancellationError())")
+                .isCancellation)
+        #expect(!MatrixError.networkError("boom").isCancellation)
     }
 }

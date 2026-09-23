@@ -241,4 +241,12 @@ struct SecretStorageTests {
             Issue.record("wrong error: \(error)")
         }
     }
+
+    @Test("key fetch progress is indeterminate until the total is known")
+    func keyFetchProgressFraction() {
+        #expect(KeyFetchProgress(phase: .fetching).fraction == nil)
+        #expect(KeyFetchProgress(phase: .importing, total: 0).fraction == nil)
+        #expect(KeyFetchProgress(phase: .importing, completed: 1, total: 4).fraction == 0.25)
+        #expect(KeyFetchProgress(phase: .finishing, completed: 4, total: 4).fraction == 1)
+    }
 }
