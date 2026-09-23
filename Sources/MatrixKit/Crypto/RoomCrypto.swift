@@ -186,6 +186,7 @@ public actor RoomCrypto {
     @discardableResult
     public func sendEncryptedContent(
         _ roomId: RoomId, _ content: any Encodable & Sendable,
+        deviceId: DeviceId? = nil,
         transactionId: TransactionId = .random()
     ) async throws(MatrixError) -> EventId {
         var session = outbound[roomId.value] ?? MegolmSession.create()
@@ -246,6 +247,11 @@ public actor RoomCrypto {
         ]
         if let senderKey = try? await sharer.identityKey() {
             content["sender_key"] = .string(senderKey)
+        }
+        // `device_id` is required on `m.room.encrypted` Megolm events:
+        // without it recipients cannot parse the envelope.
+        if let deviceId {
+            content["device_id"] = .string(deviceId.value)
         }
         let eventId = try await sender.sendEvent(
             roomId, eventType: Self.roomEncryptedType, content: content,

@@ -1065,7 +1065,8 @@ public final class MatrixClient {
             roomId: roomId, users: Array(members.keys),
             excludingDevice: ownDevice)
         return try await roomCrypto.sendEncryptedContent(
-            roomId, content, transactionId: transactionId)
+            roomId, content, deviceId: ownDevice,
+            transactionId: transactionId)
     }
 
     /// (Re-)share the room's Megolm session with all joined members,

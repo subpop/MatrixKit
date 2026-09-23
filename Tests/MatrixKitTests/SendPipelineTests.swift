@@ -182,12 +182,16 @@ struct SendPipelineTests {
                 hashes: ["sha256": "h"]),
             info: MediaInfo(
                 mimeType: "image/png", size: 4, width: 2, height: 2))
-        _ = try await alice.sendEncryptedContent(room, content)
+        _ = try await alice.sendEncryptedContent(
+            room, content, deviceId: DeviceId("ALICE"))
         let sent = await sender.sent
         #expect(sent.count == 1)
         // The outer event must be Megolm-wrapped: a bare m.room.message
         // never decrypts in encrypted rooms.
         #expect(sent[0].type == "m.room.encrypted")
+        // The envelope carries the sender's device: recipients cannot
+        // parse `m.room.encrypted` without it.
+        #expect(sent[0].content["device_id"] == .string("ALICE"))
         let wire = MessageEvent(
             type: sent[0].type,
             eventId: EventId(unchecked: "$e:x"),
