@@ -142,50 +142,61 @@ public actor MediaClient {
     }
 
     /// Verify the hash and decrypt file bytes (pure).
+    ///
+    /// Counter width follows the file dict's `v` label (64-bit for v1/v2,
+    /// full-block for v0), matching `matrix-encrypt-attachment`.
     public static func decryptFile(
         _ data: Data, file: EncryptedFile
     ) throws(MatrixError) -> Data {
         guard
             let key = Primitives.base64URLDecode(file.key.key), key.count == 32,
-            let iv = Primitives.base64URLDecode(file.iv), iv.count == 16
+            let iv = Primitives.base64UnpaddedDecode(file.iv), iv.count == 16
         else {
             throw .encodingError("Encrypted file has a malformed key or IV")
         }
         if let expectedHash = file.hashes["sha256"],
-            let expected = Primitives.base64URLDecode(expectedHash),
+            let expected = Primitives.base64UnpaddedDecode(expectedHash),
             !Primitives.constantTimeEqual(Primitives.sha256(data), expected)
         {
             throw .encodingError("Encrypted file hash mismatch")
         }
+        let counterBits = (file.version == "v1" || file.version == "v2") ? 64 : 128
         do {
-            return try AESCTR.decrypt(key: key, iv: iv, ciphertext: data)
+            return try AESCTR.decrypt(
+                key: key, iv: iv, ciphertext: data, counterBits: counterBits)
         } catch {
             throw .encodingError("Cannot decrypt file: \(error)")
         }
     }
 
-    /// Encrypt bytes for upload: returns the ciphertext plus a file dict
-    /// without URL (the caller uploads the ciphertext, then sets `url`).
+    /// Encrypt bytes for upload (attachment protocol v2): a random
+    /// 256-bit key plus a 16-byte counter block whose first 8 bytes are
+    /// random and whose low 8 bytes are zero. The iv/hash fields use
+    /// standard unpadded base64 like the reference
+    /// `matrix-encrypt-attachment`; only the JWK `k` is base64url.
+    /// Returns the ciphertext plus a file dict without URL (the caller
+    /// uploads the ciphertext, then sets `url`).
     public static func encryptFile(_ data: Data) throws(MatrixError) -> (
         ciphertext: Data, key: AttachmentKey, iv: String, hash: String
     ) {
         var keyBytes = [UInt8](repeating: 0, count: 32)
-        var ivBytes = [UInt8](repeating: 0, count: 16)
+        var nonceBytes = [UInt8](repeating: 0, count: 8)
         for index in keyBytes.indices { keyBytes[index] = UInt8.random(in: 0...255) }
-        for index in ivBytes.indices { ivBytes[index] = UInt8.random(in: 0...255) }
+        for index in nonceBytes.indices { nonceBytes[index] = UInt8.random(in: 0...255) }
         let key = Data(keyBytes)
-        let iv = Data(ivBytes)
+        let counter = Data(nonceBytes) + Data(repeating: 0, count: 8)
         let ciphertext: Data
         do {
-            ciphertext = try AESCTR.encrypt(key: key, iv: iv, plaintext: data)
+            ciphertext = try AESCTR.encrypt(
+                key: key, iv: counter, plaintext: data, counterBits: 64)
         } catch {
             throw .encodingError("Cannot encrypt file: \(error)")
         }
         return (
             ciphertext,
             AttachmentKey(key: Primitives.base64URLEncode(key)),
-            Primitives.base64URLEncode(iv),
-            Primitives.base64URLEncode(Primitives.sha256(ciphertext)))
+            Primitives.base64UnpaddedEncode(counter),
+            Primitives.base64UnpaddedEncode(Primitives.sha256(ciphertext)))
     }
 
     /// Encrypt and upload bytes, returning the completed file dict.

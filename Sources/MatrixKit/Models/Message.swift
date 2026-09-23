@@ -304,11 +304,12 @@ public struct EncryptedFile: Hashable, Sendable, Codable {
     public var url: String
     /// Decryption key.
     public var key: AttachmentKey
-    /// Initialization vector (base64url, no padding).
+    /// Counter block (standard base64, no padding): 16 bytes on the wire.
     public var iv: String
-    /// Integrity hashes (`sha256` of the ciphertext, base64url).
+    /// Integrity hashes (`sha256` of the ciphertext, standard base64).
     public var hashes: [String: String]
-    /// Key version (always `v2` here).
+    /// Attachment protocol version (`v0`/`v1`/`v2`). Absent on the wire
+    /// means v0; counter width follows the label (64-bit for v1/v2).
     public var version: String
 
     public init(
@@ -323,6 +324,15 @@ public struct EncryptedFile: Hashable, Sendable, Codable {
         self.iv = iv
         self.hashes = hashes
         self.version = version
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        url = try container.decode(String.self, forKey: .url)
+        key = try container.decode(AttachmentKey.self, forKey: .key)
+        iv = try container.decode(String.self, forKey: .iv)
+        hashes = try container.decode([String: String].self, forKey: .hashes)
+        version = try container.decodeIfPresent(String.self, forKey: .version) ?? "v0"
     }
 
     private enum CodingKeys: String, CodingKey {
