@@ -297,6 +297,34 @@ public actor RoomActor {
         notify(.stateChanged)
     }
 
+    /// Merge member profiles fetched out of band (e.g. the `/members`
+    /// response backing `roomDetails()`). Unknown users are adopted; for
+    /// known users only previously-missing profile fields are filled in
+    /// — sync state stays authoritative for membership. Publishes like a
+    /// member change, so views re-resolve display names.
+    public func mergeMemberProfiles(_ profiles: [UserId: MemberContent]) {
+        var touched = false
+        for (userId, fetched) in profiles {
+            guard var existing = members[userId] else {
+                members[userId] = fetched
+                touched = true
+                continue
+            }
+            if existing.displayname == nil, let displayname = fetched.displayname {
+                existing.displayname = displayname
+                touched = true
+            }
+            if existing.avatarUrl == nil, let avatarUrl = fetched.avatarUrl {
+                existing.avatarUrl = avatarUrl
+                touched = true
+            }
+            members[userId] = existing
+        }
+        guard touched else { return }
+        notify(.membersChanged)
+        notify(.stateChanged)
+    }
+
     /// Adopt fetched hierarchy rows for this space (overwrites), so the
     /// detail view's next open renders from the snapshot without a network
     /// round trip. Publishes like a state change.
