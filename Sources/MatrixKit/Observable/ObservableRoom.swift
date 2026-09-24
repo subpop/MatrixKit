@@ -715,8 +715,18 @@ public final class ObservableRoom {
         let memberInfos = try await rooms.members(roomId)
         // Only active members belong in the member list: joined users plus
         // pending invites. Banned, departed, and knocking users are excluded.
-        let members = memberInfos
-            .filter { $0.content.membership == .join || $0.content.membership == .invite }
+        let activeMemberInfos = memberInfos.filter {
+            $0.content.membership == .join || $0.content.membership == .invite
+        }
+        // Feed the fetched profiles back into the store so the sync-cached
+        // member map (timeline rendering, profile healing) converges with
+        // the list below instead of diverging from it.
+        await room.mergeMemberProfiles(
+            Dictionary(
+                uniqueKeysWithValues: activeMemberInfos.map {
+                    (UserId(unchecked: $0.stateKey), $0.content)
+                }))
+        let members = activeMemberInfos
             .map { info in
             let userId = UserId(unchecked: info.stateKey)
             let level = powerContent.map {
