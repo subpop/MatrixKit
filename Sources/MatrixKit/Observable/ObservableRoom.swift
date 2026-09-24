@@ -129,10 +129,14 @@ public final class ObservableRoom {
     /// Senders with an in-flight profile heal (dedupe across refreshes).
     @ObservationIgnored
     private var pendingProfileFetches: Set<UserId> = []
-    /// Senders whose profile heal returned nothing. Never retried: an
-    /// empty profile stays empty until sync state says otherwise.
+    /// Senders whose profile heal returned nothing, with the time of the
+    /// last attempt. Retried after a cooldown: an empty profile may
+    /// simply mean the user hasn't set one yet (e.g. a brand-new
+    /// account), so a permanent blacklist would stick until relaunch.
     @ObservationIgnored
-    private var failedProfileFetches: Set<UserId> = []
+    private var failedProfileFetches: [UserId: Date] = [:]
+    /// Minimum delay between profile-heal attempts for the same sender.
+    private static let profileHealRetryInterval: TimeInterval = 5 * 60
     /// Decryptor for paginated history, forwarded to the timeline and
     /// any event-focus window. Set by `MatrixClient` after
     /// `configureEncryption()`.
@@ -608,17 +612,21 @@ public final class ObservableRoom {
     private func healUnknownSenders() async {
         guard let profileFetcher else { return }
         let senders = Set((await room.timeline).map(\.sender))
+        let now = Date()
         for sender in senders where memberDetails[sender] == nil {
-            guard
-                !pendingProfileFetches.contains(sender),
-                !failedProfileFetches.contains(sender)
-            else { continue }
+            guard !pendingProfileFetches.contains(sender) else { continue }
+            if let lastFailure = failedProfileFetches[sender],
+                now.timeIntervalSince(lastFailure) < Self.profileHealRetryInterval
+            {
+                continue
+            }
+            failedProfileFetches.removeValue(forKey: sender)
             pendingProfileFetches.insert(sender)
             Task { [weak self] in
                 guard let self else { return }
                 defer { pendingProfileFetches.remove(sender) }
                 guard let content = await profileFetcher(sender) else {
-                    failedProfileFetches.insert(sender)
+                    failedProfileFetches[sender] = Date()
                     return
                 }
                 await room.adoptMember(sender, content: content)
