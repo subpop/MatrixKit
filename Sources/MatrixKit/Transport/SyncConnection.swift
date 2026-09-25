@@ -60,7 +60,6 @@ public actor SyncConnection {
                     )
                     cursor = response.nextBatch
                     backoffSeconds = 1
-                    logger.debug("Sent sync")
                     continuation.yield(response)
                 } catch let error as MatrixError {
                     if Task.isCancelled { break }

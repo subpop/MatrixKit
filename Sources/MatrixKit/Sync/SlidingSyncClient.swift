@@ -14,7 +14,8 @@ public actor SlidingSyncClient {
     /// Default wire path (MSC4186 unstable prefix, as served by Synapse).
     /// Injectable via `init` so a stabilized path (or test double) can
     /// replace it.
-    public static let defaultEndpointPath = "/_matrix/client/unstable/org.matrix.simplified_msc3575/sync"
+    public static let defaultEndpointPath =
+        "/_matrix/client/unstable/org.matrix.simplified_msc3575/sync"
 
     /// Default sliding window: first 20 rooms with name/avatar/topic/
     /// encryption/space-graph state and 10 timeline events each.
@@ -213,7 +214,6 @@ public actor SlidingSyncClient {
         var delta = SlidingSyncResponseParser.parse(response)
         delta = await applySyncCryptoHooks(cryptoHooks, to: delta)
         await store.applySliding(delta)
-        logger.debug("Sent sliding sync")
         return delta
     }
 }
