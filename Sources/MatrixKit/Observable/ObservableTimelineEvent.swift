@@ -293,8 +293,11 @@ public final class ObservableTimelineEvent {
     }
 
     /// Whether this event is an `m.replace` edit.
+    ///
+    /// Detected from the wire-shape relation rather than `messageContent`:
+    /// edits carry no `msgtype`, so they never decode as `MessageContent`.
     static func isEdit(_ event: MessageEvent) -> Bool {
-        event.messageContent?.relatesTo?.relType == .replacement
+        event.wireRelation?.relType == .replacement
     }
 
     /// Decode the replacement content of an `m.replace` edit.

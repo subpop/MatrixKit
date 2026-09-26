@@ -414,6 +414,21 @@ public struct MessageEvent: Hashable, Sendable, Codable {
         return decoded
     }
 
+    /// Decode just the `m.relates_to` relation straight from the wire shape.
+    ///
+    /// Unlike `messageContent`, this does not require `msgtype`, so it also
+    /// resolves relations on `EditContent`: edits reuse the `m.room.message`
+    /// type but carry `body` + `m.new_content` + `m.relates_to` and no
+    /// `msgtype`, which never decodes as `MessageContent`.
+    public var wireRelation: RelatesTo? {
+        guard
+            let raw = content["m.relates_to"],
+            let data = try? JSONEncoder().encode(raw),
+            let decoded = try? JSONDecoder().decode(RelatesTo.self, from: data)
+        else { return nil }
+        return decoded
+    }
+
     /// Whether this event is a redaction.
     public var isRedacted: Bool {
         type == EventType.redaction.rawValue

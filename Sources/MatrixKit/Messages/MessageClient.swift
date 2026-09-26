@@ -361,6 +361,9 @@ public struct MessagesResponse: Hashable, Sendable, Codable {
 
 /// `m.room.message` content for an edit (`m.replace` + `m.new_content`).
 public struct EditContent: Hashable, Sendable, Codable {
+    /// Message type. Strict servers reject `m.room.message` events without
+    /// a top-level `msgtype`, so edits repeat the replacement's type here.
+    public var msgtype: MessageType
     /// Fallback text (` * <new body>`) for clients without edit support.
     public var body: String
     /// The replacement message content.
@@ -368,13 +371,20 @@ public struct EditContent: Hashable, Sendable, Codable {
     /// `m.replace` relation pointing at the edited event.
     public var relatesTo: RelatesTo
 
-    public init(body: String, newContent: MessageContent, relatesTo: RelatesTo) {
+    public init(
+        msgtype: MessageType = .text,
+        body: String,
+        newContent: MessageContent,
+        relatesTo: RelatesTo
+    ) {
+        self.msgtype = msgtype
         self.body = body
         self.newContent = newContent
         self.relatesTo = relatesTo
     }
 
     private enum CodingKeys: String, CodingKey {
+        case msgtype
         case body
         case newContent = "m.new_content"
         case relatesTo = "m.relates_to"

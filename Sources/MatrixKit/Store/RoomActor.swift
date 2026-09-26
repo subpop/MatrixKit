@@ -442,7 +442,7 @@ public actor RoomActor {
         timeline.filter {
             ($0.type == EventType.roomMessage.rawValue
                 || $0.type == EventType.sticker.rawValue)
-                && $0.messageContent?.relatesTo?.relType != .replacement
+                && $0.wireRelation?.relType != .replacement
                 && $0.sender != localUser
         }
     }
