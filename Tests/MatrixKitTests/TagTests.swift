@@ -39,12 +39,12 @@ struct TagTests {
     @Test("Tag names encode safely in paths", arguments: [
         ("m.favourite", "m.favourite"),
         ("u.custom+1", "u.custom+1"),
-        // `/` is urlPathAllowed so it survives unescaped — tag names are
-        // inside a single segment and must not contain it themselves.
-        ("u.work/secret", "u.work/secret"),
+        // `/` encodes: tag names sit inside a single segment and must
+        // not smuggle extra segments (see `matrixPathSegmentAllowed`).
+        ("u.work/secret", "u.work%2Fsecret"),
     ])
     func tagPathEncoding(tag: String, expected: String) {
         #expect(tag.pathSegmentEncoded == expected)
-        #expect(!tag.pathSegmentEncoded.contains("%2F"))
+        #expect(!tag.pathSegmentEncoded.contains("%25"))
     }
 }
