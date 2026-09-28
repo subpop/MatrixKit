@@ -26,8 +26,9 @@ public actor RoomCrypto {
     /// `receiveRoomKey` and `shareRequestedSession`).
     public static let forwardedRoomKeyType = "m.forwarded_room_key"
     /// To-device event type requesting a Megolm session (`m.room_key_request`).
-    /// Peers send these when they hold ciphertext for an unknown session;
-    /// see `keyRequestContent`, `onUnknownSession`, and `shareCurrentSession`.
+    /// Peers send these when they hold ciphertext for an unknown — or
+    /// held-but-too-old — session; see `keyRequestContent`,
+    /// `onUnknownSession`, and `shareCurrentSession`.
     public static let keyRequestType = "m.room_key_request"
 
     /// An undecryptable session sighting: room, session, and sender to
@@ -91,9 +92,10 @@ public actor RoomCrypto {
     /// Local user: own sends never trigger key requests (self-decrypt is
     /// registered at send time). Nil until `setLocalUserId` runs.
     private var localUserId: UserId?
-    /// Fired once per unknown inbound session (see `decryptRoomEvent`).
-    /// The owner builds an `m.room_key_request` via `keyRequestContent`
-    /// and sends it to `UnknownSession.sender`.
+    /// Fired once per unknown inbound session — and once per held-but-
+    /// too-old session (see `decryptRoomEvent`). The owner builds an
+    /// `m.room_key_request` via `keyRequestContent` and sends it to
+    /// `UnknownSession.sender`.
     private var onUnknownSession: (@Sendable (UnknownSession) -> Void)?
 
     public init(
@@ -592,7 +594,9 @@ public actor RoomCrypto {
     /// through unchanged; undecryptable events (no session, bad crypto,
     /// non-JSON plaintext) return nil — callers keep the ciphertext.
     /// Unknown sessions from other users fire `onUnknownSession` once per
-    /// session so the owner can send `m.room_key_request`.
+    /// session so the owner can send `m.room_key_request`. Held-but-
+    /// too-old sessions fire it too: a peer holding an earlier state (or
+    /// the key backup) can still fill the gap.
     public func decryptRoomEvent(
         _ event: MessageEvent, in roomId: RoomId
     ) async -> MessageEvent? {
@@ -648,6 +652,20 @@ public actor RoomCrypto {
                     "eventId": "\(event.eventId.value)",
                     "error": "\(error)",
                 ])
+            // A held-but-too-old session may still be recoverable: a
+            // peer holding an earlier state (or the key backup) can
+            // fill the gap, so surface one key request like an unknown
+            // session. Replays and bad crypto are local-only failures
+            // that no peer can fix — no request.
+            if event.sender != localUserId,
+                let cryptoError = error as? CryptoError,
+                cryptoError == .indexTooOld,
+                claimUnknownSession(roomId: roomId, sessionId: sessionId)
+            {
+                onUnknownSession?(UnknownSession(
+                    roomId: roomId, sessionId: sessionId,
+                    sender: event.sender))
+            }
             return nil
         }
         guard

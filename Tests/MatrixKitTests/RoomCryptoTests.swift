@@ -26,6 +26,15 @@ private func wirePair() throws -> (
     return (alice, bob, aliceSharer, aliceSender)
 }
 
+/// Minimal `m.room.message` plaintext for Megolm wire fixtures.
+private func megolmPayload(_ body: String, _ room: RoomId) throws -> Data {
+    try JSONSerialization.data(withJSONObject: [
+        "room_id": room.value,
+        "type": "m.room.message",
+        "content": ["body": body, "msgtype": "m.text"],
+    ])
+}
+
 @Suite("RoomCrypto")
 struct RoomCryptoTests {
     @Test("send produces m.room.encrypted with Megolm fields")
@@ -357,22 +366,15 @@ struct RoomCryptoTests {
         // One originator lineage: exports at 0/2/5 plus the index-0
         // wire. Exports capture the pre-wire counter, so each decrypts
         // its own index and everything after it.
-        func payload(_ body: String) throws -> Data {
-            try JSONSerialization.data(withJSONObject: [
-                "room_id": room.value,
-                "type": "m.room.message",
-                "content": ["body": body, "msgtype": "m.text"],
-            ])
-        }
         var origin = MegolmSession.create()
         let sessionId = origin.id
         let export0 = origin.export()
-        let wire0 = try origin.encrypt(payload("zero"))
-        _ = try origin.encrypt(payload("one"))
+        let wire0 = try origin.encrypt(megolmPayload("zero", room))
+        _ = try origin.encrypt(megolmPayload("one", room))
         let export2 = origin.export()
-        _ = try origin.encrypt(payload("two"))
-        _ = try origin.encrypt(payload("three"))
-        _ = try origin.encrypt(payload("four"))
+        _ = try origin.encrypt(megolmPayload("two", room))
+        _ = try origin.encrypt(megolmPayload("three", room))
+        _ = try origin.encrypt(megolmPayload("four", room))
         let export5 = origin.export()
         let blobFor: (UInt32) -> Data = {
             switch $0 {
@@ -419,6 +421,78 @@ struct RoomCryptoTests {
             (await receiver.decryptRoomEvent(wireEvent, in: room) != nil)
                 == c.expectDecryptZero,
             "row \(c.id)")
+    }
+
+    struct TooOldRequestCase: Sendable {
+        var id: String
+        var heldIndex: UInt32
+        var wireIndex: UInt32
+        var localSender: Bool
+        var expectRequests: Int
+    }
+
+    static let tooOldRequestCases: [TooOldRequestCase] = [
+        TooOldRequestCase(
+            id: "too-old fires once", heldIndex: 5, wireIndex: 2,
+            localSender: false, expectRequests: 1),
+        TooOldRequestCase(
+            id: "replay stays silent", heldIndex: 0, wireIndex: 0,
+            localSender: false, expectRequests: 0),
+        TooOldRequestCase(
+            id: "own too-old stays silent", heldIndex: 5, wireIndex: 2,
+            localSender: true, expectRequests: 0),
+        TooOldRequestCase(
+            id: "fresh decrypt stays silent", heldIndex: 0, wireIndex: 2,
+            localSender: false, expectRequests: 0),
+    ]
+
+    /// Held-but-too-old sessions request the key once (a peer holding
+    /// an earlier state can fill the gap); replays, own sends, and
+    /// successful decrypts never request.
+    @Test("too-old sessions request the key", arguments: tooOldRequestCases)
+    func tooOldRequestsKey(_ c: TooOldRequestCase) async throws {
+        let (room, aliceUser, _) = try roomFixture()
+        var origin = MegolmSession.create()
+        let sessionId = origin.id
+        let export0 = origin.export()
+        let wire0 = try origin.encrypt(megolmPayload("zero", room))
+        _ = try origin.encrypt(megolmPayload("one", room))
+        let wire2 = try origin.encrypt(megolmPayload("two", room))
+        _ = try origin.encrypt(megolmPayload("three", room))
+        _ = try origin.encrypt(megolmPayload("four", room))
+        let export5 = origin.export()
+        let receiver = RoomCrypto(
+            sharer: FakeSharer(), sender: FakeRoomSender())
+        if c.localSender {
+            await receiver.setLocalUserId(aliceUser)
+        }
+        let held = c.heldIndex == 0 ? export0 : export5
+        let stored = await receiver.receiveRoomKey(BasicEvent(
+            type: RoomCrypto.roomKeyType, sender: aliceUser,
+            content: [
+                "algorithm": .string(RoomCrypto.megolmAlgorithm),
+                "room_id": .string(room.value),
+                "session_id": .string(sessionId),
+                "session_key": .string(
+                    Primitives.base64UnpaddedEncode(held)),
+            ]))
+        #expect(stored != nil)
+        let box = SeenBox()
+        await receiver.setUnknownSessionHandler({ box.append($0) })
+        let wireData = c.wireIndex == 0 ? wire0 : wire2
+        let wireEvent = MessageEvent(
+            type: "m.room.encrypted", eventId: EventId(unchecked: "$e"),
+            sender: aliceUser, roomId: room, originServerTs: 1,
+            content: [
+                "session_id": .string(sessionId),
+                "ciphertext": .string(
+                    Primitives.base64UnpaddedEncode(wireData)),
+            ])
+        // Twice: the second sighting proves the once-per-session
+        // throttle (or the silent paths) rather than re-firing.
+        _ = await receiver.decryptRoomEvent(wireEvent, in: room)
+        _ = await receiver.decryptRoomEvent(wireEvent, in: room)
+        #expect(box.count == c.expectRequests, "row \(c.id)")
     }
 
     @Test("shareRequestedSession answers the requested session only")
