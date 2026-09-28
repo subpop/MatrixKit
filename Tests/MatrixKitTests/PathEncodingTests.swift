@@ -13,6 +13,9 @@ struct PathEncodingTests {
         (RoomAlias(unchecked: "#general:matrix.org").pathSegmentEncoded, "%23general%3Amatrix.org"),
         (UserId(unchecked: "@alice:matrix.org").pathSegmentEncoded, "@alice%3Amatrix.org"),
         ("m.room.message".pathSegmentEncoded, "m.room.message"),
+        // Unpadded-base64 IDs (Megolm session IDs) must not smuggle
+        // extra segments: `/` encodes, `+` stays literal in paths.
+        ("u4QjBwW1YIt8sdg+fxcuu6ZQLL/zqdHn71atV4kOiJw".pathSegmentEncoded, "u4QjBwW1YIt8sdg+fxcuu6ZQLL%2FzqdHn71atV4kOiJw"),
     ])
     func segmentEncoding(encoded: String, expected: String) {
         #expect(encoded == expected)

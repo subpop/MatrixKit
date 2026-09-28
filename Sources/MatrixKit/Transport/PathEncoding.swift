@@ -14,7 +14,8 @@ extension String {
     /// MatrixRTC target can build its own request paths with the same
     /// exactly-once semantics as core clients.
     public var pathSegmentEncoded: String {
-        addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? self
+        addingPercentEncoding(
+            withAllowedCharacters: .matrixPathSegmentAllowed) ?? self
     }
 
     /// Strict query key/value encoding: unreserved characters only, so
@@ -31,6 +32,18 @@ extension CharacterSet {
     static let matrixQueryAllowed: CharacterSet = {
         var set = CharacterSet.alphanumerics
         set.insert(charactersIn: "-._~")
+        return set
+    }()
+
+    /// Single path-segment set: `.urlPathAllowed` minus `/` (which must
+    /// encode as `%2F` so base64 IDs like Megolm session IDs cannot
+    /// smuggle extra segments into request paths) and minus `:` (kept
+    /// encoded as `%3A`: Foundation force-encodes it for the stock set,
+    /// and servers expect the encoded form). `+` stays literal: legal
+    /// in segments, unlike in queries.
+    static let matrixPathSegmentAllowed: CharacterSet = {
+        var set = CharacterSet.urlPathAllowed
+        set.remove(charactersIn: "/:")
         return set
     }()
 }
