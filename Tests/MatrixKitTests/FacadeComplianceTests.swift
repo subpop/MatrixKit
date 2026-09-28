@@ -608,6 +608,83 @@ struct FacadeComplianceTests {
         }
     }
 
+    @Test("Targeted backup fetch heals too-old sessions")
+    @MainActor
+    func backupHealsTooOld() async throws {
+        try await withHarness { harness in
+            let client = await client(harness)
+            await client.configureEncryption()
+            let room = RoomId(unchecked: "!room:test")
+            let bobUser = UserId(unchecked: "@bob:test")
+            func payload(_ body: String) throws -> Data {
+                try JSONSerialization.data(withJSONObject: [
+                    "room_id": room.value,
+                    "type": "m.room.message",
+                    "content": ["body": body, "msgtype": "m.text"],
+                ])
+            }
+            // One originator lineage: the backup holds index 0 while
+            // the client only ever receives the index-5 share.
+            var origin = MegolmSession.create()
+            let sessionId = origin.id
+            let exportEarly = origin.export()
+            let wireEarly = try origin.encrypt(payload("early"))
+            _ = try origin.encrypt(payload("one"))
+            _ = try origin.encrypt(payload("two"))
+            _ = try origin.encrypt(payload("three"))
+            _ = try origin.encrypt(payload("four"))
+            let exportLate = origin.export()
+            let privateKey = BackupCrypto.generatePrivateKey()
+            let publicKey = try BackupCrypto.publicKey(privateKey: privateKey)
+            let version = try await client.backup.createBackup(publicKey: publicKey)
+            try await client.backup.uploadSessions(
+                [(roomId: room, sessionId: sessionId, export: exportEarly)],
+                publicKey: publicKey, version: version)
+            await client.secrets.cacheBackupKey(privateKey)
+            await client.roomCrypto.receiveRoomKey(BasicEvent(
+                type: RoomCrypto.roomKeyType, sender: bobUser,
+                content: [
+                    "algorithm": .string(RoomCrypto.megolmAlgorithm),
+                    "room_id": .string(room.value),
+                    "session_id": .string(sessionId),
+                    "session_key": .string(
+                        Primitives.base64UnpaddedEncode(exportLate)),
+                ]))
+            let wire = MessageEvent(
+                type: "m.room.encrypted", eventId: EventId(unchecked: "$early"),
+                sender: bobUser, roomId: room, originServerTs: 1,
+                content: [
+                    "session_id": .string(sessionId),
+                    "ciphertext": .string(
+                        Primitives.base64UnpaddedEncode(wireEarly)),
+                ])
+            #expect(await client.roomCrypto.decryptRoomEvent(wire, in: room) == nil)
+            // Recovery runs async off the decrypt sighting: the backup
+            // fetch imports the early state, and the wire decrypts.
+            // Capture the healed event: a successful decrypt advances
+            // the ratchet, so re-decrypting the same wire afterwards
+            // correctly reports a replay.
+            final class HealedBox: @unchecked Sendable {
+                private let lock = NSLock()
+                private var event: MessageEvent?
+                func store(_ event: MessageEvent) {
+                    lock.withLock { self.event = event }
+                }
+                var value: MessageEvent? { lock.withLock { event } }
+            }
+            let healed = HealedBox()
+            await waitUntil("backup fetch heals the wire") {
+                guard let decrypted = await client.roomCrypto.decryptRoomEvent(
+                    wire, in: room)
+                else { return false }
+                healed.store(decrypted)
+                return true
+            }
+            #expect(healed.value?.content["body"] == .string("early"))
+            try? await client.transport.shutdown()
+        }
+    }
+
     @Test("Failed login shuts down and rethrows")
     @MainActor
     func loginFailure() async throws {

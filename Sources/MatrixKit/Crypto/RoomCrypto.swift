@@ -87,6 +87,10 @@ public actor RoomCrypto {
     /// Cleared for a session when its key arrives, so a later re-loss
     /// re-requests. Capped to bound memory on pathological timelines.
     private var requestedSessions: Set<String> = []
+    /// `"roomId|sessionId"` keys already tried against the key backup.
+    /// Never re-armed within a launch: backup content is static per
+    /// version, so a miss stays a miss. Capped like `requestedSessions`.
+    private var backupFetchAttempted: Set<String> = []
     /// `request_id`s already served, so duplicate key requests share once.
     private var servedRequestIds: Set<String> = []
     /// Local user: own sends never trigger key requests (self-decrypt is
@@ -153,6 +157,18 @@ public actor RoomCrypto {
         guard !servedRequestIds.contains(requestId) else { return false }
         servedRequestIds.insert(requestId)
         if servedRequestIds.count > 1000 { servedRequestIds.removeAll() }
+        return true
+    }
+
+    /// Record a backup-fetch attempt for a session, returning true when
+    /// first seen (the caller should try the download once). Check the
+    /// cached backup key first: without one the attempt is not
+    /// consumed, so a later 4S unlock still gets its chance.
+    func claimBackupFetch(roomId: RoomId, sessionId: String) -> Bool {
+        let key = "\(roomId.value)|\(sessionId)"
+        guard !backupFetchAttempted.contains(key) else { return false }
+        backupFetchAttempted.insert(key)
+        if backupFetchAttempted.count > 1000 { backupFetchAttempted.removeAll() }
         return true
     }
 

@@ -151,6 +151,13 @@ public actor SecretShare {
         heldBackupKey = key
     }
 
+    /// The cached backup private key, if 4S recovery (or a peer share)
+    /// provided one this launch. The client uses it for targeted
+    /// backup fetches of undecryptable sessions.
+    public func backupKey() -> Data? {
+        heldBackupKey
+    }
+
     // MARK: - Receive
 
     /// Feed one to-device event in. Commits answers, imports + persists

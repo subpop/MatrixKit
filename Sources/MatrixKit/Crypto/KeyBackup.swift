@@ -126,6 +126,10 @@ public actor KeyBackup {
     private let transport: MatrixTransport
     private let session: Session
 
+    /// Memoized backup version for the automatic recovery path (see
+    /// `cachedBackupVersion`). `.none` means unchecked.
+    private var backupVersionCache: String?? = nil
+
     public init(transport: MatrixTransport, session: Session) {
         self.transport = transport
         self.session = session
@@ -151,6 +155,18 @@ public actor KeyBackup {
         }
     }
 
+    /// Backup version for automatic recovery, memoized per launch so
+    /// every undecryptable session does not cost a `GET` (users without
+    /// a backup pay exactly one). Explicit version changes through this
+    /// actor refresh the memo; versions created elsewhere apply on the
+    /// next launch.
+    public func cachedBackupVersion() async throws(MatrixError) -> String? {
+        if let cached = backupVersionCache { return cached }
+        let version = try await backupInfo()?.version
+        backupVersionCache = version
+        return version
+    }
+
     /// Create a backup version for a backup public key. Returns the version.
     public func createBackup(publicKey: Data) async throws(MatrixError) -> String {
         struct Response: Decodable {
@@ -166,6 +182,7 @@ public actor KeyBackup {
             ],
             accessToken: try await token()
         )
+        backupVersionCache = response.version
         return response.version
     }
 
@@ -176,6 +193,7 @@ public actor KeyBackup {
             path: "/_matrix/client/v3/room_keys/version/\(version.pathSegmentEncoded)",
             accessToken: try await token()
         )
+        backupVersionCache = nil
     }
 
     // MARK: - Keys

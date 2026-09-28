@@ -675,37 +675,15 @@ public final class MatrixClient {
         var keyLogger = Logger(label: "MatrixKit.RoomCrypto")
         MatrixTransport.applyConfiguredLevel(to: &keyLogger)
         // Unknown sessions fire once per session (throttled in
-        // `RoomCrypto`): ask the sender for the key. The closure only
-        // captures actor references and values, so it stays `@Sendable`.
-        await roomCrypto.setUnknownSessionHandler({ [olm, deviceId, keyLogger] unknown in
-            Task {
-                guard let deviceId else { return }
-                let content = RoomCrypto.keyRequestContent(
-                    requestId: UUID().uuidString, deviceId: deviceId,
-                    roomId: unknown.roomId, sessionId: unknown.sessionId)
-                do {
-                    let ids = try await olm.deviceIds(for: unknown.sender)
-                    guard !ids.isEmpty else {
-                        keyLogger.warning(
-                            "RoomCrypto key request: no devices",
-                            metadata: ["user": "\(unknown.sender.value)"])
-                        return
-                    }
-                    try await olm.sendEncrypted(
-                        eventType: RoomCrypto.keyRequestType, content: content,
-                        to: unknown.sender, devices: ids.map { DeviceId($0) })
-                    keyLogger.debug(
-                        "RoomCrypto sent key request",
-                        metadata: [
-                            "user": "\(unknown.sender.value)",
-                            "sessionId": "\(unknown.sessionId.prefix(8))…",
-                        ])
-                } catch {
-                    keyLogger.warning(
-                        "RoomCrypto key request failed",
-                        metadata: ["error": "\(error)"])
-                }
-            }
+        // `RoomCrypto`): recover via backup fetch plus a key request
+        // to the sender. Recovery runs on the main actor; this
+        // sendable entry hops there so sync-time sightings stay
+        // fire-and-forget.
+        let recover: @Sendable (RoomCrypto.UnknownSession) -> Void = { unknown in
+            Task { await self.recoverSession(unknown) }
+        }
+        await roomCrypto.setUnknownSessionHandler({ [recover] unknown in
+            recover(unknown)
         })
         let hooks = SyncCryptoHooks(
             handleToDevice: { events in
@@ -734,6 +712,81 @@ public final class MatrixClient {
         timelineDecryptor = hooks.decryptRoomEvent
         for room in roomCache.values {
             await room.setTimelineDecryptor(hooks.decryptRoomEvent)
+        }
+    }
+
+    /// Recover one undecryptable session sighting: try a targeted key
+    /// backup fetch first (silent, once per session per launch), then
+    /// ask the sender for the key. Backup misses fall through to the
+    /// key request; both paths are throttled so pathological timelines
+    /// cannot spam the server or peers.
+    func recoverSession(_ unknown: RoomCrypto.UnknownSession) async {
+        var keyLogger = Logger(label: "MatrixKit.RoomCrypto")
+        MatrixTransport.applyConfiguredLevel(to: &keyLogger)
+        // Backup first: no peer traffic, and backups keep the earliest
+        // state per the server merge rules. The attempt is only
+        // consumed once a cached key exists, so a later 4S unlock
+        // still gets its chance on the next sighting.
+        if let backupKey = await secrets.backupKey(),
+            await roomCrypto.claimBackupFetch(
+                roomId: unknown.roomId, sessionId: unknown.sessionId)
+        {
+            do {
+                if let version = try await backup.cachedBackupVersion(),
+                    let export = try? await backup.downloadSession(
+                        roomId: unknown.roomId, sessionId: unknown.sessionId,
+                        version: version, privateKey: backupKey),
+                    try await roomCrypto.importSession(
+                        roomId: unknown.roomId, sessionId: unknown.sessionId,
+                        export: export)
+                {
+                    _ = await roomCache[unknown.roomId]?.retryDecryption()
+                    keyLogger.debug(
+                        "RoomCrypto recovered session from backup",
+                        metadata: [
+                            "sessionId": "\(unknown.sessionId.prefix(8))…",
+                        ])
+                } else {
+                    keyLogger.debug(
+                        "RoomCrypto backup fetch missed",
+                        metadata: [
+                            "sessionId": "\(unknown.sessionId.prefix(8))…",
+                        ])
+                }
+            } catch {
+                keyLogger.debug(
+                    "RoomCrypto backup fetch missed",
+                    metadata: [
+                        "sessionId": "\(unknown.sessionId.prefix(8))…",
+                        "error": "\(error)",
+                    ])
+            }
+        }
+        guard let deviceId else { return }
+        let content = RoomCrypto.keyRequestContent(
+            requestId: UUID().uuidString, deviceId: deviceId,
+            roomId: unknown.roomId, sessionId: unknown.sessionId)
+        do {
+            let ids = try await olm.deviceIds(for: unknown.sender)
+            guard !ids.isEmpty else {
+                keyLogger.warning(
+                    "RoomCrypto key request: no devices",
+                    metadata: ["user": "\(unknown.sender.value)"])
+                return
+            }
+            try await olm.sendEncrypted(
+                eventType: RoomCrypto.keyRequestType, content: content,
+                to: unknown.sender, devices: ids.map { DeviceId($0) })
+            keyLogger.debug(
+                "RoomCrypto sent key request",
+                metadata: [
+                    "user": "\(unknown.sender.value)",
+                    "sessionId": "\(unknown.sessionId.prefix(8))…",
+                ])
+        } catch {
+            keyLogger.warning(
+                "RoomCrypto key request failed",
+                metadata: ["error": "\(error)"])
         }
     }
 
