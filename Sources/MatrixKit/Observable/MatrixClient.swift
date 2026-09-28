@@ -754,6 +754,7 @@ public final class MatrixClient {
         }
         for event in decrypted
             where event.type == RoomCrypto.roomKeyType
+                || event.type == RoomCrypto.forwardedRoomKeyType
         {
             // A newly-shared session can unlock stored ciphertext in
             // that room — re-decrypt it immediately instead of leaving

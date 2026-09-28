@@ -11,7 +11,8 @@ import MatrixKitCrypto
 ///
 /// Wire-up: `MatrixClient.configureEncryption()` constructs this actor
 /// from its `olm` + `messages` clients and installs the sync hooks that
-/// route `m.room_key` to-device events here and decrypt timelines.
+/// route `m.room_key`/`m.forwarded_room_key` to-device events here and
+/// decrypt timelines.
 public actor RoomCrypto {
     /// Algorithm string for Megolm room events.
     public static let megolmAlgorithm = "m.megolm.v1.aes-sha2"
@@ -19,6 +20,11 @@ public actor RoomCrypto {
     public static let roomEncryptedType = "m.room.encrypted"
     /// To-device event type carrying a shared Megolm session.
     public static let roomKeyType = "m.room_key"
+    /// To-device event type carrying a forwarded Megolm session (spec
+    /// `m.forwarded_room_key`). Non-originators answer key requests
+    /// with this type; accepted on receipt like `m.room_key` (see
+    /// `receiveRoomKey` and `shareRequestedSession`).
+    public static let forwardedRoomKeyType = "m.forwarded_room_key"
     /// To-device event type requesting a Megolm session (`m.room_key_request`).
     /// Peers send these when they hold ciphertext for an unknown session;
     /// see `keyRequestContent`, `onUnknownSession`, and `shareCurrentSession`.
@@ -30,6 +36,20 @@ public actor RoomCrypto {
         public var roomId: RoomId
         public var sessionId: String
         public var sender: UserId
+    }
+
+    /// An inbound share as received, for byte-identical forwarding.
+    /// Re-sending the originator's bytes keeps their signature valid;
+    /// anything we re-encode ourselves (exports) is unsigned. Chain and
+    /// claimed keys are best-effort: direct `m.room_key` shares carry
+    /// no attribution, and to-device receipt drops the sender's device
+    /// key, so first-forwards legitimately send an empty chain (spec:
+    /// the chain is empty between the first two holders).
+    private struct ReceivedShare: Sendable {
+        var blob: Data
+        var chain: [String]
+        var claimedEd25519: String?
+        var senderKey: String?
     }
 
     private static let storeService = "MatrixKit.RoomCrypto"
@@ -44,6 +64,11 @@ public actor RoomCrypto {
     private var outbound: [String: MegolmSession] = [:]
     /// Inbound sessions by `"roomId|sessionId"`.
     private var inbound: [String: MegolmSession] = [:]
+    /// Original `session_key` blobs as received, by `"roomId|sessionId"`.
+    /// Served byte-identical on key requests (see
+    /// `shareRequestedSession`). In-memory only: after a restart the
+    /// export fallback applies.
+    private var receivedBlobs: [String: ReceivedShare] = [:]
     /// Room IDs whose current outbound session has been shared.
     /// Cleared by `rotateOutbound(_:)`; empty after launch (fresh
     /// outbound), so the first `ensureShared` re-shares post-restart.
@@ -396,26 +421,56 @@ public actor RoomCrypto {
     }
 
     /// Import a session export (e.g. decrypted from a key backup) into
-    /// the inbound map, persisting it like a received room key.
+    /// the inbound map, persisting it like a received room key. Keeps
+    /// the earliest-held state: arrivals at or beyond the held ratchet
+    /// position are ignored so a late share never regresses history.
+    /// Returns true when stored.
+    @discardableResult
     public func importSession(
         roomId: RoomId, sessionId: String, export: Data
-    ) async throws(MatrixError) {
+    ) async throws(MatrixError) -> Bool {
         guard let session = try? MegolmSession.importSessionKey(export) else {
             throw .encodingError("Cannot import session export for \(roomId.value)")
         }
-        inbound["\(roomId.value)|\(sessionId)"] = session
+        let key = "\(roomId.value)|\(sessionId)"
+        if let held = inbound[key], !isEarlier(arrival: session, than: held) {
+            logger?.debug(
+                "RoomCrypto ignoring superseded session import",
+                metadata: ["sessionId": "\(sessionId.prefix(8))…"])
+            return false
+        }
+        inbound[key] = session
         await persist()
+        return true
+    }
+
+    /// Whether an arriving session state decrypts strictly more history
+    /// than the held one (lower first message index). Missing counters
+    /// fail open toward storing: a key that cannot be compared is
+    /// safer kept than dropped.
+    private func isEarlier(arrival: MegolmSession, than held: MegolmSession) -> Bool {
+        guard
+            let arrivalFirst = arrival.firstMessageIndex,
+            let heldFirst = held.firstMessageIndex
+        else { return true }
+        return arrivalFirst < heldFirst
     }
 
     // MARK: - Receive
 
-    /// Import an `m.room_key` to-device event's session. Unknown event
-    /// types and malformed blobs are ignored (logged at debug).
-    /// Returns the room ID when a session was stored, so the caller can
-    /// re-run timeline decryption for that room.
+    /// Import an `m.room_key` or `m.forwarded_room_key` to-device
+    /// event's session. Unknown event types and malformed blobs are
+    /// ignored (logged at debug). Keeps the earliest-held state: a
+    /// share at or beyond the held ratchet position never regresses
+    /// history (see `isEarlier`). Returns the room ID when a session
+    /// was stored, so the caller can re-run timeline decryption for
+    /// that room; nil when ignored or superseded.
     @discardableResult
     public func receiveRoomKey(_ event: BasicEvent) async -> RoomId? {
-        guard event.type == Self.roomKeyType else { return nil }
+        guard
+            event.type == Self.roomKeyType
+                || event.type == Self.forwardedRoomKeyType
+        else { return nil }
         guard
             let algorithm = event.content["algorithm"]?.stringValue,
             algorithm == Self.megolmAlgorithm,
@@ -426,12 +481,37 @@ public actor RoomCrypto {
             let session = try? MegolmSession.importSessionKey(blob)
         else {
             logger?.debug(
-                "RoomCrypto ignoring malformed m.room_key",
-                metadata: ["sender": "\(event.sender?.value ?? "?")"])
+                "RoomCrypto ignoring malformed room key",
+                metadata: [
+                    "sender": "\(event.sender?.value ?? "?")",
+                    "type": "\(event.type)",
+                ])
             return nil
         }
-        inbound["\(roomId)|\(sessionId)"] = session
-        requestedSessions.remove("\(roomId)|\(sessionId)")
+        let mapKey = "\(roomId)|\(sessionId)"
+        // Re-arm key requests: a well-formed share answers the
+        // outstanding ask whether or not it improves our position, so
+        // the next undecryptable sighting asks again instead of
+        // staying silent when only late state has arrived so far.
+        requestedSessions.remove(mapKey)
+        if let held = inbound[mapKey], !isEarlier(arrival: session, than: held) {
+            logger?.debug(
+                "RoomCrypto ignoring superseded room key",
+                metadata: [
+                    "sender": "\(event.sender?.value ?? "?")",
+                    "sessionId": "\(sessionId.prefix(8))…",
+                    "type": "\(event.type)",
+                ])
+            return nil
+        }
+        inbound[mapKey] = session
+        receivedBlobs[mapKey] = ReceivedShare(
+            blob: blob,
+            chain: event.content["forwarding_curve25519_key_chain"]?
+                .arrayValue?.compactMap(\.stringValue) ?? [],
+            claimedEd25519: event.content["sender_claimed_ed25519_key"]?
+                .stringValue,
+            senderKey: event.content["sender_key"]?.stringValue)
         await persist()
         return RoomId(unchecked: roomId)
     }

@@ -303,6 +303,124 @@ struct RoomCryptoTests {
         #expect(shares.first { $0.user == bobUser.value }?.devices == ["BOB"])
     }
 
+    struct ReceiveOrderCase: Sendable {
+        var id: String
+        var heldIndex: UInt32?
+        var arrivalIndex: UInt32
+        var arrivalIsForwarded: Bool
+        var badAlgorithm: Bool
+        var expectStored: Bool
+        var expectDecryptZero: Bool
+    }
+
+    static let receiveOrderCases: [ReceiveOrderCase] = [
+        ReceiveOrderCase(
+            id: "first share stores", heldIndex: nil, arrivalIndex: 5,
+            arrivalIsForwarded: false, badAlgorithm: false,
+            expectStored: true, expectDecryptZero: false),
+        ReceiveOrderCase(
+            id: "earlier arrival replaces", heldIndex: 5, arrivalIndex: 0,
+            arrivalIsForwarded: false, badAlgorithm: false,
+            expectStored: true, expectDecryptZero: true),
+        ReceiveOrderCase(
+            id: "later arrival kept", heldIndex: 0, arrivalIndex: 5,
+            arrivalIsForwarded: false, badAlgorithm: false,
+            expectStored: false, expectDecryptZero: true),
+        ReceiveOrderCase(
+            id: "equal arrival kept", heldIndex: 2, arrivalIndex: 2,
+            arrivalIsForwarded: false, badAlgorithm: false,
+            expectStored: false, expectDecryptZero: false),
+        ReceiveOrderCase(
+            id: "forwarded first share stores", heldIndex: nil, arrivalIndex: 2,
+            arrivalIsForwarded: true, badAlgorithm: false,
+            expectStored: true, expectDecryptZero: false),
+        ReceiveOrderCase(
+            id: "forwarded earlier replaces", heldIndex: 5, arrivalIndex: 2,
+            arrivalIsForwarded: true, badAlgorithm: false,
+            expectStored: true, expectDecryptZero: false),
+        ReceiveOrderCase(
+            id: "forwarded later kept", heldIndex: 0, arrivalIndex: 2,
+            arrivalIsForwarded: true, badAlgorithm: false,
+            expectStored: false, expectDecryptZero: true),
+        ReceiveOrderCase(
+            id: "bad algorithm ignored", heldIndex: nil, arrivalIndex: 0,
+            arrivalIsForwarded: false, badAlgorithm: true,
+            expectStored: false, expectDecryptZero: false),
+    ]
+
+    /// Receives keep the earliest session state: a share at or beyond
+    /// the held ratchet position never regresses history, and both key
+    /// event types follow the same rule.
+    @Test("receiveRoomKey keeps the earliest session state", arguments: receiveOrderCases)
+    func receiveKeepsEarliest(_ c: ReceiveOrderCase) async throws {
+        let (room, aliceUser, _) = try roomFixture()
+        // One originator lineage: exports at 0/2/5 plus the index-0
+        // wire. Exports capture the pre-wire counter, so each decrypts
+        // its own index and everything after it.
+        func payload(_ body: String) throws -> Data {
+            try JSONSerialization.data(withJSONObject: [
+                "room_id": room.value,
+                "type": "m.room.message",
+                "content": ["body": body, "msgtype": "m.text"],
+            ])
+        }
+        var origin = MegolmSession.create()
+        let sessionId = origin.id
+        let export0 = origin.export()
+        let wire0 = try origin.encrypt(payload("zero"))
+        _ = try origin.encrypt(payload("one"))
+        let export2 = origin.export()
+        _ = try origin.encrypt(payload("two"))
+        _ = try origin.encrypt(payload("three"))
+        _ = try origin.encrypt(payload("four"))
+        let export5 = origin.export()
+        let blobFor: (UInt32) -> Data = {
+            switch $0 {
+            case 0: return export0
+            case 2: return export2
+            default: return export5
+            }
+        }
+        func shareContent(_ blob: Data) -> [String: AnyCodable] {
+            [
+                "algorithm": .string(RoomCrypto.megolmAlgorithm),
+                "room_id": .string(room.value),
+                "session_id": .string(sessionId),
+                "session_key": .string(
+                    Primitives.base64UnpaddedEncode(blob)),
+            ]
+        }
+        let receiver = RoomCrypto(
+            sharer: FakeSharer(), sender: FakeRoomSender())
+        if let held = c.heldIndex {
+            let first = await receiver.receiveRoomKey(BasicEvent(
+                type: RoomCrypto.roomKeyType, sender: aliceUser,
+                content: shareContent(blobFor(held))))
+            #expect(first != nil)
+        }
+        var arrival = shareContent(blobFor(c.arrivalIndex))
+        if c.badAlgorithm {
+            arrival["algorithm"] = .string("m.olm.v1.curve25519-aes-sha2")
+        }
+        let arrivalType = c.arrivalIsForwarded
+            ? RoomCrypto.forwardedRoomKeyType : RoomCrypto.roomKeyType
+        let result = await receiver.receiveRoomKey(BasicEvent(
+            type: arrivalType, sender: aliceUser, content: arrival))
+        #expect((result != nil) == c.expectStored, "row \(c.id)")
+        let wireEvent = MessageEvent(
+            type: "m.room.encrypted", eventId: EventId(unchecked: "$e0"),
+            sender: aliceUser, roomId: room, originServerTs: 1,
+            content: [
+                "session_id": .string(sessionId),
+                "ciphertext": .string(
+                    Primitives.base64UnpaddedEncode(wire0)),
+            ])
+        #expect(
+            (await receiver.decryptRoomEvent(wireEvent, in: room) != nil)
+                == c.expectDecryptZero,
+            "row \(c.id)")
+    }
+
     @Test("shareRequestedSession answers the requested session only")
     func shareRequested() async throws {
         let (room, _, bobUser) = try roomFixture()
