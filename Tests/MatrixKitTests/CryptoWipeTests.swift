@@ -48,11 +48,11 @@ struct CryptoWipeTests {
                 KeyStoreKey(service: "cross_signing", account: "@alice:x")))
         #expect(
             keys.contains(
-                KeyStoreKey(service: "device_identity", account: "@alice:x")))
+                KeyStoreKey(service: "device_identity", account: "@alice:x-A1")))
     }
 
-    @Test("device identities delete per user, across devices")
-    func deviceIdentityDeleteAll() async throws {
+    @Test("device identities delete per device, not per user")
+    func deviceIdentityDelete() async throws {
         let store = DeviceIdentityStore(keystore: InMemoryKeyStore())
         let alice = UserId(unchecked: "@alice:x")
         let bob = UserId(unchecked: "@bob:x")
@@ -61,9 +61,9 @@ struct CryptoWipeTests {
         try await store.save(backup, userId: alice, deviceId: DeviceId("A2"))
         try await store.save(backup, userId: bob, deviceId: DeviceId("B1"))
         #expect(await store.load(userId: alice, deviceId: DeviceId("A1")) != nil)
-        try await store.deleteAll(userId: alice)
+        try await store.delete(userId: alice, deviceId: DeviceId("A1"))
         #expect(await store.load(userId: alice, deviceId: DeviceId("A1")) == nil)
-        #expect(await store.load(userId: alice, deviceId: DeviceId("A2")) == nil)
+        #expect(await store.load(userId: alice, deviceId: DeviceId("A2")) != nil)
         #expect(await store.load(userId: bob, deviceId: DeviceId("B1")) != nil)
     }
 

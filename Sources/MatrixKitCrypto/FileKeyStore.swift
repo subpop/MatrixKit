@@ -4,11 +4,12 @@ import Foundation
 /// pair, so secrets survive process restart (device keys, one-time
 /// keys, Olm session blobs).
 ///
-/// The caller picks the directory (mx uses
-/// `<caches>/mx/`, shared with `DeviceIdentityStore`).
-/// Filenames sanitize like `DeviceIdentityStore` (non-alphanumerics
-/// become `_`); distinct pairs mapping to one filename would collide,
-/// so keep `service` values short constants.
+/// The caller picks the directory (mx scopes one per client instance
+/// via `ClientInstanceDirectory`; `DeviceIdentityStore` documents the
+/// per-user+device keying inside it).
+/// Filenames sanitize non-alphanumerics to `_`; distinct pairs mapping
+/// to one filename would collide, so keep `service` values short
+/// constants.
 public actor FileKeyStore: KeyStore {
     private let directory: URL
 

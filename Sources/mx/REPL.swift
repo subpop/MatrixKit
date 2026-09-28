@@ -23,6 +23,10 @@ enum CachePreference: String, Sendable, ExpressibleByArgument {
 /// Launch configuration, parsed from flags and handed to the REPL.
 struct REPLConfig: Sendable {
     var cache: CachePreference = .auto
+    /// Named persistent instance (`--instance`). Nil selects an
+    /// ephemeral instance: fresh isolated state per run, cleaned up
+    /// (server-side logout + directory removal) on exit.
+    var instance: String?
 }
 
 @main
@@ -35,8 +39,11 @@ struct Mx: AsyncParsableCommand {
     @Option(name: .long, help: "Snapshot cache backend: sqlite, swiftdata, or auto.")
     var cache: CachePreference = .auto
 
+    @Option(name: .long, help: "Named persistent instance (state directory). Without it, each run uses a fresh ephemeral instance that is deleted on exit.")
+    var instance: String?
+
     mutating func run() async throws {
-        await REPL(config: REPLConfig(cache: cache)).run()
+        await REPL(config: REPLConfig(cache: cache, instance: instance)).run()
     }
 }
 
@@ -58,9 +65,26 @@ final class REPL {
     private var recoveredBackupKey: Data?
     /// Snapshot cache backend, from `--cache`.
     private let cachePreference: CachePreference
+    /// Instance name: `--instance` value, or a fresh ephemeral ID per
+    /// run. All on-disk state (account, device identity, Olm sessions,
+    /// snapshot cache) lives under this instance's directory, so
+    /// concurrent runs never share state through the filesystem.
+    private let instanceName: String
+    /// Ephemeral instances are cleaned up on exit (server-side logout
+    /// plus directory removal); named instances persist.
+    private let isEphemeral: Bool
 
     init(config: REPLConfig = REPLConfig()) {
         self.cachePreference = config.cache
+        self.isEphemeral = config.instance == nil
+        self.instanceName =
+            config.instance ?? "ephemeral-\(UUID().uuidString)"
+    }
+
+    /// This run's storage root, or nil when no base directory is
+    /// available (all state then stays in-memory only).
+    private var instanceDirectory: ClientInstanceDirectory? {
+        ClientInstanceDirectory.default(instance: instanceName)
     }
     /// Incoming `m.key.verification.request` events by sender user ID.
     /// `verify <user>` with no device arg answers a pending request.
@@ -100,7 +124,35 @@ final class REPL {
         if let client {
             try? await client.transport.shutdown()
         }
+        if isEphemeral {
+            await teardownEphemeralInstance()
+        }
         emit("Bye!")
+    }
+
+    /// Ephemeral exit: best-effort server-side logout (revokes the
+    /// run's device and its one-time keys) then remove the instance
+    /// directory, leaving no local or server-side trace. A failed
+    /// logout keeps the directory and says so, so the run can be
+    /// retried or inspected instead of silently leaking a device.
+    private func teardownEphemeralInstance() async {
+        if let client {
+            do {
+                try await client.logout()
+            } catch {
+                printError(
+                    "Ephemeral logout failed (\(error)); keeping \(instanceName).")
+                self.client = nil
+                return
+            }
+            self.client = nil
+        }
+        do {
+            try instanceDirectory?.delete()
+        } catch {
+            printError(
+                "Ephemeral cleanup failed (\(error)); keeping \(instanceName).")
+        }
     }
 
     /// Read a line with history + editing, off the MainActor so the
@@ -252,8 +304,8 @@ final class REPL {
                             + "(expires in \(expires / 60) min)")
                 },
                 keystore: olmKeystore())
-            // Persist for zero-interaction `restore`.
-            if let dir = OIDCAccountStore.defaultDirectory(),
+            // Persist for zero-interaction `restore` (same instance).
+            if let dir = instanceDirectory,
                 let userId = client.userId,
                 let deviceId = client.deviceId
             {
@@ -266,7 +318,7 @@ final class REPL {
                     refreshToken: await session.refreshToken,
                     expiresInSeconds: (await session.expiresInMs).map { $0 / 1000 })
                 do {
-                    try OIDCAccountStore(directory: dir).save(account)
+                    try dir.accountStore.save(account)
                 } catch {
                     printError("Could not save session: \(error)")
                 }
@@ -282,10 +334,11 @@ final class REPL {
             printError("Already logged in — logout first.")
             return
         }
-        guard let dir = OIDCAccountStore.defaultDirectory(),
-            let account = OIDCAccountStore(directory: dir).load()
+        guard let dir = instanceDirectory,
+            let account = dir.accountStore.load()
         else {
-            printError("No saved OIDC session. Use login-oauth first.")
+            printError(
+                "No saved session for instance '\(instanceName)'. Use login-oauth first.")
             return
         }
         do {
@@ -627,7 +680,7 @@ final class REPL {
         emit("  user ID: \(userId.value)")
         if let deviceId = client.deviceId {
             emit("  device ID: \(deviceId.value)")
-            if let backup = await DeviceIdentityStore(keystore: olmKeystore())
+            if let backup = await DeviceIdentityStore(keystore: identityKeystore())
                 .load(userId: userId, deviceId: deviceId),
                 let material = try? DeviceIdentityKeys.restore(backup),
                 let curvePublic = try? material.curve25519Public()
@@ -1174,10 +1227,16 @@ final class REPL {
 
     /// File-backed key store for Olm session persistence, or nil when no
     /// cache directory is available (Olm state then stays in-memory only).
+    /// Scoped to this run's instance directory: concurrent runs never
+    /// share sessions, one-time keys, or device identities.
     private func olmKeystore() -> (any KeyStore)? {
-        OIDCAccountStore.defaultDirectory().map {
-            FileKeyStore(directory: $0)
-        }
+        instanceDirectory.map { $0.olmKeyStore() }
+    }
+
+    /// File-backed key store for device identity backups, or nil when
+    /// no instance directory is available.
+    private func identityKeystore() -> (any KeyStore)? {
+        instanceDirectory.map { $0.identityKeyStore() }
     }
 
     /// Load-or-generate our device identity and publish its keys.
@@ -1191,7 +1250,7 @@ final class REPL {
         guard
             let userId = client.userId, let deviceId = client.deviceId
         else { return false }
-        let store = DeviceIdentityStore(keystore: olmKeystore())
+        let store = DeviceIdentityStore(keystore: identityKeystore())
         let identity = DeviceIdentity(
             transport: client.transport, session: client.session)
         do {
@@ -1233,18 +1292,19 @@ final class REPL {
     /// the store won't open.
     private func makeCache(for userId: UserId) async -> (any SnapshotCache)? {
         let preference = cachePreference
+        guard let dir = instanceDirectory else { return nil }
         #if canImport(SwiftData)
             if preference != .sqlite,
-                let file = SwiftDataCache.databaseURL(for: userId),
-                let cache = try? SwiftDataCache(database: file)
+                let cache = try? SwiftDataCache(database: SwiftDataCache.databaseURL(
+                    for: userId, in: dir.root))
             {
                 printInfo("Cache backend: SwiftData.")
                 return cache
             }
         #endif
         if preference != .swiftdata,
-            let file = SQLiteCache.databaseURL(for: userId),
-            let cache = try? SQLiteCache(database: file)
+            let cache = try? SQLiteCache(database: SQLiteCache.databaseURL(
+                for: userId, in: dir.root))
         {
             printInfo("Cache backend: SQLite.")
             return cache

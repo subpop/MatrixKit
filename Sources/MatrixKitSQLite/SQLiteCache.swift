@@ -79,11 +79,16 @@ public actor SQLiteCache: SnapshotCache {
     /// Returns nil when the caches directory is unavailable.
     public static func databaseURL(for userId: UserId) -> URL? {
         guard let base = OIDCAccountStore.defaultDirectory() else { return nil }
-        let safe = userId.value.unicodeScalars.map {
-            CharacterSet.alphanumerics.contains($0) ? String($0) : "_"
-        }.joined()
-        return base
-            .appendingPathComponent(safe, isDirectory: true)
+        return databaseURL(for: userId, in: base)
+    }
+
+    /// Per-user database file under an explicit directory (e.g. a
+    /// `ClientInstanceDirectory` root), keeping instances isolated.
+    public static func databaseURL(for userId: UserId, in directory: URL) -> URL {
+        directory
+            .appendingPathComponent(
+                ClientInstanceDirectory.safe(userId.value),
+                isDirectory: true)
             .appendingPathComponent("store.sqlite")
     }
 

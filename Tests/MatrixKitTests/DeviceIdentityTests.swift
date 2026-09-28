@@ -67,4 +67,46 @@ struct DeviceIdentityTests {
         // Restorable ⇒ structurally valid.
         _ = try DeviceIdentityKeys.restore(loaded)
     }
+
+    @Test("Pre-split per-user dict migrates forward on load")
+    func legacyDictMigrates() async throws {
+        let keystore = InMemoryKeyStore()
+        let user = UserId(unchecked: "@alice:example.com")
+        let backup = DeviceIdentityKeys.generate().backup()
+        // Seed the old layout directly: one dict entry per user.
+        try await keystore.save(
+            JSONEncoder().encode(["TESTDEV": backup]),
+            for: KeyStoreKey(
+                service: "device_identity", account: user.value))
+        let store = DeviceIdentityStore(keystore: keystore)
+        let loaded = try #require(
+            await store.load(userId: user, deviceId: DeviceId("TESTDEV")))
+        #expect(loaded == backup)
+        // Migrated entry is readable under the new per-device key.
+        let stored = try #require(try await keystore.load(KeyStoreKey(
+            service: "device_identity",
+            account: user.value + "-TESTDEV")))
+        #expect(try JSONDecoder().decode(
+            DeviceIdentityBackup.self, from: stored) == backup)
+    }
+
+    @Test("Delete prunes the legacy dict slot, preserving siblings")
+    func legacyDictPrunedOnDelete() async throws {
+        let keystore = InMemoryKeyStore()
+        let user = UserId(unchecked: "@alice:example.com")
+        let backup = DeviceIdentityKeys.generate().backup()
+        try await keystore.save(
+            JSONEncoder().encode(
+                ["GONE": backup, "STAYS": backup]),
+            for: KeyStoreKey(
+                service: "device_identity", account: user.value))
+        let store = DeviceIdentityStore(keystore: keystore)
+        try await store.delete(userId: user, deviceId: DeviceId("GONE"))
+        let pruned = try #require(try await keystore.load(KeyStoreKey(
+            service: "device_identity", account: user.value)))
+        let dict = try JSONDecoder().decode(
+            [String: DeviceIdentityBackup].self, from: pruned)
+        #expect(dict["GONE"] == nil)
+        #expect(dict["STAYS"] == backup)
+    }
 }

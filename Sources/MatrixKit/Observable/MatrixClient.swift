@@ -465,19 +465,20 @@ public final class MatrixClient {
         roomCache = [:]
     }
 
-    /// Delete all local crypto material for the current user: persisted
+    /// Delete all local crypto material for the current device: persisted
     /// Olm sessions + one-time keys, megolm sessions, the cross-signing
-    /// store entry (plus any legacy backup file), and device identity
-    /// entries — all in the injected `KeyStore` when one was provided.
+    /// store entry (plus any legacy backup file), and this device's
+    /// identity entry — all in the injected `KeyStore` when one was provided.
     /// Call BEFORE `logout()` (which clears the user ID this
     /// needs). Best-effort — every step ignores errors so one failure
     /// can't trap sign-out.
     public func deleteLocalCryptoMaterial() async {
         await olm.deletePersistedState()
         await roomCrypto.deletePersistedSessions()
-        guard let userId else { return }
+        guard let userId, let deviceId else { return }
         try? await CrossSigningStore(keystore: keystore).delete(userId: userId)
-        try? await DeviceIdentityStore(keystore: keystore).deleteAll(userId: userId)
+        try? await DeviceIdentityStore(keystore: keystore).delete(
+            userId: userId, deviceId: deviceId)
     }
 
     // MARK: - Sync

@@ -123,9 +123,10 @@ public struct DeviceIdentityBackup: Hashable, Sendable, Codable {
 }
 
 /// Device-identity persistence over the app-provided `KeyStore`: one
-/// entry per user holding every device identity backup (`device ID`
-/// to backup). This keeps the per-user wipe on logout to a single
-/// delete with no directory scan.
+/// entry per (user, device) holding that device's identity backup.
+/// Per-device entries (not one dict per user) keep concurrent local
+/// devices from racing a shared read-modify-write, and match the
+/// per-device scoping of Olm session persistence.
 ///
 /// The service name is intentionally relative: apps namespace their
 /// items (e.g. with an app-ID service prefix and access group) in
@@ -133,7 +134,7 @@ public struct DeviceIdentityBackup: Hashable, Sendable, Codable {
 /// other's keys. With no injected store, `KeychainSecretStore` backs
 /// reads and writes.
 public struct DeviceIdentityStore: Sendable {
-    /// Relative service for the per-user identity entry. Apps isolate
+    /// Relative service for identity entries. Apps isolate
     /// their items via their own `KeyStore` naming.
     public static let service = "device_identity"
 
@@ -143,40 +144,62 @@ public struct DeviceIdentityStore: Sendable {
         self.keystore = keystore ?? KeychainBackedKeyStore()
     }
 
-    private func key(for userId: UserId) -> KeyStoreKey {
+    private func key(for userId: UserId, deviceId: DeviceId) -> KeyStoreKey {
+        KeyStoreKey(
+            service: Self.service,
+            account: userId.value + "-" + deviceId.value)
+    }
+
+    /// Pre-split user-scoped dict entry (`device ID` to backup),
+    /// consulted once per load for migration. Never written.
+    private func legacyKey(for userId: UserId) -> KeyStoreKey {
         KeyStoreKey(service: Self.service, account: userId.value)
     }
 
-    /// Write one device's backup into the user's entry
-    /// (insert or replace; other devices' entries are preserved).
+    /// Write one device's backup, replacing any previous entry for
+    /// that device. Other devices' entries are untouched.
     public func save(
         _ backup: DeviceIdentityBackup, userId: UserId, deviceId: DeviceId
     ) async throws {
-        var all = await loadAll(userId: userId)
-        all[deviceId.value] = backup
-        let data = try JSONEncoder().encode(all)
-        try await keystore.save(data, for: key(for: userId))
+        let data = try JSONEncoder().encode(backup)
+        try await keystore.save(data, for: key(for: userId, deviceId: deviceId))
     }
 
-    /// Read one device's backup, or nil when absent or unreadable.
+    /// Read one device's backup, or nil when absent or unreadable. A
+    /// pre-split user-scoped dict migrates forward on first hit.
     public func load(userId: UserId, deviceId: DeviceId) async -> DeviceIdentityBackup? {
-        await loadAll(userId: userId)[deviceId.value]
-    }
-
-    /// Delete every identity backup for a user (e.g. on logout) with a
-    /// single entry delete. Absent entries are not an error.
-    public func deleteAll(userId: UserId) async throws {
-        try await keystore.delete(key(for: userId))
-    }
-
-    // MARK: - Internals
-
-    private func loadAll(userId: UserId) async -> [String: DeviceIdentityBackup] {
-        guard let data = try? await keystore.load(key(for: userId)),
+        if let data = try? await keystore.load(
+            key(for: userId, deviceId: deviceId)),
+            let backup = try? JSONDecoder().decode(
+                DeviceIdentityBackup.self, from: data)
+        {
+            return backup
+        }
+        guard let data = try? await keystore.load(legacyKey(for: userId)),
             let all = try? JSONDecoder().decode(
+                [String: DeviceIdentityBackup].self, from: data),
+            let backup = all[deviceId.value],
+            let migrated = try? JSONEncoder().encode(backup)
+        else { return nil }
+        try? await keystore.save(
+            migrated, for: key(for: userId, deviceId: deviceId))
+        return backup
+    }
+
+    /// Delete one device's backup (e.g. on logout), plus its slot in a
+    /// pre-split dict when present. Absent entries are not an error.
+    public func delete(userId: UserId, deviceId: DeviceId) async throws {
+        try await keystore.delete(key(for: userId, deviceId: deviceId))
+        guard let data = try? await keystore.load(legacyKey(for: userId)),
+            var all = try? JSONDecoder().decode(
                 [String: DeviceIdentityBackup].self, from: data)
-        else { return [:] }
-        return all
+        else { return }
+        all.removeValue(forKey: deviceId.value)
+        if all.isEmpty {
+            try await keystore.delete(legacyKey(for: userId))
+        } else if let pruned = try? JSONEncoder().encode(all) {
+            try await keystore.save(pruned, for: legacyKey(for: userId))
+        }
     }
 }
 
