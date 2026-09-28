@@ -225,6 +225,9 @@ public actor VerificationMonitor {
                 "transactionId": "\(request.transactionId)",
                 "peer": "\(request.sender.value)",
             ])
+        // Drive: with a single common method the responder starts
+        // immediately rather than waiting for the peer's start.
+        await drive(session)
         return session
     }
 
@@ -271,11 +274,10 @@ public actor VerificationMonitor {
             case .requested:
                 break
             case .ready:
-                // Requester starts after ready; the responder waits for
-                // the peer's start (adopted via the session tie-break).
-                if session.role == .requester {
-                    try await session.sendStart()
-                }
+                // Either side starts after ready: both only speak
+                // m.sas.v1, so the method is already agreed. A peer
+                // start arriving instead is adopted via the tie-break.
+                try await session.sendStart()
             case .started:
                 // The peer started (we didn't): accept and send our key.
                 // When we started, wait for the peer's accept instead.

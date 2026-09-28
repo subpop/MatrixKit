@@ -25,12 +25,12 @@ public enum VerificationState: String, Sendable {
 
 /// One side of an SAS verification (`m.sas.v1`).
 ///
-/// Follows the to-device handshake: after `ready`, the *requester* (the side
-/// that sent the request) sends `start` and the responder answers with
-/// `accept`. Either side *may* send `start` per spec — when both do, the
-/// start from the lexicographically smaller (user ID, device ID) wins and
-/// the other side adopts it — so `receiveStart` implements that tie-break
-/// instead of cancelling. Key exchange, SAS derivation, and MAC logic follow
+/// Follows the to-device handshake: after `ready`, either side sends
+/// `start` (both only speak `m.sas.v1`, so the method is already agreed
+/// and both auto-start); when both do, the start from the
+/// lexicographically smaller (user ID, device ID) wins and the other
+/// side adopts it — so `receiveStart` implements that tie-break instead
+/// of cancelling. Key exchange, SAS derivation, and MAC logic follow
 /// the spec sections verified against v1.19 (`SAS HKDF calculation`, `MAC
 /// calculation`): empty HKDF salt, `MATRIX_KEY_VERIFICATION_SAS|` info with
 /// `|` separators, `hkdf-hmac-sha256.v2` MACs.
@@ -122,16 +122,16 @@ public actor VerificationSession {
     }
 
     /// Handle an incoming `ready` (requester). Records the peer device.
-    /// Late duplicates (after we already started) are ignored so out-of-order
-    /// batches never cancel a live handshake.
+    /// Late duplicates (after we already started — or accepted on a peer
+    /// start that beat `ready` here) are ignored so out-of-order batches
+    /// never cancel a live handshake.
     public func receiveReady(_ ready: VerificationReady) throws(MatrixError) {
-        if state == .ready {
+        if state == .ready || state == .started {
             return
         }
-        if state == .started {
+        guard state == .requested else {
             return
         }
-        try requireState(.requested, "ready")
         guard ready.methods.contains("m.sas.v1") else {
             throw .verificationFailed("Peer does not support m.sas.v1")
         }
@@ -145,10 +145,8 @@ public actor VerificationSession {
 
     // MARK: - Start / accept
 
-    /// Send `m.key.verification.start` with a fresh ephemeral key. The
-    /// requester auto-sends after `ready`; the responder waits for the
-    /// peer's start (it only sends one as a fallback when driving a flow
-    /// manually, e.g. the mx REPL).
+    /// Send `m.key.verification.start` with a fresh ephemeral key.
+    /// Auto-sent by `drive` after `ready`, from either role.
     public func sendStart(
         sasMethods: [String] = ["emoji", "decimal"]
     ) async throws(MatrixError) {
@@ -189,8 +187,9 @@ public actor VerificationSession {
             return
         }
         guard state == .requested || state == .ready else {
-            throw .verificationFailed(
-                "Cannot start in state \(state) (expected requested or ready)")
+            // A start arriving after accept (duplicate delivery, or a
+            // peer start racing ours): the handshake already moved on.
+            return
         }
         peerDeviceId = start.fromDevice
         // Same narrowing as `receiveReady`: accept/key/mac/done go to the

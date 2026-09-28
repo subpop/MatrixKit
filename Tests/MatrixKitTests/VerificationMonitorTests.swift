@@ -89,6 +89,19 @@ struct VerificationMonitorDriverTests {
         })
     }
 
+    /// Forward freshly recorded sends of the given types only. Marks the
+    /// rest consumed, so a later plain `pump` won't redeliver them.
+    private func pumpOnly(
+        _ types: Set<String>, from: inout Fixture, to: Fixture
+    ) async {
+        let sent = await from.fake.sent
+        let fresh = Array(sent.dropFirst(from.pumpIndex))
+        from.pumpIndex = sent.count
+        await to.monitor.receive(fresh.filter { types.contains($0.type) }.map {
+            BasicEvent(type: $0.type, sender: from.user, content: $0.content)
+        })
+    }
+
     private func content<T: Encodable>(
         _ value: T
     ) throws -> [String: AnyCodable] {
@@ -435,6 +448,80 @@ struct VerificationMonitorDriverTests {
         // Removing an unknown session is a no-op.
         await alice.monitor.removeSession(transactionId: txn)
         #expect(await alice.monitor.session(for: txn) == nil)
+    }
+
+    @Test("Responder sends start without waiting for the peer")
+    func responderSelfStarts() async throws {
+        var alice = await makeFixture(user: "@alice:x", device: "ALICE")
+        var bob = await makeFixture(user: "@bob:x", device: "BOB")
+        let subs = [subscribe(alice), subscribe(bob)]
+        defer { subs.forEach { $0.cancel() } }
+        try await awaitSubscription(alice)
+        try await awaitSubscription(bob)
+        _ = try await alice.monitor.requestVerification(
+            userId: bob.user, deviceId: nil)
+        await pump(from: &alice, to: bob)
+        let request = try #require(await bob.monitor.pendingRequests.first)
+        _ = try await bob.monitor.acceptRequest(request)
+        // No start was ever delivered to Bob, yet his start went out.
+        try await waitFor("bob start") {
+            await bob.fake.sent.contains {
+                $0.type == "m.key.verification.start"
+            }
+        }
+        #expect(await bob.monitor.session(for: request.transactionId) != nil)
+        await shutdown(alice, bob)
+    }
+
+    @Test("Responder-started handshake completes when the requester never starts")
+    func responderStartedCompletes() async throws {
+        // Element-style requester: adopts the responder's start (which
+        // beats ready here) and accepts, without ever sending its own.
+        var alice = await makeFixture(user: "@alice:x", device: "ALICE")
+        var bob = await makeFixture(user: "@bob:x", device: "BOB")
+        let subs = [subscribe(alice), subscribe(bob)]
+        defer { subs.forEach { $0.cancel() } }
+        try await awaitSubscription(alice)
+        try await awaitSubscription(bob)
+        let session = try await alice.monitor.requestVerification(
+            userId: bob.user, deviceId: nil)
+        let txn = await session.transactionId
+        await pump(from: &alice, to: bob)
+        let request = try #require(await bob.monitor.pendingRequests.first)
+        _ = try await bob.monitor.acceptRequest(request)
+        await pumpOnly(["m.key.verification.start"], from: &bob, to: alice)
+        #expect(await alice.fake.sent.filter {
+            $0.type == "m.key.verification.start"
+        }.isEmpty)
+        for _ in 0..<10 {
+            await pump(from: &alice, to: bob)
+            await pump(from: &bob, to: alice)
+            let aliceReady = await state(alice, txn: txn) == .keysExchanged
+            let bobReady = await state(bob, txn: txn) == .keysExchanged
+            if aliceReady && bobReady { break }
+        }
+        #expect(await state(alice, txn: txn) == .keysExchanged)
+        #expect(await state(bob, txn: txn) == .keysExchanged)
+        await shutdown(alice, bob)
+    }
+
+    @Test("Duplicate ready sends only one start")
+    func duplicateReadySendsOneStart() async throws {
+        var alice = await makeFixture(user: "@alice:x", device: "ALICE")
+        let bob = await makeFixture(user: "@bob:x", device: "BOB")
+        defer { await shutdown(alice, bob) }
+        _ = try await alice.monitor.requestVerification(
+            userId: bob.user, deviceId: nil)
+        let ready = try content(VerificationReady(
+            fromDevice: "BOB", methods: ["m.sas.v1"]))
+        for _ in 0..<2 {
+            await alice.monitor.receive([BasicEvent(
+                type: "m.key.verification.ready",
+                sender: bob.user, content: ready)])
+        }
+        #expect(await alice.fake.sent.filter {
+            $0.type == "m.key.verification.start"
+        }.count == 1)
     }
 
     @Test("Sender falls back to plaintext without Olm")

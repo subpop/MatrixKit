@@ -197,10 +197,9 @@ struct EncryptedVerificationTests {
         {
             try await responder.sendKey()
         }
-        await #expect(throws: MatrixError.verificationFailed(
-            "Cannot start in state accepted (expected requested or ready)"))
-        {
-            try await responder.receiveStart(start)
-        }
+        // A start arriving after accept (duplicate delivery, or racing
+        // the responder's own) is ignored, not a failure.
+        try await responder.receiveStart(start)
+        #expect(await responder.state == .accepted)
     }
 }

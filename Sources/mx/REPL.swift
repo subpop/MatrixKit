@@ -985,7 +985,7 @@ final class REPL {
                         transactionId: body.transactionId, sender: peer,
                         deviceId: body.fromDevice))
                 printInfo(
-                    "Request accepted. Waiting for \(peer.value) to start…")
+                    "Request accepted. Verification started…")
             } else {
                 session = try await monitor.requestVerification(
                     userId: peer, deviceId: device)
