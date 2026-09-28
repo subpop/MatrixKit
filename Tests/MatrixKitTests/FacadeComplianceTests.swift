@@ -548,11 +548,14 @@ struct FacadeComplianceTests {
                 deviceId: DeviceId("ALICEDEVICE"))
             try await client.olm.ensureKeys()
             // Alice shares; Bob's key request (Olm-encrypted, as peers
-            // send it) is served with the live outbound session.
+            // send it) is served with the requested session — not just
+            // whatever outbound happens to be current.
             try await client.shareRoomKey(room.roomId)
+            let sessionId = try #require(
+                await client.roomCrypto.outboundSessionId(for: room.roomId))
             let request = RoomCrypto.keyRequestContent(
                 requestId: "req-1", deviceId: DeviceId("BOB"),
-                roomId: room.roomId, sessionId: "any")
+                roomId: room.roomId, sessionId: sessionId)
             try await bobOlm.sendEncrypted(
                 eventType: "m.room_key_request", content: request,
                 to: UserId(unchecked: "@alice:test"), devices: [DeviceId("ALICEDEVICE")])
@@ -583,6 +586,24 @@ struct FacadeComplianceTests {
                 content: answerPayload)
             let answerInner = await bobOlm.decrypt([answerWire])
             #expect(answerInner.first?.type == "m.room_key")
+            #expect(answerInner.first?.content["session_id"]?.stringValue == sessionId)
+            // Unknown sessions are ignored, not mis-answered with the
+            // current outbound session.
+            let unknownRequest = RoomCrypto.keyRequestContent(
+                requestId: "req-2", deviceId: DeviceId("BOB"),
+                roomId: room.roomId, sessionId: "unknown-session")
+            try await bobOlm.sendEncrypted(
+                eventType: "m.room_key_request", content: unknownRequest,
+                to: UserId(unchecked: "@alice:test"), devices: [DeviceId("ALICEDEVICE")])
+            let sendsBeforeUnknown = await world.recordedToDeviceSends()
+            let unknownEnvelope = try JSONDecoder().decode(
+                Envelope.self, from: try #require(sendsBeforeUnknown.last).body)
+            let unknownPayload = try #require(unknownEnvelope.messages["@alice:test"]?["ALICEDEVICE"])
+            await world.queueToDevice(BasicEvent(
+                type: "m.room.encrypted",
+                sender: bobUser, content: unknownPayload))
+            try await client.syncOnce()
+            #expect(await world.recordedToDeviceSends().count == sendsBeforeUnknown.count)
             try? await client.transport.shutdown()
         }
     }

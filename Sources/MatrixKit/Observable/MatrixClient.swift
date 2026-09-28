@@ -773,10 +773,11 @@ public final class MatrixClient {
         await verifications.receive(events + decrypted)
     }
 
-    /// Serve an `m.room_key_request`: share our current outbound session
-    /// with the requesting device when the requester is a joined member
-    /// of the room. Duplicate `request_id`s share once. Never throws —
-    /// failures are logged so sync routing stays total.
+    /// Serve an `m.room_key_request`: share the requested session when
+    /// held, and only then. Answering with the current outbound session
+    /// for a different `session_id` leaves the requester undecryptable
+    /// (outbound sessions are fresh per launch), so unknown sessions
+    /// are ignored instead of mis-answered.
     func serveKeyRequest(_ event: BasicEvent) async {
         var keyLogger = Logger(label: "MatrixKit.RoomCrypto")
         MatrixTransport.applyConfiguredLevel(to: &keyLogger)
@@ -799,15 +800,24 @@ public final class MatrixClient {
                     metadata: ["user": "\(requester.value)"])
                 return
             }
-            try await roomCrypto.shareCurrentSession(
-                roomId: roomId, to: requester,
+            let shared = try await roomCrypto.shareRequestedSession(
+                roomId: roomId, sessionId: sessionId, to: requester,
                 devices: [DeviceId(requestingDevice)])
-            keyLogger.debug(
-                "RoomCrypto served key request",
-                metadata: [
-                    "user": "\(requester.value)",
-                    "sessionId": "\(sessionId.prefix(8))…",
-                ])
+            if shared {
+                keyLogger.debug(
+                    "RoomCrypto served key request",
+                    metadata: [
+                        "user": "\(requester.value)",
+                        "sessionId": "\(sessionId.prefix(8))…",
+                    ])
+            } else {
+                keyLogger.debug(
+                    "RoomCrypto ignoring key request for unknown session",
+                    metadata: [
+                        "user": "\(requester.value)",
+                        "sessionId": "\(sessionId.prefix(8))…",
+                    ])
+            }
         } catch {
             keyLogger.warning(
                 "RoomCrypto key-request serve failed",
