@@ -100,37 +100,35 @@ struct SlidingSyncModelsTests {
         #expect(response.extensions?.keys.contains("e2ee") == true)
     }
 
-    @Test("Decodes room payloads with required state and timeline")
-    func decodeRooms() throws {
-        let response = try decoded()
-        let room = try #require(response.rooms["!room1:example.com"])
-        #expect(room.name == "General")
-        #expect(room.avatar == "mxc://example.com/abc")
-        #expect(room.initial)
-        #expect(room.requiredState.count == 2)
-        #expect(room.timeline.count == 1)
-        #expect(room.limited)
-        #expect(room.prevBatch == "p1")
-        #expect(room.unreadCount == 3)
-        #expect(room.highlightCount == 1)
+    struct RoomCase: Sendable {
+        var roomId: String
+        var check: @Sendable (SlidingSyncRoom) -> Bool
     }
 
-    @Test("Missing room sections default to empty")
-    func decodeDefaults() throws {
-        let response = try decoded()
-        let room = try #require(response.rooms["!room2:example.com"])
-        #expect(!room.initial)
-        #expect(room.requiredState.isEmpty)
-        #expect(room.prevBatch == nil)
-        #expect(room.unreadCount == 0)
-    }
+    static let roomCases: [RoomCase] = [
+        RoomCase(roomId: "!room1:example.com", check: { $0.name == "General" }),
+        RoomCase(roomId: "!room1:example.com", check: { $0.avatar == "mxc://example.com/abc" }),
+        RoomCase(roomId: "!room1:example.com", check: { $0.initial }),
+        RoomCase(roomId: "!room1:example.com", check: { $0.requiredState.count == 2 }),
+        RoomCase(roomId: "!room1:example.com", check: { $0.timeline.count == 1 }),
+        RoomCase(roomId: "!room1:example.com", check: { $0.limited }),
+        RoomCase(roomId: "!room1:example.com", check: { $0.prevBatch == "p1" }),
+        RoomCase(roomId: "!room1:example.com", check: { $0.unreadCount == 3 }),
+        RoomCase(roomId: "!room1:example.com", check: { $0.highlightCount == 1 }),
+        RoomCase(roomId: "!room1:example.com", check: { $0.heroes.map(\.userId) == [UserId(unchecked: "@alice:example.com")] }),
+        RoomCase(roomId: "!room1:example.com", check: { $0.bumpStamp == 42 }),
+        RoomCase(roomId: "!room2:example.com", check: { !$0.initial }),
+        RoomCase(roomId: "!room2:example.com", check: { $0.requiredState.isEmpty }),
+        RoomCase(roomId: "!room2:example.com", check: { $0.prevBatch == nil }),
+        RoomCase(roomId: "!room2:example.com", check: { $0.unreadCount == 0 }),
+        RoomCase(roomId: "!room2:example.com", check: { $0.timeline.count == 1 }),
+    ]
 
-    @Test("Decodes heroes and bump_stamp")
-    func decodeHeroes() throws {
+    @Test("Room payloads decode state, timeline, and metadata", arguments: roomCases)
+    func decodeRooms(_ c: RoomCase) throws {
         let response = try decoded()
-        let room = try #require(response.rooms["!room1:example.com"])
-        #expect(room.heroes.map { $0.userId } == [UserId(unchecked: "@alice:example.com")])
-        #expect(room.bumpStamp == 42)
+        let room = try #require(response.rooms[c.roomId])
+        #expect(c.check(room))
     }
 
     @Test("Encodes requests with spec field names")
@@ -324,14 +322,23 @@ struct SlidingSyncClientTests {
         try? await transport.shutdown()
     }
 
-    @Test("syncOnce and start reject invalid sessions without network")
-    func requiresAuth() async {
+    enum GuardedCall: Sendable {
+        case syncOnce
+        case start
+    }
+
+    @Test("syncOnce and start reject invalid sessions without network", arguments: [GuardedCall.syncOnce, .start])
+    func requiresAuth(_ call: GuardedCall) async {
         let (client, transport) = makeClient(accessToken: "")
-        await #expect(throws: MatrixError.notAuthenticated) {
-            try await client.syncOnce()
-        }
-        await #expect(throws: MatrixError.notAuthenticated) {
-            try await client.start(lists: [:])
+        switch call {
+        case .syncOnce:
+            await #expect(throws: MatrixError.notAuthenticated) {
+                try await client.syncOnce()
+            }
+        case .start:
+            await #expect(throws: MatrixError.notAuthenticated) {
+                try await client.start(lists: [:])
+            }
         }
         try? await transport.shutdown()
     }
@@ -383,12 +390,12 @@ struct SlidingSyncClientTests {
         try? await transport.shutdown()
     }
 
-    @Test("M_UNKNOWN_POS is classified for connection reset")
-    func unknownPos() {
-        #expect(SlidingSyncClient.isUnknownPos(
-            .serverError(code: "M_UNKNOWN_POS", message: "expired", retryAfter: nil)))
-        #expect(!SlidingSyncClient.isUnknownPos(.unknownToken))
-        #expect(!SlidingSyncClient.isUnknownPos(
-            .serverError(code: "M_FORBIDDEN", message: "no", retryAfter: nil)))
+    @Test("M_UNKNOWN_POS is classified for connection reset", arguments: [
+        (MatrixError.serverError(code: "M_UNKNOWN_POS", message: "expired", retryAfter: nil), true),
+        (MatrixError.unknownToken, false),
+        (MatrixError.serverError(code: "M_FORBIDDEN", message: "no", retryAfter: nil), false),
+    ])
+    func unknownPos(_ error: MatrixError, expected: Bool) {
+        #expect(SlidingSyncClient.isUnknownPos(error) == expected)
     }
 }

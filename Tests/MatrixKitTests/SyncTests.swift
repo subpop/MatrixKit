@@ -83,6 +83,35 @@ struct SyncResponseParserTests {
             SyncResponse.self, from: Data(sampleSyncJSON.utf8))
     }
 
+    struct DeltaCase: Sendable {
+        var id: String
+        var check: @Sendable (SyncDelta) -> Bool
+    }
+
+    static let deltaCases: [DeltaCase] = [
+        DeltaCase(id: "next batch", check: { $0.nextBatch.value == "s105_106" }),
+        DeltaCase(id: "timeline event", check: {
+            $0.joined[RoomId(unchecked: "!room1:example.com")]?.timeline.count == 1
+        }),
+        DeltaCase(id: "limited window", check: {
+            let joined = $0.joined[RoomId(unchecked: "!room1:example.com")]
+            return joined?.timelineLimited == true && joined?.prevBatch?.value == "s100_101"
+        }),
+        DeltaCase(id: "state and ephemeral", check: {
+            let joined = $0.joined[RoomId(unchecked: "!room1:example.com")]
+            return joined?.state.count == 2 && joined?.ephemeral.count == 1
+        }),
+        DeltaCase(id: "unreads and heroes", check: {
+            let joined = $0.joined[RoomId(unchecked: "!room1:example.com")]
+            return joined?.unreadCount == 3 && joined?.highlightCount == 1
+                && joined?.heroes == [UserId(unchecked: "@bob:example.com")]
+        }),
+        DeltaCase(id: "invite inviter", check: {
+            $0.invited[RoomId(unchecked: "!room2:example.com")]?.inviter
+                == UserId(unchecked: "@carol:example.com")
+        }),
+    ]
+
     @Test("Decodes a realistic sync payload")
     func decode() throws {
         let response = try decoded()
@@ -91,28 +120,9 @@ struct SyncResponseParserTests {
         #expect(response.rooms?.invite.count == 1)
     }
 
-    @Test("Parses joined room deltas")
-    func parseJoined() throws {
-        let delta = SyncResponseParser.parse(try decoded())
-        #expect(delta.nextBatch.value == "s105_106")
-        let roomId = RoomId(unchecked: "!room1:example.com")
-        let joined = try #require(delta.joined[roomId])
-        #expect(joined.timeline.count == 1)
-        #expect(joined.timelineLimited)
-        #expect(joined.prevBatch?.value == "s100_101")
-        #expect(joined.state.count == 2)
-        #expect(joined.ephemeral.count == 1)
-        #expect(joined.unreadCount == 3)
-        #expect(joined.highlightCount == 1)
-        #expect(joined.heroes == [UserId(unchecked: "@bob:example.com")])
-    }
-
-    @Test("Extracts the inviter from stripped state")
-    func parseInvite() throws {
-        let delta = SyncResponseParser.parse(try decoded())
-        let roomId = RoomId(unchecked: "!room2:example.com")
-        let invite = try #require(delta.invited[roomId])
-        #expect(invite.inviter == UserId(unchecked: "@carol:example.com"))
+    @Test("Parses room deltas", arguments: deltaCases)
+    func parseDelta(_ c: DeltaCase) throws {
+        #expect(c.check(SyncResponseParser.parse(try decoded())))
     }
 
     @Test("Encodes SyncFilter as JSON for the filter query param")

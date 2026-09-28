@@ -19,15 +19,19 @@ struct KeyBackupTests {
         #expect(info.count == 12)
     }
 
-    @Test("Backup session data decodes")
-    func sessionData() throws {
-        let json = """
-        {"first_message_index": 0, "forwarded_count": 0, "is_verified": false,
-         "session_data": {"ephemeral": "e", "ciphertext": "c", "mac": "m"}}
-        """.data(using: .utf8)!
-        let data = try JSONDecoder().decode(BackupSessionData.self, from: json)
-        #expect(data.firstMessageIndex == 0)
-        #expect(!data.isVerified)
+    @Test("Backup session data decodes", arguments: [
+        (
+            #"{"first_message_index": 0, "forwarded_count": 0, "is_verified": false, "session_data": {"ephemeral": "e", "ciphertext": "c", "mac": "m"}}"#,
+            0, 0, false),
+        (
+            #"{"first_message_index": 3, "forwarded_count": 1, "is_verified": true, "session_data": {"ephemeral": "e", "ciphertext": "c", "mac": "m"}}"#,
+            3, 1, true),
+    ])
+    func sessionData(json: String, firstMessageIndex: Int, forwardedCount: Int, isVerified: Bool) throws {
+        let data = try JSONDecoder().decode(BackupSessionData.self, from: Data(json.utf8))
+        #expect(data.firstMessageIndex == firstMessageIndex)
+        #expect(data.forwardedCount == forwardedCount)
+        #expect(data.isVerified == isVerified)
         #expect(data.sessionData.ephemeral == "e")
     }
 

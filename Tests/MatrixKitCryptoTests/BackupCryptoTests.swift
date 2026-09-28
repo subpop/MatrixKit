@@ -33,25 +33,23 @@ struct Base58Tests {
 
 @Suite("Backup recovery keys")
 struct RecoveryKeyTests {
-    @Test("Matches the reference vector, spaced or not")
-    func referenceVector() throws {
-        #expect(
-            try BackupCrypto.parseRecoveryKey(fixtureRecoveryKey)
-                == Data(fixtureKey))
-        #expect(
-            try BackupCrypto.parseRecoveryKey(
-                "EsTc LW2K PGiF wKEA 3As5 g5c4 BXwk qeeJ ZJV8 Q9fu gUMN UE4d")
-                == Data(fixtureKey))
+    @Test("Matches the reference vector, spaced or not", arguments: [
+        fixtureRecoveryKey,
+        "EsTc LW2K PGiF wKEA 3As5 g5c4 BXwk qeeJ ZJV8 Q9fu gUMN UE4d",
+    ])
+    func referenceVector(_ key: String) throws {
+        #expect(try BackupCrypto.parseRecoveryKey(key) == Data(fixtureKey))
     }
 
-    @Test("Bad parity and prefix fail")
-    func invalid() {
+    @Test("Bad parity and prefix fail", arguments: [
+        // Last char flipped: parity failure.
+        "EsTc LW2K PGiF wKEA 3As5 g5c4 BXwk qeeJ ZJV8 Q9fu gUMN UE4e",
+        // Wrong prefix: not a recovery key.
+        "SSNc LW2K PGiF wKEA 3As5 g5c4 BXwk qeeJ ZJV8 Q9fu gUMN UE4d",
+    ])
+    func invalid(_ key: String) {
         #expect(throws: CryptoError.self) {
-            try BackupCrypto.parseRecoveryKey(
-                "EsTc LW2K PGiF wKEA 3As5 g5c4 BXwk qeeJ ZJV8 Q9fu gUMN UE4e")
-        }
-        #expect(throws: CryptoError.self) {
-            try BackupCrypto.parseRecoveryKey("SSNc LW2K PGiF wKEA 3As5 g5c4 BXwk qeeJ ZJV8 Q9fu gUMN UE4d")
+            try BackupCrypto.parseRecoveryKey(key)
         }
     }
 

@@ -21,8 +21,11 @@ struct PrimitivesTests {
         #expect(Primitives.base64UnpaddedEncode(Data("hello".utf8)) == "aGVsbG8")
         #expect(Primitives.base64UnpaddedDecode("aGVsbG8") == Data("hello".utf8))
         #expect(Primitives.base64UnpaddedDecode("aGVsbG8=") == Data("hello".utf8))
-        #expect(Primitives.base64UnpaddedDecode("a") == nil)
-        #expect(Primitives.base64UnpaddedDecode("!!!") == nil)
+    }
+
+    @Test("Unpadded base64 rejects bad input", arguments: ["a", "!!!"])
+    func base64Invalid(_ input: String) {
+        #expect(Primitives.base64UnpaddedDecode(input) == nil)
     }
 
     @Test("HMAC-SHA-256 matches RFC 4231 test case 1")
@@ -112,16 +115,19 @@ struct PrimitivesTests {
                 == plaintext)
     }
 
-    @Test("AES round-trips arbitrary lengths and rejects bad keys")
-    func aesRoundTrip() throws {
+    @Test("AES round-trips arbitrary lengths", arguments: [0, 1, 15, 16, 17, 100])
+    func aesRoundTrip(length: Int) throws {
         let key = Data((0..<32).map { UInt8($0) })
         let iv = Data((0..<16).map { UInt8($0) })
-        for length in [0, 1, 15, 16, 17, 100] {
-            let pt = Data((0..<length).map { UInt8($0 & 0xFF) })
-            let ct = try AESCBC.encrypt(key: key, iv: iv, plaintext: pt)
-            #expect(ct.count == ((length / 16) + 1) * 16)
-            #expect(try AESCBC.decrypt(key: key, iv: iv, ciphertext: ct) == pt)
-        }
+        let pt = Data((0..<length).map { UInt8($0 & 0xFF) })
+        let ct = try AESCBC.encrypt(key: key, iv: iv, plaintext: pt)
+        #expect(ct.count == ((length / 16) + 1) * 16)
+        #expect(try AESCBC.decrypt(key: key, iv: iv, ciphertext: ct) == pt)
+    }
+
+    @Test("AES rejects bad keys")
+    func aesBadKey() throws {
+        let iv = Data((0..<16).map { UInt8($0) })
         do {
             _ = try AESCBC.encrypt(
                 key: Data(repeating: 0, count: 16), iv: iv,

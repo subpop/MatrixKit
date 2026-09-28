@@ -1,6 +1,8 @@
 import Foundation
 import Testing
 
+import MatrixKitTesting
+
 @testable import MatrixKit
 
 private func contextMessage(id: String, body: String) -> MessageEvent {
@@ -44,35 +46,33 @@ struct EventContextTests {
         #expect(response.end == "e1")
     }
 
-    @Test("EventContext orders the window oldest-first")
-    func ordering() {
-        let context = EventContext(
-            roomId: RoomId(unchecked: "!r:x"),
-            focusEventId: EventId(unchecked: "$f:x"),
-            eventsBefore: [
-                contextMessage(id: "$newer:x", body: "newer"),
-                contextMessage(id: "$older:x", body: "older"),
-            ],
-            event: contextMessage(id: "$f:x", body: "focus"),
-            eventsAfter: [contextMessage(id: "$a:x", body: "after")])
-        #expect(context.events.map(\.eventId.value) == ["$older:x", "$newer:x", "$f:x", "$a:x"])
+    struct WindowCase: Sendable {
+        var before: [String]
+        var focus: String
+        var after: [String]
+        var expected: [String]
     }
 
-    @Test("EventContext drops repeated segments, keeping first occurrence")
-    func dedupesOverlap() {
+    nonisolated static let windowCases: [WindowCase] = [
+        // Newest-first input orders oldest-first.
+        WindowCase(before: ["$newer:x", "$older:x"], focus: "$f:x", after: ["$a:x"],
+                   expected: ["$older:x", "$newer:x", "$f:x", "$a:x"]),
+        // Repeated segments drop, keeping first occurrence.
+        WindowCase(before: ["$f:x", "$older:x"], focus: "$f:x", after: ["$a:x", "$f:x"],
+                   expected: ["$older:x", "$f:x", "$a:x"]),
+        WindowCase(before: [], focus: "$f:x", after: [],
+                   expected: ["$f:x"]),
+    ]
+
+    @Test("EventContext orders and dedupes the window", arguments: windowCases)
+    func windowing(_ c: WindowCase) {
         let context = EventContext(
             roomId: RoomId(unchecked: "!r:x"),
-            focusEventId: EventId(unchecked: "$f:x"),
-            eventsBefore: [
-                contextMessage(id: "$f:x", body: "focus-echo"),
-                contextMessage(id: "$older:x", body: "older"),
-            ],
-            event: contextMessage(id: "$f:x", body: "focus"),
-            eventsAfter: [
-                contextMessage(id: "$a:x", body: "after"),
-                contextMessage(id: "$f:x", body: "focus-echo"),
-            ])
-        #expect(context.events.map(\.eventId.value) == ["$older:x", "$f:x", "$a:x"])
+            focusEventId: EventId(unchecked: c.focus),
+            eventsBefore: c.before.map { contextMessage(id: $0, body: $0) },
+            event: contextMessage(id: c.focus, body: c.focus),
+            eventsAfter: c.after.map { contextMessage(id: $0, body: $0) })
+        #expect(context.events.map(\.eventId.value) == c.expected)
     }
 }
 
@@ -100,6 +100,25 @@ struct FocusedTimelineTests {
         #expect(events.map(\.eventId.value) == ["$b:x", "$f:x", "$a:x"])
         #expect(await focused.canPaginateBack())
         #expect(await focused.canPaginateForward())
+    }
+
+    @Test("Decryptor transforms loaded windows, flags stay quiet")
+    func decryptor() async throws {
+        let focused = FocusedTimeline(
+            roomId: RoomId(unchecked: "!r:x"),
+            focusEventId: EventId(unchecked: "$f:x"),
+            messages: await pager())
+        #expect(await focused.paginationInProgress() == false)
+        await focused.setDecryptor { event, _ in
+            var mapped = event
+            mapped.content["decrypted"] = .bool(true)
+            return mapped
+        }
+        try await focused.load()
+        #expect(await focused.paginationInProgress() == false)
+        #expect(await focused.events.allSatisfy {
+            $0.content["decrypted"] == .bool(true)
+        })
     }
 
     @Test("Backward pages prepend and consume the cursor")
@@ -213,5 +232,28 @@ struct ObservableTimelineFocusTests {
         #expect(timeline.timelineFocus == .live)
         #expect(timeline.events.map(\.eventId.value) == ["$live:x"])
         #expect(!timeline.hasReachedEnd)
+    }
+
+    @Test("Exhausted focus loadMore is a no-op")
+    func focusLoadMoreNoop() async throws {
+        let roomId = RoomId(unchecked: "!r:x")
+        let focusId = EventId(unchecked: "$f:x")
+        let room = RoomActor(roomId: roomId)
+        await room.appendLocalEcho(contextMessage(id: "$live:x", body: "live"))
+        let pager = FakePager()
+        await pager.setContext(
+            before: [contextMessage(id: "$b:x", body: "before")],
+            focus: contextMessage(id: "$f:x", body: "focus"),
+            after: [],
+            start: nil, end: nil)
+        let timeline = await ObservableTimeline(
+            timeline: Timeline(roomId: roomId, messages: pager, room: room),
+            room: room,
+            messages: pager,
+            localUser: UserId(unchecked: "@alice:x"))
+        try await timeline.focus(eventId: focusId)
+        #expect(!timeline.hasMore)
+        try await timeline.loadMore()
+        #expect(timeline.events.map(\.eventId.value) == ["$b:x", "$f:x"])
     }
 }

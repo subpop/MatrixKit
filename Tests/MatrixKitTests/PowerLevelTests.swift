@@ -65,34 +65,40 @@ struct PowerLevelTests {
         #expect(updated["events"]?.objectValue?["m.room.name"] == .int(50))
     }
 
-    @Test("Admins can do everything participants cannot")
-    func evaluate() {
-        let content = powerContent(
-            users: ["@admin:x": 100, "@mod:x": 50],
-            ban: 60,
-            events: ["m.room.power_levels": 100])
-        let admin = RoomPermissions.evaluate(
-            powerLevels: content, userId: UserId(unchecked: "@admin:x"))
-        #expect(admin.canBan)
-        #expect(admin.canKick)
-        #expect(admin.canChangePermissions)
-        #expect(admin.canEditName)
-        #expect(admin.canSendMessages)
+    struct PermissionCase: Sendable {
+        var user: String
+        var check: @Sendable (RoomPermissions) -> Bool
+        var expected: Bool
+    }
 
-        let mod = RoomPermissions.evaluate(
-            powerLevels: content, userId: UserId(unchecked: "@mod:x"))
-        #expect(!mod.canBan)
-        #expect(mod.canKick)
-        #expect(!mod.canChangePermissions)
-        #expect(mod.canEditName)
+    static let permissionCases: [PermissionCase] = [
+        PermissionCase(user: "@admin:x", check: { $0.canBan }, expected: true),
+        PermissionCase(user: "@admin:x", check: { $0.canKick }, expected: true),
+        PermissionCase(user: "@admin:x", check: { $0.canChangePermissions }, expected: true),
+        PermissionCase(user: "@admin:x", check: { $0.canEditName }, expected: true),
+        PermissionCase(user: "@admin:x", check: { $0.canSendMessages }, expected: true),
+        PermissionCase(user: "@admin:x", check: { $0.canEditDetails }, expected: true),
+        PermissionCase(user: "@mod:x", check: { $0.canBan }, expected: false),
+        PermissionCase(user: "@mod:x", check: { $0.canKick }, expected: true),
+        PermissionCase(user: "@mod:x", check: { $0.canChangePermissions }, expected: false),
+        PermissionCase(user: "@mod:x", check: { $0.canEditName }, expected: true),
+        PermissionCase(user: "@user:x", check: { $0.canKick }, expected: false),
+        PermissionCase(user: "@user:x", check: { $0.canEditName }, expected: false),
+        PermissionCase(user: "@user:x", check: { $0.canSendMessages }, expected: true),
+        PermissionCase(user: "@user:x", check: { $0.canEditDetails }, expected: false),
+    ]
 
-        let user = RoomPermissions.evaluate(
-            powerLevels: content, userId: UserId(unchecked: "@user:x"))
-        #expect(!user.canKick)
-        #expect(!user.canEditName)
-        #expect(user.canSendMessages)
-        #expect(!user.canEditDetails)
-        #expect(admin.canEditDetails)
+    static let permissionContent: [String: AnyCodable] = powerContent(
+        users: ["@admin:x": 100, "@mod:x": 50],
+        ban: 60,
+        events: ["m.room.power_levels": 100])
+
+    @Test("Permissions evaluate per user", arguments: permissionCases)
+    func evaluate(_ c: PermissionCase) {
+        let permissions = RoomPermissions.evaluate(
+            powerLevels: Self.permissionContent,
+            userId: UserId(unchecked: c.user))
+        #expect(c.check(permissions) == c.expected)
     }
 
     @Test("Custom thresholds apply")
@@ -104,12 +110,14 @@ struct PowerLevelTests {
         #expect(!permissions.canSendMessages)
     }
 
-    @Test("Roles bucket power levels")
-    func roles() {
-        #expect(RoomMemberDetails.Role.of(100) == .administrator)
-        #expect(RoomMemberDetails.Role.of(150) == .administrator)
-        #expect(RoomMemberDetails.Role.of(50) == .moderator)
-        #expect(RoomMemberDetails.Role.of(0) == .user)
+    @Test("Roles bucket power levels", arguments: [
+        (100, RoomMemberDetails.Role.administrator),
+        (150, RoomMemberDetails.Role.administrator),
+        (50, RoomMemberDetails.Role.moderator),
+        (0, RoomMemberDetails.Role.user),
+    ])
+    func roles(level: Int, expected: RoomMemberDetails.Role) {
+        #expect(RoomMemberDetails.Role.of(level) == expected)
     }
 }
 
@@ -153,16 +161,12 @@ struct IgnoreListTests {
         #expect(emptied["@alice:x"] == nil)
     }
 
-    @Test("Member content decodes invite is_direct flag")
-    func memberIsDirect() throws {
-        let flagged = """
-        {"membership": "invite", "is_direct": true}
-        """.data(using: .utf8)!
-        #expect(try JSONDecoder().decode(MemberContent.self, from: flagged).isDirect == true)
-        let plain = """
-        {"membership": "join"}
-        """.data(using: .utf8)!
-        #expect(try JSONDecoder().decode(MemberContent.self, from: plain).isDirect == nil)
+    @Test("Member content decodes invite is_direct flag", arguments: [
+        ("{\"membership\": \"invite\", \"is_direct\": true}", true as Bool?),
+        ("{\"membership\": \"join\"}", nil),
+    ])
+    func memberIsDirect(json: String, expected: Bool?) throws {
+        #expect(try JSONDecoder().decode(MemberContent.self, from: Data(json.utf8)).isDirect == expected)
     }
 
     @Test("Devices decode with timestamps")

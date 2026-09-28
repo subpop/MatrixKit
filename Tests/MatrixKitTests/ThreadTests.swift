@@ -1,6 +1,8 @@
 import Foundation
 import Testing
 
+import MatrixKitTesting
+
 @testable import MatrixKit
 
 private func threadMessage(id: String, body: String, root: String? = nil) -> MessageEvent {
@@ -25,7 +27,22 @@ private func threadMessage(id: String, body: String, root: String? = nil) -> Mes
 @Suite("Threads")
 @MainActor
 struct ThreadTests {
-    @Test("Thread relation carries root plus reply fallback")
+    @Test("Thread roots resolve from relations", arguments: [
+        (RelatesTo.thread(root: EventId(unchecked: "$root:x"), replyTo: EventId(unchecked: "$parent:x")), "$root:x"),
+        (RelatesTo.reply(to: EventId(unchecked: "$p:x")), nil as String?),
+        (nil as RelatesTo?, nil),
+    ])
+    func threadRoots(relation: RelatesTo?, expected: String?) {
+        let content: MessageContent
+        if let relation {
+            content = MessageContent.text("hi", relatesTo: relation)
+        } else {
+            content = MessageContent.text("hi")
+        }
+        #expect(content.threadRootEventId?.value == expected)
+    }
+
+    @Test("Thread relation carries reply fallback")
     func relationShape() {
         let root = EventId(unchecked: "$root:x")
         let parent = EventId(unchecked: "$parent:x")
@@ -33,17 +50,6 @@ struct ThreadTests {
         #expect(relation.eventId == root)
         #expect(relation.relType == .thread)
         #expect(relation.inReplyTo?.eventId == parent)
-
-        let content = MessageContent.text("hi", relatesTo: relation)
-        #expect(content.threadRootEventId == root)
-    }
-
-    @Test("Non-thread content has no thread root")
-    func noThreadRoot() {
-        #expect(MessageContent.text("hi").threadRootEventId == nil)
-        let reply = MessageContent.text(
-            "hi", relatesTo: .reply(to: EventId(unchecked: "$p:x")))
-        #expect(reply.threadRootEventId == nil)
     }
 
     @Test("RelationsResponse decodes the wire shape")
@@ -211,5 +217,58 @@ struct ThreadTests {
         await #expect(throws: MatrixError.self) {
             try await thread.load(localEvents: [])
         }
+    }
+
+    @Test("Exhausted thread loadMore is a no-op")
+    func threadLoadMoreNoop() async throws {
+        let roomId = RoomId(unchecked: "!r:x")
+        let rootId = EventId(unchecked: "$root:x")
+        let room = RoomActor(roomId: roomId)
+        await room.appendLocalEcho(threadMessage(id: "$live:x", body: "live"))
+        let pager = FakePager()
+        await pager.setEvents([rootId: threadMessage(id: "$root:x", body: "root")])
+        await pager.setRelations(
+            chunk: [threadMessage(id: "$r1:x", body: "reply", root: "$root:x")],
+            nextBatch: nil)
+        let timeline = await ObservableTimeline(
+            timeline: Timeline(roomId: roomId, messages: pager, room: room),
+            room: room,
+            messages: pager,
+            localUser: UserId(unchecked: "@alice:x"))
+        try await timeline.loadThread(rootEventId: rootId)
+        #expect(!timeline.hasMore)
+        try await timeline.loadMore()
+        #expect(timeline.events.map(\.eventId.value) == ["$root:x", "$r1:x"])
+    }
+
+    @Test("Decryptor transforms thread windows, flags stay quiet")
+    func threadDecryptor() async throws {
+        let pager = FakePager()
+        await pager.setEvents([EventId(unchecked: "$root:x"): threadMessage(id: "$root:x", body: "root")])
+        await pager.setRelations(
+            chunk: [threadMessage(id: "$r1:x", body: "first", root: "$root:x")],
+            nextBatch: "n1")
+        let thread = ThreadTimeline(
+            roomId: RoomId(unchecked: "!r:x"),
+            rootEventId: EventId(unchecked: "$root:x"),
+            messages: pager)
+        #expect(await thread.paginationInProgress() == false)
+        await thread.setDecryptor { event, _ in
+            var mapped = event
+            mapped.content["decrypted"] = .bool(true)
+            return mapped
+        }
+        try await thread.load()
+        #expect(await thread.paginationInProgress() == false)
+        #expect(await thread.events().allSatisfy {
+            $0.content["decrypted"] == .bool(true)
+        })
+        await pager.setRelations(
+            chunk: [threadMessage(id: "$r0:x", body: "zeroth", root: "$root:x")],
+            nextBatch: nil)
+        #expect(try await thread.loadMore() == 1)
+        #expect(await thread.events().allSatisfy {
+            $0.content["decrypted"] == .bool(true)
+        })
     }
 }

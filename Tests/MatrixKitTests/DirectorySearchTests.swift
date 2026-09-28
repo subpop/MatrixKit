@@ -16,21 +16,39 @@ struct DirectorySearchTests {
         #expect(json["limit"]?.intValue == 10)
     }
 
-    @Test("Directory rows map entries")
-    func directoryMapping() {
-        let room = DirectoryRoom(entry: PublicRoomEntry(
-            roomId: RoomId(unchecked: "!r:x"),
-            name: "Room",
-            topic: "hi",
-            canonicalAlias: "#r:x",
-            numJoinedMembers: 42,
-            worldReadable: true,
-            avatarUrl: "mxc://x/a"))
-        #expect(room.roomId.value == "!r:x")
-        #expect(room.alias == "#r:x")
-        #expect(room.memberCount == 42)
-        #expect(room.isWorldReadable)
-        #expect(room.avatarURL?.value == "mxc://x/a")
+    struct DirectoryCase: Sendable {
+        var entry: PublicRoomEntry
+        var alias: String?
+        var memberCount: Int
+        var isWorldReadable: Bool
+        var hasAvatar: Bool
+    }
+
+    nonisolated static let directoryCases: [DirectoryCase] = [
+        DirectoryCase(
+            entry: PublicRoomEntry(
+                roomId: RoomId(unchecked: "!r:x"),
+                name: "Room",
+                topic: "hi",
+                canonicalAlias: "#r:x",
+                numJoinedMembers: 42,
+                worldReadable: true,
+                avatarUrl: "mxc://x/a"),
+            alias: "#r:x", memberCount: 42, isWorldReadable: true, hasAvatar: true),
+        DirectoryCase(
+            entry: PublicRoomEntry(roomId: RoomId(unchecked: "!s:x")),
+            alias: nil, memberCount: 0, isWorldReadable: false, hasAvatar: false),
+    ]
+
+    @Test("Directory rows map entries", arguments: directoryCases)
+    func directoryMapping(_ c: DirectoryCase) {
+        let room = DirectoryRoom(entry: c.entry)
+        #expect(room.roomId == c.entry.roomId)
+        #expect(room.alias == c.alias)
+        #expect(room.memberCount == c.memberCount)
+        #expect(room.isWorldReadable == c.isWorldReadable)
+        #expect((room.avatarURL != nil) == c.hasAvatar)
+        // Directory responses carry no room type; spaces resolve via hierarchy.
         #expect(!room.isSpace)
     }
 

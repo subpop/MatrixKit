@@ -2,6 +2,8 @@ import Foundation
 import MatrixKitCrypto
 import Testing
 
+import MatrixKitTesting
+
 @testable import MatrixKit
 
 /// Exercise `SecretShare` request/receive/autoload against `FakeSender`.

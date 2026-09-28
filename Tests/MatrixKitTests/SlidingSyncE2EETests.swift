@@ -18,25 +18,35 @@ struct SlidingSyncE2EETests {
         return (client, transport)
     }
 
-    @Test("Requests carry only the typing extension without crypto hooks")
-    func noHooks() async {
-        let (client, transport) = makeClient()
-        let request = await client.makeRequest(timeoutMs: 1000)
-        #expect(request.extensions?.typing?.enabled == true)
-        #expect(request.extensions?.e2ee == nil)
-        #expect(request.extensions?.toDevice == nil)
-        try? await transport.shutdown()
+    struct ExtensionCase: Sendable {
+        var withHooks: Bool
+        var check: @Sendable (SlidingSyncRequest) -> Bool
     }
 
-    @Test("Requests include E2EE extensions with hooks")
-    func withHooks() async {
+    static let extensionCases: [ExtensionCase] = [
+        ExtensionCase(
+            withHooks: false,
+            check: {
+                $0.extensions?.typing?.enabled == true
+                    && $0.extensions?.e2ee == nil && $0.extensions?.toDevice == nil
+            }),
+        ExtensionCase(
+            withHooks: true,
+            check: {
+                $0.extensions?.e2ee?.enabled == true
+                    && $0.extensions?.toDevice?.enabled == true
+                    && $0.extensions?.toDevice?.limit == 100
+                    && $0.extensions?.toDevice?.since == nil
+            }),
+    ]
+
+    @Test("Requests carry typing, plus E2EE extensions with hooks", arguments: extensionCases)
+    func extensions(_ c: ExtensionCase) async {
         let (client, transport) = makeClient()
-        await client.setCryptoHooks(SyncCryptoHooks())
-        let request = await client.makeRequest(timeoutMs: 1000)
-        #expect(request.extensions?.e2ee?.enabled == true)
-        #expect(request.extensions?.toDevice?.enabled == true)
-        #expect(request.extensions?.toDevice?.limit == 100)
-        #expect(request.extensions?.toDevice?.since == nil)
+        if c.withHooks {
+            await client.setCryptoHooks(SyncCryptoHooks())
+        }
+        #expect(c.check(await client.makeRequest(timeoutMs: 1000)))
         try? await transport.shutdown()
     }
 

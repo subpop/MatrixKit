@@ -29,43 +29,42 @@ struct MatrixVersionsTests {
         #expect(versions.hasUnstableFeature("org.matrix.simplified_msc3575") == false)
     }
 
-    @Test("hasUnstableFeature honors the advertised value")
-    func flagLookup() throws {
+    @Test("hasUnstableFeature honors the advertised value", arguments: [
+        ("org.matrix.simplified_msc3575", true),
+        (UnstableFeature.simplifiedSlidingSync, true),
+        ("org.example.disabled", false),
+        ("org.example.unlisted", false),
+    ])
+    func flagLookup(flag: String, expected: Bool) throws {
         let versions = try decode(body)
-        #expect(versions.hasUnstableFeature("org.matrix.simplified_msc3575"))
-        #expect(versions.hasUnstableFeature(UnstableFeature.simplifiedSlidingSync))
-        #expect(!versions.hasUnstableFeature("org.example.disabled"))
-        #expect(!versions.hasUnstableFeature("org.example.unlisted"))
+        #expect(versions.hasUnstableFeature(flag) == expected)
     }
 
-    @Test("supportsVersion matches advertised and older versions")
-    func supportsAdvertised() throws {
-        let versions = try decode(body)
-        #expect(versions.supportsVersion(.v1_0))
-        #expect(versions.supportsVersion(.v1_10))
-        #expect(versions.supportsVersion(.v1_13))
+    struct SupportsCase: Sendable {
+        var versions: [String]
+        var query: MatrixVersion
+        var expected: Bool
     }
 
-    @Test("supportsVersion rejects newer versions, accepts future unknowns")
-    func supportsComparison() throws {
-        let versions = try decode(body)
-        #expect(!versions.supportsVersion(.v1_14))
-        #expect(!versions.supportsVersion(.latestKnown))
-        let future = ServerVersions(
-            versions: ["v1.0", "v1.99"],
-            unstableFeatures: [:])
-        #expect(future.supportsVersion(.v1_10))
-        #expect(future.supportsVersion(.latestKnown))
-    }
+    static let supportsCases: [SupportsCase] = [
+        SupportsCase(versions: ["v1.0", "v1.13"], query: .v1_0, expected: true),
+        SupportsCase(versions: ["v1.0", "v1.13"], query: .v1_10, expected: true),
+        SupportsCase(versions: ["v1.0", "v1.13"], query: .v1_13, expected: true),
+        SupportsCase(versions: ["v1.0", "v1.13"], query: .v1_14, expected: false),
+        SupportsCase(versions: ["v1.0", "v1.13"], query: .latestKnown, expected: false),
+        // Future unknowns satisfy older requirements.
+        SupportsCase(versions: ["v1.0", "v1.99"], query: .v1_10, expected: true),
+        SupportsCase(versions: ["v1.0", "v1.99"], query: .latestKnown, expected: true),
+        // Legacy and malformed entries are ignored.
+        SupportsCase(versions: ["r0.0.1", "not-a-version", "v1.5"], query: .v1_5, expected: true),
+        SupportsCase(versions: ["r0.0.1", "not-a-version", "v1.5"], query: .v1_6, expected: false),
+        SupportsCase(versions: [], query: .v1_0, expected: false),
+    ]
 
-    @Test("supportsVersion ignores legacy and malformed entries")
-    func ignoresUnparseable() throws {
-        let versions = ServerVersions(
-            versions: ["r0.0.1", "not-a-version", "v1.5"],
-            unstableFeatures: [:])
-        #expect(versions.supportsVersion(.v1_5))
-        #expect(!versions.supportsVersion(.v1_6))
-        #expect(!ServerVersions(versions: [], unstableFeatures: [:]).supportsVersion(.v1_0))
+    @Test("supportsVersion compares against advertised entries", arguments: supportsCases)
+    func supportsComparison(_ c: SupportsCase) {
+        let versions = ServerVersions(versions: c.versions, unstableFeatures: [:])
+        #expect(versions.supportsVersion(c.query) == c.expected)
     }
 }
 

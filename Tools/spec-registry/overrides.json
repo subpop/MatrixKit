@@ -1,0 +1,94 @@
+{
+  "drop": [
+    {
+      "method": "GET",
+      "pathTemplate": "/_matrix/client/v3/createRoom"
+    }
+  ],
+  "add": [
+    {
+      "method": "PUT",
+      "pathTemplate": "/_matrix/client/v3/rooms/{roomId}/state/{eventType}/",
+      "requiresAuth": true,
+      "sourceFile": "overrides.json (empty state key)"
+    },
+    {
+      "method": "GET",
+      "pathTemplate": "/_matrix/media/v3/download/{serverName}/{mediaId}",
+      "requiresAuth": false,
+      "sourceFile": "legacy fallback (pre-MSC3916 servers)"
+    },
+    {
+      "method": "GET",
+      "pathTemplate": "/_matrix/media/v3/thumbnail/{serverName}/{mediaId}",
+      "requiresAuth": false,
+      "sourceFile": "legacy fallback (pre-MSC3916 servers)"
+    },
+    {
+      "method": "POST",
+      "pathTemplate": "/_matrix/client/unstable/org.matrix.simplified_msc3575/sync",
+      "requiresAuth": true,
+      "sourceFile": "MSC4186 unstable endpoint"
+    },
+    {
+      "method": "GET",
+      "pathTemplate": "/_matrix/client/v1/auth_metadata",
+      "requiresAuth": false,
+      "sourceFile": "oauth_server_metadata.yaml (post-v1.13, MSC3861)"
+    },
+    {
+      "method": "POST",
+      "pathTemplate": "/issuer/register",
+      "requiresAuth": false,
+      "sourceFile": "RFC7591 issuer (harness loopback)"
+    },
+    {
+      "method": "POST",
+      "pathTemplate": "/issuer/device",
+      "requiresAuth": false,
+      "sourceFile": "RFC8628 issuer (harness loopback)"
+    },
+    {
+      "method": "POST",
+      "pathTemplate": "/issuer/token",
+      "requiresAuth": false,
+      "sourceFile": "RFC6749 issuer (harness loopback)"
+    },
+    {
+      "method": "POST",
+      "pathTemplate": "/issuer/revoke",
+      "requiresAuth": false,
+      "sourceFile": "RFC7009 issuer (harness loopback)"
+    },
+    {
+      "method": "GET",
+      "pathTemplate": "/_matrix/client/v1/rtc/transports",
+      "requiresAuth": true,
+      "sourceFile": "MSC4143 (harness)"
+    },
+    {
+      "method": "GET",
+      "pathTemplate": "/_matrix/client/unstable/org.matrix.msc4143/rtc/transports",
+      "requiresAuth": true,
+      "sourceFile": "MSC4143 unstable (harness)"
+    },
+    {
+      "method": "POST",
+      "pathTemplate": "/_matrix/client/unstable/org.matrix.msc4140/delayed_events/{delayId}",
+      "requiresAuth": true,
+      "sourceFile": "MSC4140 unstable (harness)"
+    },
+    {
+      "method": "POST",
+      "pathTemplate": "/sfu/get",
+      "requiresAuth": false,
+      "sourceFile": "LiveKit SFU (harness loopback)"
+    },
+    {
+      "method": "POST",
+      "pathTemplate": "/get_token",
+      "requiresAuth": false,
+      "sourceFile": "LiveKit SFU (harness loopback)"
+    }
+  ]
+}

@@ -1,111 +1,9 @@
 import Foundation
 import Testing
 
+import MatrixKitTesting
 @testable import MatrixKit
 @testable import MatrixKitCrypto
-
-/// In-memory homeserver for Olm flows: stashes `/keys/upload` blobs per
-/// device and serves `/keys/query` + `/keys/claim` (popping OTKs).
-actor FakeKeys: OlmKeyService {
-    var devices: [String: [String: DeviceKeys]] = [:]
-    private var otks: [String: [String: [String: ClaimedOneTimeKey]]] = [:]
-    private var fallbacks: [String: [String: Set<String>]] = [:]
-    var queryCalls = 0
-
-    func queryKeys(
-        users: [UserId]
-    ) async throws(MatrixError) -> KeyQueryResponse {
-        queryCalls += 1
-        var out: [String: [String: DeviceKeys]] = [:]
-        for user in users {
-            out[user.value] = devices[user.value] ?? [:]
-        }
-        return KeyQueryResponse(deviceKeys: out)
-    }
-
-    func claimKeys(
-        user: UserId, device: String
-    ) async throws(MatrixError) -> ClaimKeysResponse {
-        let deviceId: String
-        if device == "*" {
-            guard let first = otks[user.value]?.first(where: { !$0.value.isEmpty }) else {
-                return ClaimKeysResponse()
-            }
-            deviceId = first.key
-        } else {
-            deviceId = device
-        }
-        guard var pool = otks[user.value]?[deviceId], !pool.isEmpty else {
-            return ClaimKeysResponse()
-        }
-        let keyId = pool.keys.sorted().first!
-        let claimed = pool.removeValue(forKey: keyId)!
-        otks[user.value]?[deviceId] = pool
-        return ClaimKeysResponse(
-            oneTimeKeys: [user.value: [deviceId: [keyId: claimed]]])
-    }
-
-    func uploadDeviceKeys(
-        _ request: UploadDeviceKeysRequest
-    ) async throws(MatrixError) -> UploadDeviceKeysResponse {
-        if let deviceKeys = request.deviceKeys {
-            devices[deviceKeys.userId, default: [:]][deviceKeys.deviceId] = deviceKeys
-        }
-        var total = 0
-        // Attribute OTKs to the uploading device via its device_keys.
-        if let deviceKeys = request.deviceKeys {
-            let user = deviceKeys.userId
-            let device = deviceKeys.deviceId
-            if let oneTime = request.oneTimeKeys {
-                for (keyId, value) in oneTime {
-                    guard
-                        let obj = value.objectValue,
-                        let key = obj["key"]?.stringValue,
-                        let sigs = obj["signatures"]?.objectValue
-                    else { continue }
-                    var sigMap: [String: [String: String]] = [:]
-                    for (u, inner) in sigs {
-                        var m: [String: String] = [:]
-                        for (k, v) in inner.objectValue ?? [:] {
-                            if let s = v.stringValue { m[k] = s }
-                        }
-                        sigMap[u] = m
-                    }
-                    otks[user, default: [:]][device, default: [:]][keyId] =
-                        ClaimedOneTimeKey(key: key, signatures: sigMap)
-                    total += 1
-                }
-            }
-            if let fallback = request.fallbackKeys {
-                for keyId in fallback.keys {
-                    fallbacks[user, default: [:]][device, default: []].insert(keyId)
-                }
-            }
-        }
-        return UploadDeviceKeysResponse(
-            oneTimeKeyCounts: ["signed_curve25519": total])
-    }
-
-    func otkCount(user: String, device: String) -> Int {
-        otks[user]?[device]?.count ?? 0
-    }
-
-    /// Seed a device's published keys (fixes `/keys/query` results).
-    func seedDevice(user: String, device: String) {
-        devices[user, default: [:]][device] = DeviceKeys(
-            userId: user, deviceId: device)
-    }
-
-    /// Seed full published device keys: the record exists but no
-    /// one-time keys were ever uploaded (stale-device shape).
-    func seedKeys(user: String, device: String, keys: DeviceKeys) {
-        devices[user, default: [:]][device] = keys
-    }
-
-    func fallbackCount(user: String, device: String) -> Int {
-        fallbacks[user]?[device]?.count ?? 0
-    }
-}
 
 @Suite("OlmConnector")
 struct OlmConnectorTests {
@@ -409,5 +307,72 @@ struct OlmConnectorTests {
             content: third[0].content)])
         #expect(inner3.count == 1)
         #expect(inner3[0].content["n"] == .int(3))
+    }
+}
+
+@Suite("EncryptedToDeviceSender")
+struct EncryptedToDeviceSenderTests {
+    @Test("Star expands to peer devices, encrypts each")
+    func starExpansion() async throws {
+        let keys = FakeKeys()
+        let sender = FakeSender()
+        let alice = OlmConnector(keys: keys, sender: sender)
+        let (aliceUser, bobUser) = (UserId(unchecked: "@alice:x"), UserId(unchecked: "@bob:x"))
+        try await alice.configure(
+            identity: DeviceIdentityKeys.generate(),
+            userId: aliceUser, deviceId: DeviceId("ALICE"))
+        let bob = OlmConnector(keys: keys, sender: FakeSender())
+        try await bob.configure(
+            identity: DeviceIdentityKeys.generate(),
+            userId: bobUser, deviceId: DeviceId("BOB"))
+        try await bob.ensureKeys()
+        let encrypted = EncryptedToDeviceSender(olm: alice)
+        try await encrypted.send(
+            eventType: "m.key.verification.request",
+            content: ["flow": .string("m.sas.v1")],
+            to: bobUser, devices: ["*"])
+        let sent = await sender.sent
+        #expect(sent.count == 1)
+        #expect(sent[0].type == "m.room.encrypted")
+        #expect(sent[0].devices == ["BOB"])
+    }
+
+    @Test("Star with no peers throws verificationFailed")
+    func starNoPeers() async throws {
+        let alice = OlmConnector(keys: FakeKeys(), sender: FakeSender())
+        try await alice.configure(
+            identity: DeviceIdentityKeys.generate(),
+            userId: UserId(unchecked: "@alice:x"), deviceId: DeviceId("ALICE"))
+        let encrypted = EncryptedToDeviceSender(olm: alice)
+        await #expect(throws: MatrixError.verificationFailed(
+            "No other devices available for verification"))
+        {
+            try await encrypted.send(
+                eventType: "m.key.verification.request",
+                content: ["flow": .string("m.sas.v1")],
+                to: UserId(unchecked: "@ghost:x"), devices: ["*"])
+        }
+    }
+
+    @Test("Raw fans out per device with own ciphertexts")
+    func rawFanout() async throws {
+        let keys = FakeKeys()
+        let sender = FakeSender()
+        let alice = OlmConnector(keys: keys, sender: sender)
+        let bobUser = UserId(unchecked: "@bob:test")
+        try await alice.configure(
+            identity: DeviceIdentityKeys.generate(),
+            userId: UserId(unchecked: "@alice:x"), deviceId: DeviceId("ALICE"))
+        let bob = OlmConnector(keys: keys, sender: FakeSender())
+        try await bob.configure(
+            identity: DeviceIdentityKeys.generate(),
+            userId: bobUser, deviceId: DeviceId("BOB"))
+        try await bob.ensureKeys()
+        let encrypted = EncryptedToDeviceSender(olm: alice)
+        try await encrypted.sendRaw(
+            eventType: "m.test",
+            messages: ["@bob:test": ["BOB": ["k": .string("v")]]],
+            transactionId: "txn")
+        #expect(await sender.sent.count == 1)
     }
 }

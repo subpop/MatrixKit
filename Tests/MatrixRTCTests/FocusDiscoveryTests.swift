@@ -17,62 +17,59 @@ struct FocusDiscoveryTests {
         try JSONDecoder().decode(T.self, from: Data(json.utf8))
     }
 
-    @Test("v1 rtc_transports yields the LiveKit service URL")
-    func v1Transports() throws {
-        let response = try decode(RTCTransportsResponse.self, json: """
-            {"rtc_transports": [
-              {"type": "livekit", "livekit_service_url": "https://call.example.com/livekit/jwt"}
-            ]}
-            """)
-        #expect(response.livekitServiceURL == "https://call.example.com/livekit/jwt")
+    struct TransportsCase: Sendable {
+        var json: String
+        var expected: String?
     }
 
-    @Test("legacy transports key is tolerated")
-    func legacyTransportsKey() throws {
-        let response = try decode(RTCTransportsResponse.self, json: """
-            {"transports": [
-              {"type": "m.livekit.sfu", "livekit_service_url": "https://livekit.example.com"}
-            ]}
-            """)
-        #expect(response.livekitServiceURL == "https://livekit.example.com")
+    static let transportsCases: [TransportsCase] = [
+        TransportsCase(
+            json: """
+                {"rtc_transports": [
+                  {"type": "livekit", "livekit_service_url": "https://call.example.com/livekit/jwt"}
+                ]}
+                """,
+            expected: "https://call.example.com/livekit/jwt"),
+        TransportsCase(
+            json: """
+                {"transports": [
+                  {"type": "m.livekit.sfu", "livekit_service_url": "https://livekit.example.com"}
+                ]}
+                """,
+            expected: "https://livekit.example.com"),
+        TransportsCase(
+            json: """
+                {"rtc_transports": [
+                  {"type": "m.widget", "widget_url": "https://widget.example.com"},
+                  {"type": "livekit", "livekit_service_url": "https://call.example.com/livekit/jwt"}
+                ]}
+                """,
+            expected: "https://call.example.com/livekit/jwt"),
+        TransportsCase(
+            json: """
+                {"rtc_transports": []}
+                """,
+            expected: nil),
+    ]
+
+    @Test("Transports responses yield the LiveKit URL", arguments: transportsCases)
+    func transports(_ c: TransportsCase) throws {
+        #expect(try decode(RTCTransportsResponse.self, json: c.json).livekitServiceURL == c.expected)
     }
 
-    @Test("non-LiveKit transports are skipped")
-    func nonLiveKitSkipped() throws {
-        let response = try decode(RTCTransportsResponse.self, json: """
-            {"rtc_transports": [
-              {"type": "m.widget", "widget_url": "https://widget.example.com"},
-              {"type": "livekit", "livekit_service_url": "https://call.example.com/livekit/jwt"}
-            ]}
-            """)
-        #expect(response.livekitServiceURL == "https://call.example.com/livekit/jwt")
-    }
-
-    @Test("empty transports yield no URL")
-    func emptyTransports() throws {
-        let response = try decode(RTCTransportsResponse.self, json: """
-            {"rtc_transports": []}
-            """)
-        #expect(response.livekitServiceURL == nil)
-    }
-
-    @Test("client well-known rtc_foci yields the LiveKit service URL")
-    func wellKnownFoci() throws {
-        let doc = try decode(RTCClientWellKnown.self, json: """
+    @Test("client well-known rtc_foci yields the LiveKit service URL", arguments: [
+        ("""
             {"m.homeserver": {"base_url": "https://matrix.example.com"},
              "org.matrix.msc4143.rtc_foci": [
                {"type": "livekit", "livekit_service_url": "https://rtc.example.com/livekit/jwt"}
              ]}
-            """)
-        #expect(doc.livekitServiceURL == "https://rtc.example.com/livekit/jwt")
-    }
-
-    @Test("well-known without foci yields no URL")
-    func wellKnownWithoutFoci() throws {
-        let doc = try decode(RTCClientWellKnown.self, json: """
+            """, "https://rtc.example.com/livekit/jwt" as String?),
+        ("""
             {"m.homeserver": {"base_url": "https://matrix.example.com"}}
-            """)
-        #expect(doc.livekitServiceURL == nil)
+            """, nil),
+    ])
+    func wellKnownFoci(json: String, expected: String?) throws {
+        #expect(try decode(RTCClientWellKnown.self, json: json).livekitServiceURL == expected)
     }
 
     private func encoded<T: Encodable>(_ value: T) throws -> [String: Any] {

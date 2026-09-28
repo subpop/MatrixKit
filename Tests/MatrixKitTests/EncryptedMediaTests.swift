@@ -92,50 +92,67 @@ struct EncryptedMediaTests {
         #expect(try MediaClient.decryptFile(encrypted.ciphertext, file: file) == plaintext)
     }
 
-    @Test("Decrypts matrix-encrypt-attachment official vectors")
-    func decryptOfficialVectors() throws {
-        // Verbatim from matrix-encrypt-attachment/test/decrypt.Spec.js.
-        // The v1/v0 pair shares IV and plaintext but not ciphertext: the
-        // counter width is load-bearing, so this pins it exactly.
-        let vectors: [(ciphertext: String, iv: String, key: String, sha256: String,
-                       plaintext: String, version: String)] = [
-            ("", "AAAAAAAAAAAAAAAAAAAAAA",
-             "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-             "47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU", "", "v2"),
-            ("5xJZTt5cQicm+9f4", "//////////8AAAAAAAAAAA",
-             "__________________________________________8",
-             "YzF08lARDdOCzJpzuSwsjTNlQc4pHxpdHcXiD/wpK6k",
-             "SGVsbG8sIFdvcmxk", "v2"),
-            ("zhtFStAeFx0s+9L/sSQO+WQMtldqYEHqTxMduJrCIpnkyer09kxJJuA4K+adQE4w+7jZe/vR9kIcqj9rOhDR8Q",
-             "//////////8AAAAAAAAAAA", "__________________________________________8",
-             "IOq7/dHHB+mfHfxlRY5XMeCWEwTPmlf4cJcgrkf6fVU",
-             "YWxwaGFudW1lcmljYWxseWFscGhhbnVtZXJpY2FsbHlhbHBoYW51bWVyaWNhbGx5YWxwaGFudW1lcmljYWxseQ",
-             "v2"),
-            ("tJVNBVJ/vl36UQt4Y5e5m84bRUrQHhcdLPvS/7EkDvlkDLZXamBB6k8THbiawiKZ5Mnq9PZMSSbgOCvmnUBOMA",
-             "/////////////////////w", "__________________________________________8",
-             "LYG/orOViuFwovJpv2YMLSsmVKwLt7pY3f8SYM7KU5E",
-             "YWxwaGFudW1lcmljYWxseWFscGhhbnVtZXJpY2FsbHlhbHBoYW51bWVyaWNhbGx5YWxwaGFudW1lcmljYWxseQ",
-             "v1"),
-            ("tJVNBVJ/vl36UQt4Y5e5myqUL3M8OtjRVQljZ+LlwbJeucRIM7CeKDJGGOjlJ1bqpqUdl6zytXJ3dCyvnUi4eQ",
-             "/////////////////////w", "__________________________________________8",
-             "/K4w3G4zlLK312k66KxNPKDkWCn2QAH5aphAkuncTrQ",
-             "YWxwaGFudW1lcmljYWxseWFscGhhbnVtZXJpY2FsbHlhbHBoYW51bWVyaWNhbGx5YWxwaGFudW1lcmljYWxseQ",
-             "v0"),
-        ]
-        for vector in vectors {
-            let file = EncryptedFile(
-                url: "mxc://x/enc",
-                key: AttachmentKey(key: vector.key),
-                iv: vector.iv,
-                hashes: ["sha256": vector.sha256],
-                version: vector.version)
-            #expect(
-                try MediaClient.decryptFile(
-                    Primitives.base64UnpaddedDecode(vector.ciphertext)!,
-                    file: file)
-                    == Primitives.base64UnpaddedDecode(vector.plaintext)!,
-                "vector \(vector.version) \(vector.iv)")
-        }
+    /// Verbatim from matrix-encrypt-attachment/test/decrypt.Spec.js.
+    /// The v1/v0 pair shares IV and plaintext but not ciphertext: the
+    /// counter width is load-bearing, so this pins it exactly.
+    struct DecryptVector: Sendable {
+        var ciphertext: String
+        var iv: String
+        var key: String
+        var sha256: String
+        var plaintext: String
+        var version: String
+    }
+
+    static let decryptVectors: [DecryptVector] = [
+        DecryptVector(
+            ciphertext: "",
+            iv: "AAAAAAAAAAAAAAAAAAAAAA",
+            key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            sha256: "47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU",
+            plaintext: "", version: "v2"),
+        DecryptVector(
+            ciphertext: "5xJZTt5cQicm+9f4",
+            iv: "//////////8AAAAAAAAAAA",
+            key: "__________________________________________8",
+            sha256: "YzF08lARDdOCzJpzuSwsjTNlQc4pHxpdHcXiD/wpK6k",
+            plaintext: "SGVsbG8sIFdvcmxk", version: "v2"),
+        DecryptVector(
+            ciphertext: "zhtFStAeFx0s+9L/sSQO+WQMtldqYEHqTxMduJrCIpnkyer09kxJJuA4K+adQE4w+7jZe/vR9kIcqj9rOhDR8Q",
+            iv: "//////////8AAAAAAAAAAA",
+            key: "__________________________________________8",
+            sha256: "IOq7/dHHB+mfHfxlRY5XMeCWEwTPmlf4cJcgrkf6fVU",
+            plaintext: "YWxwaGFudW1lcmljYWxseWFscGhhbnVtZXJpY2FsbHlhbHBoYW51bWVyaWNhbGx5YWxwaGFudW1lcmljYWxseQ",
+            version: "v2"),
+        DecryptVector(
+            ciphertext: "tJVNBVJ/vl36UQt4Y5e5m84bRUrQHhcdLPvS/7EkDvlkDLZXamBB6k8THbiawiKZ5Mnq9PZMSSbgOCvmnUBOMA",
+            iv: "/////////////////////w",
+            key: "__________________________________________8",
+            sha256: "LYG/orOViuFwovJpv2YMLSsmVKwLt7pY3f8SYM7KU5E",
+            plaintext: "YWxwaGFudW1lcmljYWxseWFscGhhbnVtZXJpY2FsbHlhbHBoYW51bWVyaWNhbGx5YWxwaGFudW1lcmljYWxseQ",
+            version: "v1"),
+        DecryptVector(
+            ciphertext: "tJVNBVJ/vl36UQt4Y5e5myqUL3M8OtjRVQljZ+LlwbJeucRIM7CeKDJGGOjlJ1bqpqUdl6zytXJ3dCyvnUi4eQ",
+            iv: "/////////////////////w",
+            key: "__________________________________________8",
+            sha256: "/K4w3G4zlLK312k66KxNPKDkWCn2QAH5aphAkuncTrQ",
+            plaintext: "YWxwaGFudW1lcmljYWxseWFscGhhbnVtZXJpY2FsbHlhbHBoYW51bWVyaWNhbGx5YWxwaGFudW1lcmljYWxseQ",
+            version: "v0"),
+    ]
+
+    @Test("Decrypts matrix-encrypt-attachment official vectors", arguments: decryptVectors)
+    func decryptOfficialVectors(_ vector: DecryptVector) throws {
+        let file = EncryptedFile(
+            url: "mxc://x/enc",
+            key: AttachmentKey(key: vector.key),
+            iv: vector.iv,
+            hashes: ["sha256": vector.sha256],
+            version: vector.version)
+        #expect(
+            try MediaClient.decryptFile(
+                Primitives.base64UnpaddedDecode(vector.ciphertext)!,
+                file: file)
+                == Primitives.base64UnpaddedDecode(vector.plaintext)!)
     }
 
     @Test("File dict without v decodes as v0")

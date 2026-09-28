@@ -1,6 +1,8 @@
 import Foundation
 import Testing
 
+import MatrixKitTesting
+
 @testable import MatrixKit
 
 /// Full SAS handshake with every to-device message Olm-encrypted: two
@@ -156,5 +158,49 @@ struct EncryptedVerificationTests {
         try await responder.sendDone()
         #expect(await requester.state == .done)
         #expect(await responder.state == .done)
+    }
+
+    @Test("Verification guards reject out-of-order messages")
+    func misuseGuards() async throws {
+        let requester = VerificationSession(
+            toDevice: FakeSender(), role: .requester,
+            ourUserId: UserId(unchecked: "@alice:x"), ourDeviceId: "ALICE",
+            peerUserId: UserId(unchecked: "@bob:x"), peerDevices: ["BOB"],
+            transactionId: "txn")
+        try await requester.sendRequest()
+        await #expect(throws: MatrixError.verificationFailed(
+            "Peer does not support m.sas.v1"))
+        {
+            try await requester.receiveReady(VerificationReady(
+                fromDevice: "BOB", methods: ["m.show_qrcode"]))
+        }
+
+        let responder = VerificationSession(
+            toDevice: FakeSender(), role: .responder,
+            ourUserId: UserId(unchecked: "@bob:x"), ourDeviceId: "BOB",
+            peerUserId: UserId(unchecked: "@alice:x"), peerDevices: ["ALICE"],
+            transactionId: "txn")
+        let start = VerificationStart(fromDevice: "ALICE", transactionId: "txn")
+        try await responder.receiveStart(start)
+        await #expect(throws: MatrixError.verificationFailed(
+            "Unsupported agreement: md5/md5/hkdf-hmac-sha256.v2"))
+        {
+            try await responder.receiveAccept(VerificationAccept(
+                keyAgreementProtocol: "md5", hash: "md5",
+                messageAuthenticationCode: "hkdf-hmac-sha256.v2",
+                shortAuthenticationString: ["emoji"], commitment: "c"))
+        }
+        try await responder.receiveAccept(VerificationAccept(
+            shortAuthenticationString: ["emoji"], commitment: "c"))
+        await #expect(throws: MatrixError.verificationFailed(
+            "No ephemeral key (send start/accept first)"))
+        {
+            try await responder.sendKey()
+        }
+        await #expect(throws: MatrixError.verificationFailed(
+            "Cannot start in state accepted (expected requested or ready)"))
+        {
+            try await responder.receiveStart(start)
+        }
     }
 }

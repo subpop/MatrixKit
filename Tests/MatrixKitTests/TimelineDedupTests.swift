@@ -1,6 +1,8 @@
 import Foundation
 import Testing
 
+import MatrixKitTesting
+
 @testable import MatrixKit
 
 private func dedupMessage(_ id: String) -> MessageEvent {
@@ -15,67 +17,46 @@ private func dedupMessage(_ id: String) -> MessageEvent {
 @Suite("Timeline dedup")
 @MainActor
 struct TimelineDedupTests {
-    @Test("applyJoined appends new events")
-    func appendsNew() async {
-        let room = RoomActor(roomId: RoomId(unchecked: "!r:x"))
-        await room.applyJoined(JoinedRoomDelta(timeline: [dedupMessage("a")]))
-        await room.applyJoined(JoinedRoomDelta(timeline: [dedupMessage("b")]))
-        #expect(await room.timeline.map(\.eventId.value) == ["$a", "$b"])
+    enum ApplyOp: String, Sendable {
+        case join
+        case left
+        case restore
     }
 
-    @Test("applyJoined drops events already in the window")
-    func dropsWindowOverlap() async {
-        let room = RoomActor(roomId: RoomId(unchecked: "!r:x"))
-        await room.applyJoined(JoinedRoomDelta(timeline: [dedupMessage("a")]))
-        await room.applyJoined(
-            JoinedRoomDelta(timeline: [dedupMessage("a"), dedupMessage("b")]))
-        #expect(await room.timeline.map(\.eventId.value) == ["$a", "$b"])
+    struct DedupCase: Sendable {
+        var seed: [String]
+        var second: [String]
+        var limited: Bool
+        var op: ApplyOp
+        var expected: [String]
     }
 
-    @Test("applyJoined dedupes repeats within one delta")
-    func dropsDeltaRepeats() async {
-        let room = RoomActor(roomId: RoomId(unchecked: "!r:x"))
-        await room.applyJoined(
-            JoinedRoomDelta(timeline: [dedupMessage("a"), dedupMessage("a")]))
-        #expect(await room.timeline.map(\.eventId.value) == ["$a"])
-    }
+    nonisolated static let dedupCases: [DedupCase] = [
+        DedupCase(seed: ["a"], second: ["b"], limited: false, op: .join, expected: ["$a", "$b"]),
+        DedupCase(seed: ["a"], second: ["a", "b"], limited: false, op: .join, expected: ["$a", "$b"]),
+        DedupCase(seed: [], second: ["a", "a"], limited: false, op: .join, expected: ["$a"]),
+        DedupCase(seed: ["a"], second: ["b"], limited: true, op: .join, expected: ["$b"]),
+        DedupCase(seed: ["a"], second: ["a", "b", "b"], limited: true, op: .join, expected: ["$a", "$b"]),
+        DedupCase(seed: ["a"], second: ["a", "b", "b"], limited: false, op: .left, expected: ["$a", "$b"]),
+        DedupCase(seed: [], second: ["a", "a", "b"], limited: false, op: .restore, expected: ["$a", "$b"]),
+    ]
 
-    @Test("Limited sync still replaces the window")
-    func limitedResets() async {
+    @Test("Dedup keeps first-seen order across apply paths", arguments: dedupCases)
+    func dedup(_ c: DedupCase) async {
         let room = RoomActor(roomId: RoomId(unchecked: "!r:x"))
-        await room.applyJoined(JoinedRoomDelta(timeline: [dedupMessage("a")]))
-        await room.applyJoined(
-            JoinedRoomDelta(timeline: [dedupMessage("b")], timelineLimited: true))
-        #expect(await room.timeline.map(\.eventId.value) == ["$b"])
-    }
-
-    @Test("Limited sync drops repeats within the replacement window")
-    func limitedDedupes() async {
-        let room = RoomActor(roomId: RoomId(unchecked: "!r:x"))
-        await room.applyJoined(JoinedRoomDelta(timeline: [dedupMessage("a")]))
-        await room.applyJoined(
-            JoinedRoomDelta(
-                timeline: [dedupMessage("a"), dedupMessage("b"), dedupMessage("b")],
-                timelineLimited: true))
-        #expect(await room.timeline.map(\.eventId.value) == ["$a", "$b"])
-    }
-
-    @Test("applyLeft drops events already in the window")
-    func leftDedupes() async {
-        let room = RoomActor(roomId: RoomId(unchecked: "!r:x"))
-        await room.applyJoined(JoinedRoomDelta(timeline: [dedupMessage("a")]))
-        await room.applyLeft(
-            LeftRoomDelta(timeline: [dedupMessage("a"), dedupMessage("b"), dedupMessage("b")]))
-        #expect(await room.timeline.map(\.eventId.value) == ["$a", "$b"])
-    }
-
-    @Test("restore drops repeats persisted in a snapshot")
-    func restoreDedupes() async {
-        let room = RoomActor(roomId: RoomId(unchecked: "!r:x"))
-        await room.restore(RoomSnapshot(
-            roomId: RoomId(unchecked: "!r:x"),
-            timeline: [dedupMessage("a"), dedupMessage("a"), dedupMessage("b")]))
-        #expect(await room.timeline.map(\.eventId.value) == ["$a", "$b"])
+        await room.applyJoined(JoinedRoomDelta(timeline: c.seed.map(dedupMessage)))
+        switch c.op {
+        case .join:
+            await room.applyJoined(JoinedRoomDelta(
+                timeline: c.second.map(dedupMessage), timelineLimited: c.limited))
+        case .left:
+            await room.applyLeft(LeftRoomDelta(timeline: c.second.map(dedupMessage)))
+        case .restore:
+            await room.restore(RoomSnapshot(
+                roomId: RoomId(unchecked: "!r:x"),
+                timeline: c.second.map(dedupMessage)))
+        }
+        #expect(await room.timeline.map(\.eventId.value) == c.expected)
     }
 
     @Test("paginateBack drops events already in the window")
@@ -127,5 +108,41 @@ struct BackPaginationOrderTests {
         let timeline = Timeline(roomId: roomId, messages: pager, room: room)
         #expect(try await timeline.paginateBack() == 1)
         #expect(await timeline.events().map(\.eventId.value) == ["$a", "$b", "$c"])
+    }
+
+    @Test("Pagination flags and update streams")
+    func flagsAndUpdates() async throws {
+        let roomId = RoomId(unchecked: "!room:x")
+        let room = RoomActor(roomId: roomId)
+        let pager = FakePager()
+        let timeline = Timeline(roomId: roomId, messages: pager, room: room)
+        #expect(await timeline.paginationInProgress() == false)
+        #expect(await timeline.canPaginateBack() == false)
+        // No cursor: paginateBack is a no-op.
+        #expect(try await timeline.paginateBack() == 0)
+        let updates = await timeline.updates()
+        var iterator = updates.makeAsyncIterator()
+        await room.applyJoined(JoinedRoomDelta(timeline: [dedupMessage("a")]))
+        let first = await iterator.next()
+        #expect(first != nil)
+    }
+
+    @Test("Decryptor transforms paginated events")
+    func decryptor() async throws {
+        let roomId = RoomId(unchecked: "!room:x")
+        let room = RoomActor(roomId: roomId)
+        await room.applyJoined(JoinedRoomDelta(timeline: [dedupMessage("b")]))
+        await room.prependHistory([], prevBatch: BatchToken("p1"))
+        let pager = FakePager()
+        await pager.setPage(PaginationChunk(
+            start: "p1", end: nil, chunk: [dedupMessage("a")]))
+        let timeline = Timeline(roomId: roomId, messages: pager, room: room)
+        await timeline.setDecryptor { event, _ in
+            var mapped = event
+            mapped.content["decrypted"] = .bool(true)
+            return mapped
+        }
+        #expect(try await timeline.paginateBack() == 1)
+        #expect(await timeline.events().first?.content["decrypted"] == .bool(true))
     }
 }

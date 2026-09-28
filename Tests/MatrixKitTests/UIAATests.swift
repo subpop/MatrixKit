@@ -31,21 +31,21 @@ struct UIAATests {
         #expect(challenge.message?.hasPrefix("To reset") == true)
     }
 
-    @Test("Detects offered stages")
-    func stages() throws {
-        let challenge = try challenge()
-        #expect(challenge.offersStage(UIAAChallenge.resetStage))
-        #expect(challenge.offersStage(UIAAChallenge.oauthStage))
-        #expect(!challenge.offersStage("m.login.password"))
+    @Test("Detects offered stages", arguments: [
+        (UIAAChallenge.resetStage, true),
+        (UIAAChallenge.oauthStage, true),
+        ("m.login.password", false),
+    ])
+    func stages(stage: String, expected: Bool) throws {
+        #expect(try challenge().offersStage(stage) == expected)
     }
 
-    @Test("Extracts per-stage approval URLs")
-    func approvalURL() throws {
-        let challenge = try challenge()
-        #expect(
-            challenge.approvalURL(for: UIAAChallenge.oauthStage)
-                == "https://account.matrix.org/account/?action=org.matrix.cross_signing_reset")
-        #expect(challenge.approvalURL(for: "m.login.password") == nil)
+    @Test("Extracts per-stage approval URLs", arguments: [
+        (UIAAChallenge.oauthStage, "https://account.matrix.org/account/?action=org.matrix.cross_signing_reset"),
+        ("m.login.password", nil as String?),
+    ])
+    func approvalURL(stage: String, expected: String?) throws {
+        #expect(try challenge().approvalURL(for: stage) == expected)
     }
 
     @Test("Bodies without flows are not challenges")

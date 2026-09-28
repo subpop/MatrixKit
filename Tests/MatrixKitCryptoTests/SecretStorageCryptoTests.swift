@@ -21,16 +21,12 @@ struct SecretStorageCryptoTests {
         Primitives.base64UnpaddedDecode(string)!
     }
 
-    @Test("Stored key check verifies the storage key")
-    func keyCheck() throws {
+    @Test("Stored key check verifies the storage key", arguments: [true, false])
+    func keyCheck(correctKey: Bool) throws {
         let iv = b64("AQIDBAUGBwgJCgsMDQ4PEA")
         let mac = b64("TgJjZhCxTphq/K/whNeO+rBm822GI6u4kqTTcyV9YEw")
-        #expect(
-            SecretStorageCrypto.verifyKey(
-                storageKey: storageKey, iv: iv, mac: mac))
-        #expect(
-            !SecretStorageCrypto.verifyKey(
-                storageKey: Data(repeating: 9, count: 32), iv: iv, mac: mac))
+        let key = correctKey ? storageKey : Data(repeating: 9, count: 32)
+        #expect(SecretStorageCrypto.verifyKey(storageKey: key, iv: iv, mac: mac) == correctKey)
     }
 
     @Test("Reference-encrypted secret decrypts")

@@ -5,16 +5,14 @@ import Testing
 
 @Suite("AES-CTR")
 struct AESCTRTests {
-    @Test("Round-trips arbitrary lengths")
-    func roundTrip() throws {
+    @Test("Round-trips arbitrary lengths", arguments: [0, 1, 15, 16, 17, 100])
+    func roundTrip(length: Int) throws {
         let key = Data(repeating: 0x42, count: 32)
         let iv = Data(repeating: 0x07, count: 16)
-        for length in [0, 1, 15, 16, 17, 100] {
-            let plaintext = Data((0..<length).map { UInt8($0 & 0xFF) })
-            let ciphertext = try AESCTR.encrypt(key: key, iv: iv, plaintext: plaintext)
-            #expect(ciphertext.count == length)
-            #expect(try AESCTR.decrypt(key: key, iv: iv, ciphertext: ciphertext) == plaintext)
-        }
+        let plaintext = Data((0..<length).map { UInt8($0 & 0xFF) })
+        let ciphertext = try AESCTR.encrypt(key: key, iv: iv, plaintext: plaintext)
+        #expect(ciphertext.count == length)
+        #expect(try AESCTR.decrypt(key: key, iv: iv, ciphertext: ciphertext) == plaintext)
     }
 
     @Test("Keystream varies with key and IV")

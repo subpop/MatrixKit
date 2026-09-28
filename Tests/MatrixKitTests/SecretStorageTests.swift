@@ -64,6 +64,24 @@ struct SecretStorageTests {
         }
     }
 
+    /// Run `operation`, expecting `MatrixError.recoveryFailed` whose
+    /// message contains `text`. Collapses the five failure-mode tests'
+    /// shared do/catch shape into one assertion.
+    private func requireRecoveryFailed(
+        _ text: String,
+        operation: () async throws -> Void,
+        sourceLocation: Testing.SourceLocation = #_sourceLocation
+    ) async {
+        do {
+            try await operation()
+            Issue.record("expected recoveryFailed", sourceLocation: sourceLocation)
+        } catch MatrixError.recoveryFailed(let message) {
+            #expect(message.contains(text), sourceLocation: sourceLocation)
+        } catch {
+            Issue.record("wrong error: \(error)", sourceLocation: sourceLocation)
+        }
+    }
+
     @Test("default key ID and description read")
     func readsKey() async throws {
         let s = Self.storage(try Self.fixtures())
@@ -94,16 +112,8 @@ struct SecretStorageTests {
         let s = Self.storage(try Self.fixtures())
         let wrong = BackupCrypto.recoveryKey(
             privateKey: Data(repeating: 7, count: 32))
-        await #expect(throws: MatrixError.self) {
+        await requireRecoveryFailed("Incorrect recovery key") {
             try await s.unlock(recoveryKey: wrong)
-        }
-        do {
-            _ = try await s.unlock(recoveryKey: wrong)
-            Issue.record("expected recoveryFailed")
-        } catch MatrixError.recoveryFailed(let msg) {
-            #expect(msg.contains("Incorrect recovery key"))
-        } catch {
-            Issue.record("wrong error: \(error)")
         }
     }
 
@@ -121,14 +131,9 @@ struct SecretStorageTests {
         json["m.secret_storage.key.\(Self.keyId)"] =
             #"{"algorithm": "m.future.v9", "iv": "AA", "mac": "AA"}"#
         let s = Self.storage(json)
-        do {
-            _ = try await s.unlock(
+        await requireRecoveryFailed("Unsupported secret-storage algorithm") {
+            try await s.unlock(
                 recoveryKey: BackupCrypto.recoveryKey(privateKey: Self.storageKey))
-            Issue.record("expected recoveryFailed")
-        } catch MatrixError.recoveryFailed(let msg) {
-            #expect(msg.contains("Unsupported secret-storage algorithm"))
-        } catch {
-            Issue.record("wrong error: \(error)")
         }
     }
 
@@ -173,26 +178,16 @@ struct SecretStorageTests {
     @Test("wrong passphrase fails the key check")
     func wrongPassphrase() async throws {
         let s = Self.storage(try Self.fixtures(passphraseIterations: 1000))
-        do {
-            _ = try await s.unlock(passphrase: "wrong horse")
-            Issue.record("expected recoveryFailed")
-        } catch MatrixError.recoveryFailed(let msg) {
-            #expect(msg.contains("Incorrect passphrase"))
-        } catch {
-            Issue.record("wrong error: \(error)")
+        await requireRecoveryFailed("Incorrect passphrase") {
+            try await s.unlock(passphrase: "wrong horse")
         }
     }
 
     @Test("passphrase unlock without derivation params fails")
     func passphraseWithoutParams() async throws {
         let s = Self.storage(try Self.fixtures())
-        do {
-            _ = try await s.unlock(passphrase: "anything")
-            Issue.record("expected recoveryFailed")
-        } catch MatrixError.recoveryFailed(let msg) {
-            #expect(msg.contains("no passphrase"))
-        } catch {
-            Issue.record("wrong error: \(error)")
+        await requireRecoveryFailed("no passphrase") {
+            try await s.unlock(passphrase: "anything")
         }
     }
 
@@ -230,23 +225,83 @@ struct SecretStorageTests {
               "mac": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}}}
             """
         let s = Self.storage(json)
+        await requireRecoveryFailed("Could not decrypt") {
+            try await s.secret(
+                SecretName.master, keyId: Self.keyId,
+                storageKey: Self.storageKey)
+        }
+    }
+
+    @Test("key fetch progress is indeterminate until the total is known", arguments: [
+        (KeyFetchProgress(phase: .fetching), nil as Double?),
+        (KeyFetchProgress(phase: .importing, total: 0), nil),
+        (KeyFetchProgress(phase: .importing, completed: 1, total: 4), 0.25),
+        (KeyFetchProgress(phase: .finishing, completed: 4, total: 4), 1),
+    ])
+    func keyFetchProgressFraction(_ progress: KeyFetchProgress, expected: Double?) {
+        #expect(progress.fraction == expected)
+    }
+
+    @Test("Non-UTF8 secrets fail decoding")
+    func nonUTF8Secret() async throws {
+        var json = try Self.fixtures()
+        let binary = Data([0xFF, 0xFE, 0x00])
+        let (ciphertext, mac) = try SecretStorageCrypto.encrypt(
+            binary, name: SecretName.master,
+            storageKey: Self.storageKey, iv: Self.secretIv)
+        json[SecretName.master] =
+            """
+            {"encrypted": {"\(Self.keyId)":
+             {"iv": "\(Primitives.base64UnpaddedEncode(Self.secretIv))",
+              "ciphertext": "\(Primitives.base64UnpaddedEncode(ciphertext))",
+              "mac": "\(Primitives.base64UnpaddedEncode(mac))"}}}
+            """
+        let s = Self.storage(json)
         do {
             _ = try await s.secret(
                 SecretName.master, keyId: Self.keyId,
                 storageKey: Self.storageKey)
-            Issue.record("expected recoveryFailed")
-        } catch MatrixError.recoveryFailed(let msg) {
-            #expect(msg.contains("Could not decrypt"))
+            Issue.record("expected decodingError")
+        } catch MatrixError.decodingError(let message) {
+            #expect(message.contains("not valid UTF-8"))
         } catch {
             Issue.record("wrong error: \(error)")
         }
     }
 
-    @Test("key fetch progress is indeterminate until the total is known")
-    func keyFetchProgressFraction() {
-        #expect(KeyFetchProgress(phase: .fetching).fraction == nil)
-        #expect(KeyFetchProgress(phase: .importing, total: 0).fraction == nil)
-        #expect(KeyFetchProgress(phase: .importing, completed: 1, total: 4).fraction == 0.25)
-        #expect(KeyFetchProgress(phase: .finishing, completed: 4, total: 4).fraction == 1)
+    @Test("Malformed key checks and entries fail")
+    func malformedStores() async throws {
+        var badCheck = try Self.fixtures()
+        badCheck["m.secret_storage.key.\(Self.keyId)"] =
+            #"{"algorithm": "m.secret_storage.v1.aes-hmac-sha2", "iv": "!!!", "mac": "!!!"}"#
+        await requireRecoveryFailed("Malformed secret-storage key check") {
+            let s = Self.storage(badCheck)
+            let keyString = BackupCrypto.recoveryKey(privateKey: Self.storageKey)
+            try await s.unlock(recoveryKey: keyString)
+        }
+        var badEntry = try Self.fixtures()
+        badEntry[SecretName.master] =
+            #"{"encrypted": {"testkey": {"iv": "!!!", "ciphertext": "!!!", "mac": "!!!"}}}"#
+        await requireRecoveryFailed("Malformed stored secret") {
+            let s = Self.storage(badEntry)
+            try await s.secret(
+                SecretName.master, keyId: Self.keyId,
+                storageKey: Self.storageKey)
+        }
+    }
+
+    @Test("Unsupported passphrase parameters fail")
+    func badPassphraseParams() async throws {
+        // The stock fixtures' key check binds the recovery key, not a
+        // passphrase derivation — so only the algorithm guard is
+        // reachable here; derivation paths live in unlockPassphrase.
+        var argon = try Self.fixtures(passphraseIterations: 1000)
+        argon["m.secret_storage.key.\(Self.keyId)"] =
+            (argon["m.secret_storage.key.\(Self.keyId)"] ?? "").replacing(
+                "m.pbkdf2", with: "argon2id")
+        await requireRecoveryFailed("Unsupported passphrase algorithm") {
+            let s = Self.storage(argon)
+            try await s.unlock(passphrase: "correct horse")
+        }
     }
 }

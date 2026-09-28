@@ -47,17 +47,26 @@ struct CallMembershipTests {
         #expect(m?.fociPreferred.first?.livekitServiceURL == "https://livekit.example.com")
     }
 
-    @Test("Rejects leave (empty) content and foreign applications")
-    func rejects() throws {
+    struct RejectCase: Sendable {
+        var type: String
+        var application: AnyCodable?
+    }
+
+    @Test("Rejects leave (empty) content and foreign applications", arguments: [
+        RejectCase(type: rtcMemberEventType, application: nil),
+        RejectCase(type: rtcMemberEventType, application: .string("m.voip")),
+        RejectCase(type: "m.room.member", application: .string("m.call")),
+    ])
+    func rejects(_ c: RejectCase) throws {
         let sender = try UserId("@alice:example.com")
+        var body = content()
+        if let application = c.application {
+            body["application"] = application
+        } else {
+            body = [:]
+        }
         #expect(CallMembership.parse(
-            type: rtcMemberEventType, stateKey: "k", sender: sender, content: [:]) == nil)
-        #expect(CallMembership.parse(
-            type: rtcMemberEventType, stateKey: "k", sender: sender,
-            content: content(application: .string("m.voip"))) == nil)
-        #expect(CallMembership.parse(
-            type: "m.room.member", stateKey: "k", sender: sender,
-            content: content()) == nil)
+            type: c.type, stateKey: "k", sender: sender, content: body) == nil)
     }
 
     @Test("Accepts nested application form")

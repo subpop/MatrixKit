@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 
+import MatrixKitTesting
 @testable import MatrixKitCrypto
 
 @Suite("KeyStore")
@@ -13,17 +14,7 @@ struct KeyStoreTests {
 
     @Test("Save, load, overwrite, delete round-trip")
     func roundTrip() async throws {
-        let store = InMemoryKeyStore()
-        let k = key("device-key")
-        #expect(try await store.load(k) == nil)
-        try await store.save(Data("secret-1".utf8), for: k)
-        #expect(try await store.load(k) == Data("secret-1".utf8))
-        try await store.save(Data("secret-2".utf8), for: k)
-        #expect(try await store.load(k) == Data("secret-2".utf8))
-        try await store.delete(k)
-        #expect(try await store.load(k) == nil)
-        // Deleting an absent key is not an error.
-        try await store.delete(k)
+        try await checkKeyStoreRoundTrip(InMemoryKeyStore())
     }
 
     @Test("Keys are isolated by service and account")
@@ -69,17 +60,7 @@ struct FileKeyStoreTests {
     func roundTrip() async throws {
         let dir = tempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
-        let store = FileKeyStore(directory: dir)
-        let k = key("@user:x")
-        #expect(try await store.load(k) == nil)
-        try await store.save(Data("secret-1".utf8), for: k)
-        #expect(try await store.load(k) == Data("secret-1".utf8))
-        try await store.save(Data("secret-2".utf8), for: k)
-        #expect(try await store.load(k) == Data("secret-2".utf8))
-        try await store.delete(k)
-        #expect(try await store.load(k) == nil)
-        // Deleting an absent key is not an error.
-        try await store.delete(k)
+        try await checkKeyStoreRoundTrip(FileKeyStore(directory: dir))
     }
 
     @Test("Secrets persist across store instances")

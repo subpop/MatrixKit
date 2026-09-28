@@ -1,148 +1,10 @@
 import Foundation
 import Testing
 
+import MatrixKitTesting
+
 @testable import MatrixKit
 @testable import MatrixKitCrypto
-
-/// In-memory `RoomKeySharer`: serves a fixed device list and records
-/// `m.room_key` shares.
-actor FakeSharer: RoomKeySharer {
-    var devices: [String: [String]] = [:]
-    var shares: [(user: String, devices: [String], content: [String: AnyCodable])] = []
-    var identity = "SELFEDKEY"
-
-    func deviceIds(for user: UserId) async throws(MatrixError) -> [String] {
-        devices[user.value] ?? []
-    }
-
-    func sendEncrypted(
-        eventType: String, content: [String: AnyCodable],
-        to user: UserId, devices: [DeviceId]
-    ) async throws(MatrixError) {
-        shares.append((user.value, devices.map(\.value), content))
-    }
-
-    func identityKey() async throws(MatrixError) -> String { identity }
-}
-
-/// In-memory `RoomEventSender`: records sent room events.
-actor FakeRoomSender: RoomEventSender {
-    var sent: [(room: String, type: String, content: [String: AnyCodable], txn: String)] = []
-    private var counter = 0
-
-    func sendEvent(
-        _ roomId: RoomId,
-        eventType: String,
-        content: any Encodable & Sendable,
-        transactionId: TransactionId
-    ) async throws(MatrixError) -> EventId {
-        guard let dict = content as? [String: AnyCodable] else {
-            throw .encodingError("FakeRoomSender only handles dict content")
-        }
-        counter += 1
-        sent.append((roomId.value, eventType, dict, transactionId.value))
-        return EventId(unchecked: "$fake\(counter)")
-    }
-}
-
-/// Canned `TimelinePaging`: serves one fixed page per direction plus a
-/// configurable event-context window.
-actor FakePager: TimelinePaging {
-    var page: PaginationChunk<MessageEvent> = PaginationChunk(start: "s")
-    var forwardPage: PaginationChunk<MessageEvent> = PaginationChunk(start: "s")
-    var calls = 0
-    var contextBefore: [MessageEvent] = []
-    var contextEvent: MessageEvent?
-    var contextAfter: [MessageEvent] = []
-    var contextStart: BatchToken?
-    var contextEnd: BatchToken?
-
-    func paginate(
-        _ roomId: RoomId,
-        from: BatchToken?,
-        limit: Int,
-        direction: PaginationDirection
-    ) async throws(MatrixError) -> PaginationChunk<MessageEvent> {
-        calls += 1
-        switch direction {
-        case .backward: return page
-        case .forward: return forwardPage
-        }
-    }
-
-    func context(
-        _ roomId: RoomId,
-        eventId: EventId,
-        limit: Int
-    ) async throws(MatrixError) -> EventContext {
-        EventContext(
-            roomId: roomId, focusEventId: eventId,
-            eventsBefore: contextBefore, event: contextEvent,
-            eventsAfter: contextAfter, start: contextStart, end: contextEnd)
-    }
-
-    var eventsById: [EventId: MessageEvent] = [:]
-    var relationChunk: [MessageEvent] = []
-    var relationEnd: String?
-    var eventError: MatrixError?
-    var relationsError: MatrixError?
-
-    func event(
-        _ roomId: RoomId,
-        _ eventId: EventId
-    ) async throws(MatrixError) -> MessageEvent {
-        if let eventError { throw eventError }
-        guard let event = eventsById[eventId] else { throw .notAuthenticated }
-        return event
-    }
-
-    func relations(
-        _ roomId: RoomId,
-        eventId: EventId,
-        relType: String,
-        eventType: String?,
-        from: BatchToken?,
-        limit: Int,
-        direction: PaginationDirection
-    ) async throws(MatrixError) -> RelationsResponse {
-        calls += 1
-        if let relationsError { throw relationsError }
-        return RelationsResponse(
-            chunk: relationChunk, nextBatch: relationEnd)
-    }
-
-    func setContext(
-        before: [MessageEvent], focus: MessageEvent?, after: [MessageEvent],
-        start: String?, end: String?
-    ) {
-        contextBefore = before
-        contextEvent = focus
-        contextAfter = after
-        contextStart = start.map { BatchToken($0) }
-        contextEnd = end.map { BatchToken($0) }
-    }
-
-    func setForwardPage(_ page: PaginationChunk<MessageEvent>) {
-        self.forwardPage = page
-    }
-
-    func setEvents(_ events: [EventId: MessageEvent]) {
-        self.eventsById = events
-    }
-
-    func setRelations(chunk: [MessageEvent], nextBatch: String?) {
-        self.relationChunk = chunk
-        self.relationEnd = nextBatch
-    }
-
-    func setEventError(_ error: MatrixError?) {
-        self.eventError = error
-    }
-
-    func setRelationsError(_ error: MatrixError?) {
-        self.relationsError = error
-    }
-}
 
 private func roomFixture() throws -> (RoomId, UserId, UserId) {
     (
@@ -680,25 +542,26 @@ struct TimelinePagingTests {
     }
 }
 
-extension FakePager {
-    func setPage(_ page: PaginationChunk<MessageEvent>) {
-        self.page = page
-    }
-}
-
 @Suite("MatrixClientEncryption")
 struct MatrixClientEncryptionTests {
     @Test("restore + configureEncryption wires hooks without network")
     @MainActor
     func smoke() async throws {
-        let client = await MatrixClient.restore(
-            homeserver: URL(string: "https://matrix.example")!,
-            userId: UserId(unchecked: "@alice:x"),
-            deviceId: DeviceId("ALICE"),
-            accessToken: "token")
-        #expect(client.isAuthenticated)
-        await client.configureEncryption()
-        try? await client.transport.shutdown()
+        // Against the harness: well-known adoption + /versions resolve
+        // over loopback in milliseconds. Pointing restore at a dead host
+        // burns two 30s connect timeouts (the 60s this suite used to take).
+        try await withHarness { harness in
+            let baseURL = await harness.baseURL
+            let client = await MatrixClient.restore(
+                homeserver: baseURL,
+                userId: UserId(unchecked: "@alice:test"),
+                deviceId: DeviceId("ALICEDEVICE"),
+                accessToken: "harness-token-alice")
+            #expect(client.isAuthenticated)
+            #expect(await client.serverVersions?.supportsVersion(.v1_13) == true)
+            await client.configureEncryption()
+            try? await client.transport.shutdown()
+        }
     }
 
     @Test("message + device-list models round trip")

@@ -1,6 +1,8 @@
 import Foundation
 import Testing
 
+import MatrixKitTesting
+
 @testable import MatrixKit
 
 /// The monitor's outbound driver: start/accept/keys flow automatically off
@@ -410,5 +412,52 @@ struct VerificationMonitorDriverTests {
         #expect(await alice.monitor.pendingRequests.count == 1)
         #expect(await alice.monitor.pendingRequests.first?.deviceId == "PHONE")
         await shutdown(alice)
+    }
+
+    @Test("Decline cancels the request and drops the session")
+    func declineDropsSession() async throws {
+        var alice = await makeFixture(user: "@alice:x", device: "ALICE")
+        var bob = await makeFixture(user: "@bob:x", device: "BOB")
+        defer { await shutdown(alice, bob) }
+        let session = try await alice.monitor.requestVerification(
+            userId: bob.user, deviceId: nil)
+        let txn = await session.transactionId
+        await pump(from: &alice, to: bob)
+        let request = try #require(await bob.monitor.pendingRequests.first)
+        try await bob.monitor.declineRequest(request)
+        #expect(await bob.monitor.pendingRequests.isEmpty)
+        #expect(await bob.monitor.session(for: txn) == nil)
+        // The cancel reached Bob's outbox (bound for Alice).
+        let cancels = await bob.fake.sent.filter {
+            $0.type == "m.key.verification.cancel"
+        }
+        #expect(cancels.count == 1)
+        // Removing an unknown session is a no-op.
+        await alice.monitor.removeSession(transactionId: txn)
+        #expect(await alice.monitor.session(for: txn) == nil)
+    }
+
+    @Test("Sender falls back to plaintext without Olm")
+    func senderFallback() async throws {
+        // No sender override and unconfigured Olm: plaintext client.
+        let session = Session(
+            homeserver: URL(string: "https://example.com")!,
+            userId: UserId(unchecked: "@alice:x"),
+            deviceId: DeviceId("ALICE"), accessToken: "")
+        let transport = MatrixTransport(
+            homeserver: URL(string: "https://example.com")!)
+        let monitor = VerificationMonitor(
+            toDevice: ToDeviceClient(transport: transport, session: session),
+            olm: OlmConnector(keys: FakeKeys(), sender: FakeSender()),
+            session: session,
+            keys: KeyClient(transport: transport, session: session))
+        // Identity without a device throws before any send.
+        // Unconfigured Olm falls back to the plaintext client, whose
+        // example.com send fails as a network error (no override set).
+        await #expect(throws: MatrixError.self) {
+            try await monitor.requestVerification(
+                userId: UserId(unchecked: "@bob:x"), deviceId: "BOB")
+        }
+        try? await transport.shutdown()
     }
 }

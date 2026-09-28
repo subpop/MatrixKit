@@ -1,6 +1,8 @@
 import Foundation
 import Testing
 
+import MatrixKitTesting
+
 @testable import MatrixKit
 
 private func messageEvent(
@@ -299,26 +301,51 @@ struct ObservableTimelineEventTests {
             description: "Server access control was updated"))
     }
 
-    @Test("Room state events use friendly descriptions")
-    func roomStateDescriptions() {
-        let cases: [(String, String)] = [
-            ("m.room.create", "The room was created"),
-            ("m.room.avatar", "Room avatar was updated"),
-            ("m.room.power_levels", "Room permissions were updated"),
-            ("m.room.encryption", "Encryption was enabled"),
-            ("m.room.tombstone", "The room was upgraded"),
-            ("m.room.canonical_alias", "Room address was updated"),
-            ("m.room.pinned_events", "Pinned messages were updated"),
-            ("m.room.join_rules", "Join rules were updated"),
-            ("m.room.history_visibility", "History visibility was updated"),
-        ]
-        for (type, description) in cases {
-            let event = messageEvent(type: type, content: [:])
-            let wrapper = ObservableTimelineEvent.make(from: event, localUser: nil)
-            #expect(
-                wrapper.kind == .state(type: type, description: description),
-                "Unexpected description for \(type)")
-        }
+    @Test("Room state events use friendly descriptions", arguments: [
+        ("m.room.create", "The room was created"),
+        ("m.room.avatar", "Room avatar was updated"),
+        ("m.room.power_levels", "Room permissions were updated"),
+        ("m.room.encryption", "Encryption was enabled"),
+        ("m.room.tombstone", "The room was upgraded"),
+        ("m.room.canonical_alias", "Room address was updated"),
+        ("m.room.pinned_events", "Pinned messages were updated"),
+        ("m.room.join_rules", "Join rules were updated"),
+        ("m.room.history_visibility", "History visibility was updated"),
+        ("m.room.topic", "Topic changed"),
+    ])
+    func roomStateDescriptions(type: String, description: String) {
+        let event = messageEvent(type: type, content: [:])
+        let wrapper = ObservableTimelineEvent.make(from: event, localUser: nil)
+        #expect(wrapper.kind == .state(type: type, description: description))
+    }
+
+    @Test("Ban classifies with sender and target names")
+    func banDescription() {
+        let ban = messageEvent(
+            type: "m.room.member",
+            stateKey: "@bob:x",
+            content: ["membership": .string("ban")])
+        let wrapper = ObservableTimelineEvent.make(
+            from: ban, localUser: nil, members: membersFixture())
+        #expect(wrapper.kind == .state(
+            type: "m.room.member", description: "Alice banned Bob"))
+    }
+
+    @Test("Age strings bucket recency", arguments: [
+        (30, "Just now"),
+        (300, "5m ago"),
+        (7200, "2h ago"),
+        (90000, "1d ago"),
+    ])
+    func ageBuckets(secondsAgo: Int, expected: String) {
+        let ts = Int(Date.now.timeIntervalSince1970) * 1000 - secondsAgo * 1000
+        let event = MessageEvent(
+            type: "m.room.message",
+            eventId: EventId(unchecked: "$age:x"),
+            sender: UserId(unchecked: "@alice:x"),
+            originServerTs: ts,
+            content: textContent("hi"))
+        #expect(ObservableTimelineEvent.make(from: event, localUser: nil).age == expected)
     }
 
     @Test("Mentions parse user IDs and the room flag")

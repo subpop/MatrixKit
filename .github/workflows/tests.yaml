@@ -1,0 +1,29 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # macOS runner: the package only declares macOS platform support.
+    runs-on: macos-26
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Swift version
+        run: swift --version
+
+      - name: Spec registry is current
+        run: python3 Tools/spec-registry/gen_spec_registry.py --check
+
+      - name: Run tests with coverage
+        # Ratchet gate: per-library-target floor
+        # (Tools/coverage-baseline.json). All targets at or above 90.
+        run: bash Tools/coverage.sh --min 90

@@ -6,6 +6,41 @@ import Testing
 @Suite("Spaces")
 @MainActor
 struct SpacesTests {
+    /// Named power-level fixtures for parent/management tables.
+    enum PowerFixture: Sendable {
+        case admin
+        case nobody
+        case managers
+        case gatedManager
+
+        var levels: [String: AnyCodable] {
+            switch self {
+            case .admin:
+                ["users": .object(["@admin:x": .int(100)]),
+                 "state_default": .int(50),
+                 "users_default": .int(0)]
+            case .nobody:
+                ["users": .object(["@admin:x": .int(0)]),
+                 "state_default": .int(50)]
+            case .managers:
+                ["users": .object(["@admin:x": .int(100), "@mod:x": .int(50)]),
+                 "state_default": .int(50),
+                 "users_default": .int(0)]
+            case .gatedManager:
+                ["users": .object(["@mod:x": .int(50)]),
+                 "state_default": .int(50),
+                 "events": .object(["m.space.child": .int(100)])]
+            }
+        }
+    }
+
+    struct ParentCase: Sendable {
+        var childIds: [String]
+        var isSpace: Bool
+        var power: PowerFixture?
+        var expected: Bool
+    }
+
     @Test("HierarchyResponse decodes the wire shape")
     func hierarchyDecode() throws {
         let json = """
@@ -120,37 +155,47 @@ struct SpacesTests {
     func orderedChildrenTiebreak() {
         func edge(_ id: String) -> SpaceChildEdge {
             SpaceChildEdge(
-                roomId: RoomId(unchecked: "!\(id):x"), order: "same", via: ["x"],
+                roomId: RoomId(unchecked: "!" + id + ":x"), order: "same", via: ["x"],
                 originServerTs: 5)
         }
         let ordered = SpacesClient.orderedChildren([edge("z"), edge("a"), edge("m")])
         #expect(ordered.map(\.roomId.value) == ["!a:x", "!m:x", "!z:x"])
     }
 
-    @Test("Order hints follow the spec's character range")
-    func orderValidation() {
-        let valid = SpaceChildContent(via: ["x"], order: "hello")
-        #expect(valid.validOrder == "hello")
-        let space = SpaceChildContent(via: ["x"], order: " ")
-        #expect(space.validOrder == " ")
-        let over50 = SpaceChildContent(
-            via: ["x"], order: String(repeating: "a", count: 51))
-        #expect(over50.validOrder == nil)
-        let nonAscii = SpaceChildContent(via: ["x"], order: "h\u{00E9}llo")
-        #expect(nonAscii.validOrder == nil)
-        let control = SpaceChildContent(via: ["x"], order: "a\u{00} b")
-        #expect(control.validOrder == nil)
+    @Test("Ordered children sort before unordered ones", arguments: [true, false])
+    func orderedBeforeUnordered(orderedFirst: Bool) {
+        let ordered = SpaceChildEdge(
+            roomId: RoomId(unchecked: "!o:x"), order: "x", via: ["x"],
+            originServerTs: 2)
+        let unordered = SpaceChildEdge(
+            roomId: RoomId(unchecked: "!u:x"), order: nil, via: ["x"],
+            originServerTs: 1)
+        let input = orderedFirst ? [ordered, unordered] : [unordered, ordered]
+        #expect(SpacesClient.orderedChildren(input).map(\.roomId.value) == ["!o:x", "!u:x"])
     }
 
-    @Test("Join rules parse known values")
-    func joinRules() {
-        #expect(SpaceChildJoinRule.parse("public") == .public)
-        #expect(SpaceChildJoinRule.parse("knock") == .knock)
-        #expect(SpaceChildJoinRule.parse("invite") == .invite)
-        #expect(SpaceChildJoinRule.parse("restricted") == .restricted)
-        #expect(SpaceChildJoinRule.parse("knock_restricted") == .knockRestricted)
-        #expect(SpaceChildJoinRule.parse("bogus") == nil)
-        #expect(SpaceChildJoinRule.parse(nil) == nil)
+    @Test("Order hints follow the spec's character range", arguments: [
+        ("hello", "hello"),
+        (" ", " "),
+        (String(repeating: "a", count: 51), nil as String?),
+        ("h\u{00E9}llo", nil),
+        ("a\u{00} b", nil),
+    ])
+    func orderValidation(order: String, expected: String?) {
+        #expect(SpaceChildContent(via: ["x"], order: order).validOrder == expected)
+    }
+
+    @Test("Join rules parse known values", arguments: [
+        ("public", SpaceChildJoinRule.public),
+        ("knock", SpaceChildJoinRule.knock),
+        ("invite", SpaceChildJoinRule.invite),
+        ("restricted", SpaceChildJoinRule.restricted),
+        ("knock_restricted", SpaceChildJoinRule.knockRestricted),
+        ("bogus", nil),
+        (nil, nil),
+    ])
+    func joinRules(raw: String?, expected: SpaceChildJoinRule?) {
+        #expect(SpaceChildJoinRule.parse(raw) == expected)
     }
 
     @Test("Parents resolve from m.space.parent state")
@@ -196,65 +241,37 @@ struct SpacesTests {
         #expect(SpacesClient.lowestCanonical([]) == nil)
     }
 
-    @Test("Parent claims validate against child edges or sender power")
-    func isValidParent() {
-        let roomId = RoomId(unchecked: "!room:x")
-        let sender = UserId(unchecked: "@admin:x")
-        let spaceId = RoomId(unchecked: "!space:x")
-        let power: [String: AnyCodable] = [
-            "users": .object(["@admin:x": .int(100)]),
-            "state_default": .int(50),
-            "users_default": .int(0),
-        ]
-        let none: [String: AnyCodable] = [
-            "users": .object(["@admin:x": .int(0)]),
-            "state_default": .int(50),
-        ]
+    @Test("Parent claims validate against child edges or sender power", arguments: [
         // A matching child edge alone suffices, with no power data.
-        #expect(SpacesClient.isValidParent(
-            roomId: roomId, sender: sender, parentSpaceId: spaceId,
-            knownChildIds: [roomId], knownIsSpace: true, knownPowerLevels: nil))
+        ParentCase(childIds: ["!room:x"], isSpace: true, power: nil, expected: true),
         // Not a space: never valid, even with a claimed child edge.
-        #expect(!SpacesClient.isValidParent(
-            roomId: roomId, sender: sender, parentSpaceId: spaceId,
-            knownChildIds: [roomId], knownIsSpace: false, knownPowerLevels: nil))
+        ParentCase(childIds: ["!room:x"], isSpace: false, power: nil, expected: false),
         // No edge but sender power suffices.
-        #expect(SpacesClient.isValidParent(
-            roomId: roomId, sender: sender, parentSpaceId: spaceId,
-            knownChildIds: [], knownIsSpace: true, knownPowerLevels: power))
+        ParentCase(childIds: [], isSpace: true, power: .admin, expected: true),
         // No edge and insufficient power: invalid.
-        #expect(!SpacesClient.isValidParent(
-            roomId: roomId, sender: sender, parentSpaceId: spaceId,
-            knownChildIds: [], knownIsSpace: true, knownPowerLevels: none))
+        ParentCase(childIds: [], isSpace: true, power: .nobody, expected: false),
         // Uninspected space (no edge, no power data): assumed invalid.
-        #expect(!SpacesClient.isValidParent(
-            roomId: roomId, sender: sender, parentSpaceId: spaceId,
-            knownChildIds: [], knownIsSpace: true, knownPowerLevels: nil))
+        ParentCase(childIds: [], isSpace: true, power: nil, expected: false),
+    ])
+    func isValidParent(_ c: ParentCase) {
+        #expect(SpacesClient.isValidParent(
+            roomId: RoomId(unchecked: "!room:x"),
+            sender: UserId(unchecked: "@admin:x"),
+            parentSpaceId: RoomId(unchecked: "!space:x"),
+            knownChildIds: Set(c.childIds.map { RoomId(unchecked: $0) }),
+            knownIsSpace: c.isSpace,
+            knownPowerLevels: c.power?.levels) == c.expected)
     }
 
-    @Test("Child management needs the state threshold")
-    func canManage() {
-        let levels: [String: AnyCodable] = [
-            "users": .object(["@admin:x": .int(100), "@mod:x": .int(50)]),
-            "state_default": .int(50),
-            "users_default": .int(0),
-        ]
+    @Test("Child management needs the state threshold", arguments: [
+        (PowerFixture.managers, "@admin:x", true),
+        (PowerFixture.managers, "@mod:x", true),
+        (PowerFixture.managers, "@pleb:x", false),
+        (PowerFixture.gatedManager, "@mod:x", false),
+    ])
+    func canManage(levels: PowerFixture, user: String, expected: Bool) {
         #expect(SpacesClient.canManageChildren(
-            powerLevels: levels, userId: UserId(unchecked: "@admin:x")))
-        #expect(SpacesClient.canManageChildren(
-            powerLevels: levels, userId: UserId(unchecked: "@mod:x")))
-        #expect(!SpacesClient.canManageChildren(
-            powerLevels: levels, userId: UserId(unchecked: "@pleb:x")))
-    }
-
-    @Test("Per-event thresholds apply")
-    func perEventThreshold() {
-        let levels: [String: AnyCodable] = [
-            "users": .object(["@mod:x": .int(50)]),
-            "state_default": .int(50),
-            "events": .object(["m.space.child": .int(100)]),
-        ]
-        #expect(!SpacesClient.canManageChildren(
-            powerLevels: levels, userId: UserId(unchecked: "@mod:x")))
+            powerLevels: levels.levels,
+            userId: UserId(unchecked: user)) == expected)
     }
 }

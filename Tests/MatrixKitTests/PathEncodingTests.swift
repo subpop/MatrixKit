@@ -8,24 +8,15 @@ import Testing
 /// must concatenate without re-encoding.
 @Suite("PathEncoding")
 struct PathEncodingTests {
-    @Test("Room ID encodes the colon exactly once")
-    func roomId() {
-        let encoded = RoomId(unchecked: "!abc:matrix.org").pathSegmentEncoded
-        #expect(encoded == "!abc%3Amatrix.org")
+    @Test("Segments encode exactly once", arguments: [
+        (RoomId(unchecked: "!abc:matrix.org").pathSegmentEncoded, "!abc%3Amatrix.org"),
+        (RoomAlias(unchecked: "#general:matrix.org").pathSegmentEncoded, "%23general%3Amatrix.org"),
+        (UserId(unchecked: "@alice:matrix.org").pathSegmentEncoded, "@alice%3Amatrix.org"),
+        ("m.room.message".pathSegmentEncoded, "m.room.message"),
+    ])
+    func segmentEncoding(encoded: String, expected: String) {
+        #expect(encoded == expected)
         #expect(!encoded.contains("%25"))
-    }
-
-    @Test("Room alias encodes the hash and colon exactly once")
-    func roomAlias() {
-        let encoded = RoomAlias(unchecked: "#general:matrix.org").pathSegmentEncoded
-        #expect(encoded == "%23general%3Amatrix.org")
-        #expect(!encoded.contains("%25"))
-    }
-
-    @Test("User ID encodes the colon exactly once")
-    func userId() {
-        let encoded = UserId(unchecked: "@alice:matrix.org").pathSegmentEncoded
-        #expect(encoded == "@alice%3Amatrix.org")
     }
 
     @Test("Send URL keeps single encoding end to end")

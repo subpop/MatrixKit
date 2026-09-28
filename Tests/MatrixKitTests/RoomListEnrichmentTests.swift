@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 
+import MatrixKitTesting
 @testable import MatrixKit
 
 private func stateEvent(
@@ -65,20 +66,15 @@ struct RoomListEnrichmentTests {
         #expect(await room.isSpace)
     }
 
-    @Test("Favourite flag follows room tags")
-    func favourite() async {
+    @Test("Favourite flag follows room tags", arguments: [true, false])
+    func favourite(favourite: Bool) async {
         let room = RoomActor(roomId: RoomId(unchecked: "!r:x"))
-        let tags = { (favourite: Bool) in
-            JoinedRoomDelta(accountData: [
-                BasicEvent(type: "m.tag", content: [
-                    "tags": .object(favourite ? ["m.favourite": .object([:])] : [:]),
-                ]),
-            ])
-        }
-        await room.applyJoined(tags(true))
-        #expect(await room.isFavourite)
-        await room.applyJoined(tags(false))
-        #expect(!(await room.isFavourite))
+        await room.applyJoined(JoinedRoomDelta(accountData: [
+            BasicEvent(type: "m.tag", content: [
+                "tags": .object(favourite ? ["m.favourite": .object([:])] : [:]),
+            ]),
+        ]))
+        #expect(await room.isFavourite == favourite)
     }
 
     @Test("Space graph edges track child/parent state, empty content clears")
@@ -193,12 +189,15 @@ struct RoomListEnrichmentTests {
     }
 
     @Test("ObservableRoom isDirect is spec-only: two members without m.direct is not a DM")
-    func observableDirectSpecOnly() async {
-        let client = await MatrixClient.restore(
-            homeserver: URL(string: "https://matrix.example")!,
-            userId: UserId(unchecked: "@alice:x"),
-            deviceId: DeviceId("ALICE"),
-            accessToken: "token")
+    func observableDirectSpecOnly() async throws {
+        // Restore against the harness: the dead-host form of this test
+        // burned two 30s connect timeouts in resolve + versions fetch.
+        try await withHarness { harness in
+            let client = await MatrixClient.restore(
+                homeserver: await harness.baseURL,
+                userId: UserId(unchecked: "@alice:x"),
+                deviceId: DeviceId("ALICE"),
+                accessToken: "token")
         let actor = await client.store.room(RoomId(unchecked: "!pair:x"))
         await actor.applyJoined(JoinedRoomDelta(state: [
             stateEvent(type: "m.room.member", sender: "@alice:x", stateKey: "@alice:x", content: [
@@ -227,15 +226,17 @@ struct RoomListEnrichmentTests {
             media: client.media, localUser: client.userId)
         #expect(listed.isDirect)
         try? await client.transport.shutdown()
+        }
     }
 
     @Test("ObservableRoom mirrors enrichment and invite heroes")
-    func observableMirror() async {
-        let client = await MatrixClient.restore(
-            homeserver: URL(string: "https://matrix.example")!,
-            userId: UserId(unchecked: "@alice:x"),
-            deviceId: DeviceId("ALICE"),
-            accessToken: "token")
+    func observableMirror() async throws {
+        try await withHarness { harness in
+            let client = await MatrixClient.restore(
+                homeserver: await harness.baseURL,
+                userId: UserId(unchecked: "@alice:x"),
+                deviceId: DeviceId("ALICE"),
+                accessToken: "token")
         let actor = await client.store.room(RoomId(unchecked: "!r:x"))
         await actor.applyJoined(JoinedRoomDelta(
             state: [stateEvent(type: "m.room.canonical_alias", content: [
@@ -270,5 +271,6 @@ struct RoomListEnrichmentTests {
         #expect(inviteRoom.inviterName == "Bob")
         #expect(inviteRoom.inviterAvatarURL?.value == "mxc://x/bob")
         try? await client.transport.shutdown()
+        }
     }
 }

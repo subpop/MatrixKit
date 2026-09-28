@@ -88,8 +88,13 @@ struct OlmSessionTests {
         }
     }
 
-    @Test("Tampered MAC and ciphertext are rejected")
-    func tamper() throws {
+    enum TamperSite: Sendable {
+        case mac
+        case ciphertext
+    }
+
+    @Test("Tampered MAC and ciphertext are rejected", arguments: [TamperSite.mac, .ciphertext])
+    func tamper(_ site: TamperSite) throws {
         var (alice, bob, _, _) = try handshake()
         // Advance past the pre-key phase so the tampered message is a
         // normal one (flipping envelope bytes would trip the identity
@@ -97,19 +102,14 @@ struct OlmSessionTests {
         let firstReply = try bob.encrypt(Data("ack".utf8)).body
         #expect(try alice.decrypt(firstReply) == Data("ack".utf8))
         let body = try alice.encrypt(Data("secret".utf8)).body
-        var badMAC = body
-        badMAC[badMAC.count - 1] ^= 0xFF
-        do {
-            _ = try bob.decrypt(badMAC)
-            Issue.record("bad MAC should throw")
-        } catch let error {
-            #expect(error == .macMismatch)
+        var bad = body
+        switch site {
+        case .mac: bad[bad.count - 1] ^= 0xFF
+        case .ciphertext: bad[bad.count / 2] ^= 0xFF
         }
-        var badCt = body
-        badCt[badCt.count / 2] ^= 0xFF
         do {
-            _ = try bob.decrypt(badCt)
-            Issue.record("bad ciphertext should throw")
+            _ = try bob.decrypt(bad)
+            Issue.record("\(site) tamper should throw")
         } catch let error {
             #expect(error == .macMismatch)
         }

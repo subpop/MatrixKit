@@ -17,27 +17,40 @@ struct MessageContentTests {
         #expect(html.formattedBody == "<b>hi</b>")
     }
 
-    @Test("RelatesTo encodes reply, edit, and reaction shapes")
-    func relatesTo() throws {
-        let eventId = EventId(unchecked: "$x:example.com")
-        let reply = MessageContent.text("yo", relatesTo: .reply(to: eventId))
-        let data = try JSONEncoder().encode(reply)
+    struct RelationCase: Sendable {
+        var id: String
+        var content: any Encodable & Sendable
+        var check: @Sendable ([String: AnyCodable]) -> Bool
+    }
+
+    static func relationCases(eventId: EventId) -> [RelationCase] {
+        [
+            RelationCase(
+                id: "reply",
+                content: MessageContent.text("yo", relatesTo: .reply(to: eventId)),
+                check: { $0["m.relates_to"]?["m.in_reply_to"]?["event_id"]?.stringValue == eventId.value }),
+            RelationCase(
+                id: "reaction",
+                content: ReactionContent.reaction(to: eventId, key: "👍"),
+                check: {
+                    $0["m.relates_to"]?["rel_type"]?.stringValue == "m.annotation"
+                        && $0["m.relates_to"]?["key"]?.stringValue == "👍"
+                }),
+            RelationCase(
+                id: "edit",
+                content: EditContent(body: " * new", newContent: .text("new"), relatesTo: .edit(of: eventId)),
+                check: {
+                    $0["m.new_content"]?["body"]?.stringValue == "new"
+                        && $0["m.relates_to"]?["rel_type"]?.stringValue == "m.replace"
+                }),
+        ]
+    }
+
+    @Test("RelatesTo encodes relation shapes", arguments: relationCases(eventId: EventId(unchecked: "$x:example.com")))
+    func relatesTo(_ c: RelationCase) throws {
+        let data = try JSONEncoder().encode(c.content)
         let json = try JSONDecoder().decode([String: AnyCodable].self, from: data)
-        #expect(json["m.relates_to"]?["m.in_reply_to"]?["event_id"]?.stringValue == "$x:example.com")
-
-        let reaction = ReactionContent.reaction(to: eventId, key: "👍")
-        let reactionData = try JSONEncoder().encode(reaction)
-        let reactionJson = try JSONDecoder().decode([String: AnyCodable].self, from: reactionData)
-        #expect(
-            reactionJson["m.relates_to"]?["rel_type"]?.stringValue == "m.annotation")
-        #expect(reactionJson["m.relates_to"]?["key"]?.stringValue == "👍")
-
-        let edit = EditContent(
-            body: " * new", newContent: .text("new"), relatesTo: .edit(of: eventId))
-        let editData = try JSONEncoder().encode(edit)
-        let editJson = try JSONDecoder().decode([String: AnyCodable].self, from: editData)
-        #expect(editJson["m.new_content"]?["body"]?.stringValue == "new")
-        #expect(editJson["m.relates_to"]?["rel_type"]?.stringValue == "m.replace")
+        #expect(c.check(json))
     }
 
     @Test("MessageEvent timestamp converts millis to Date")

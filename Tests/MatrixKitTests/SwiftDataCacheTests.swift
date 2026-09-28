@@ -2,6 +2,7 @@
 import Foundation
 import Testing
 
+import MatrixKitTesting
 @testable import MatrixKit
 import MatrixKitSwiftData
 
@@ -16,39 +17,8 @@ struct SwiftDataCacheTests {
         return try SwiftDataCache(database: file)
     }
 
-    private func message(_ body: String, id: String = "$e") -> MessageEvent {
-        MessageEvent(
-            type: "m.room.message",
-            eventId: EventId(unchecked: id),
-            sender: UserId(unchecked: "@alice:example.com"),
-            originServerTs: 1_700_000_000_000,
-            content: ["msgtype": .string("m.text"), "body": .string(body)]
-        )
-    }
-
     private func snapshot() -> StoreSnapshot {
-        let roomId = RoomId(unchecked: "!room1:example.com")
-        return StoreSnapshot(
-            syncToken: "s105_106",
-            localUser: UserId(unchecked: "@me:example.com"),
-            accountData: ["m.push_rules": ["global": .string("yes")]],
-            rooms: [
-                RoomSnapshot(
-                    roomId: roomId,
-                    name: "General",
-                    membership: .join,
-                    members: [
-                        UserId(unchecked: "@alice:example.com"): MemberContent(
-                            membership: .join, displayname: "Alice")
-                    ],
-                    timeline: [message("hello")],
-                    unreadCount: 3,
-                    highlightCount: 1,
-                    prevBatch: "s100_101",
-                    notificationMode: .mute
-                )
-            ]
-        )
+        populatedSnapshot(notificationMode: .mute)
     }
 
     @Test("Save/load round-trips the snapshot")
@@ -266,6 +236,16 @@ struct SwiftDataCacheTests {
         // Must not throw despite the missing parents.
         _ = try SwiftDataCache(database: file)
         #expect(FileManager.default.fileExists(atPath: file.path))
+    }
+
+    @Test("databaseURL sanitizes the user ID", arguments: [
+        ("@alice:example.com", "_alice_example_com"),
+        ("@bob:x", "_bob_x"),
+    ])
+    func databaseURL(userId: String, expected: String) {
+        let url = SwiftDataCache.databaseURL(for: UserId(unchecked: userId))
+        #expect(url?.lastPathComponent == "store.swiftdata")
+        #expect(url?.deletingLastPathComponent().lastPathComponent == expected)
     }
 }
 #endif

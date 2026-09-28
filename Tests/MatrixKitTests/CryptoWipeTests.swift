@@ -3,6 +3,8 @@ import MatrixKit
 import MatrixKitCrypto
 import Testing
 
+import MatrixKitTesting
+
 /// Logout wipes every local crypto remnant so a fresh sign-in starts
 /// unverified: the cross-signing keychain entry, device identity
 /// entries, persisted Olm sessions + one-time keys, and megolm

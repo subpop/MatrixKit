@@ -32,55 +32,85 @@ private func ruleset(
 
 @Suite("Notification settings evaluation")
 struct NotificationSettingsTests {
-    @Test("Default modes follow the underride matrix")
-    func defaults() {
-        let all = ruleset(underride: [
-            rule(".m.rule.message"), rule(".m.rule.encrypted"),
-            rule(".m.rule.room_one_to_one"), rule(".m.rule.encrypted_room_one_to_one"),
-        ])
-        #expect(NotificationSettings.defaultMode(in: all, encrypted: true, oneToOne: true)
-            == .allMessages)
-        #expect(NotificationSettings.defaultMode(in: all, encrypted: false, oneToOne: false)
-            == .allMessages)
-
-        let silent = ruleset(underride: [
-            rule(".m.rule.message", actions: []),
-            rule(".m.rule.encrypted", enabled: false),
-        ])
-        #expect(NotificationSettings.defaultMode(in: silent, encrypted: false, oneToOne: false)
-            == .mentionsAndKeywordsOnly)
-        #expect(NotificationSettings.defaultMode(in: silent, encrypted: true, oneToOne: false)
-            == .mentionsAndKeywordsOnly)
-        #expect(NotificationSettings.defaultMode(in: silent, encrypted: true, oneToOne: true)
-            == .mentionsAndKeywordsOnly)
+    struct ModeCase: Sendable {
+        var ruleset: PushRuleset
+        var encrypted: Bool
+        var oneToOne: Bool
+        var expected: DefaultNotificationMode
     }
 
-    @Test("Room modes distinguish override mutes from room rules")
-    func roomModes() {
-        let roomId = RoomId(unchecked: "!r:x")
-        #expect(NotificationSettings.roomMode(
-            in: ruleset(), roomId: roomId) == nil)
+    static let defaultCases: [ModeCase] = [
+        ModeCase(
+            ruleset: ruleset(underride: [
+                rule(".m.rule.message"), rule(".m.rule.encrypted"),
+                rule(".m.rule.room_one_to_one"), rule(".m.rule.encrypted_room_one_to_one"),
+            ]),
+            encrypted: true, oneToOne: true, expected: .allMessages),
+        ModeCase(
+            ruleset: ruleset(underride: [
+                rule(".m.rule.message"), rule(".m.rule.encrypted"),
+                rule(".m.rule.room_one_to_one"), rule(".m.rule.encrypted_room_one_to_one"),
+            ]),
+            encrypted: false, oneToOne: false, expected: .allMessages),
+        ModeCase(
+            ruleset: ruleset(underride: [
+                rule(".m.rule.message", actions: []),
+                rule(".m.rule.encrypted", enabled: false),
+            ]),
+            encrypted: false, oneToOne: false, expected: .mentionsAndKeywordsOnly),
+        ModeCase(
+            ruleset: ruleset(underride: [
+                rule(".m.rule.message", actions: []),
+                rule(".m.rule.encrypted", enabled: false),
+            ]),
+            encrypted: true, oneToOne: false, expected: .mentionsAndKeywordsOnly),
+        ModeCase(
+            ruleset: ruleset(underride: [
+                rule(".m.rule.message", actions: []),
+                rule(".m.rule.encrypted", enabled: false),
+            ]),
+            encrypted: true, oneToOne: true, expected: .mentionsAndKeywordsOnly),
+    ]
 
-        let muted = ruleset(override: [
-            rule(".m.rule.room_mute", actions: [], roomCondition: "!r:x"),
-        ])
-        #expect(NotificationSettings.roomMode(in: muted, roomId: roomId) == .mute)
+    @Test("Default modes follow the underride matrix", arguments: defaultCases)
+    func defaults(_ c: ModeCase) {
+        #expect(NotificationSettings.defaultMode(
+            in: c.ruleset, encrypted: c.encrypted, oneToOne: c.oneToOne) == c.expected)
+    }
 
-        let all = ruleset(room: [rule("!r:x")])
-        #expect(NotificationSettings.roomMode(in: all, roomId: roomId) == .allMessages)
+    struct RoomModeCase: Sendable {
+        var ruleset: PushRuleset
+        var roomId: RoomId
+        var expected: RoomNotificationMode?
+    }
 
-        let mentions = ruleset(room: [rule("!r:x", actions: [])])
-        #expect(NotificationSettings.roomMode(in: mentions, roomId: roomId)
-            == .mentionsAndKeywordsOnly)
-
+    static let roomModeCases: [RoomModeCase] = [
+        RoomModeCase(ruleset: ruleset(), roomId: RoomId(unchecked: "!r:x"), expected: nil),
+        RoomModeCase(
+            ruleset: ruleset(override: [
+                rule(".m.rule.room_mute", actions: [], roomCondition: "!r:x"),
+            ]),
+            roomId: RoomId(unchecked: "!r:x"), expected: .mute),
+        RoomModeCase(
+            ruleset: ruleset(room: [rule("!r:x")]),
+            roomId: RoomId(unchecked: "!r:x"), expected: .allMessages),
+        RoomModeCase(
+            ruleset: ruleset(room: [rule("!r:x", actions: [])]),
+            roomId: RoomId(unchecked: "!r:x"), expected: .mentionsAndKeywordsOnly),
         // Legacy mutes (pre-migration clients) are room-kind rules with
         // `dont_notify` actions: still mute, not mentions.
-        let legacyMute = ruleset(room: [rule("!r:x", actions: [.string("dont_notify")])])
-        #expect(NotificationSettings.roomMode(in: legacyMute, roomId: roomId) == .mute)
-
+        RoomModeCase(
+            ruleset: ruleset(room: [rule("!r:x", actions: [.string("dont_notify")])]),
+            roomId: RoomId(unchecked: "!r:x"), expected: .mute),
         // Other rooms' rules do not leak across.
-        #expect(NotificationSettings.roomMode(
-            in: all, roomId: RoomId(unchecked: "!other:x")) == nil)
+        RoomModeCase(
+            ruleset: ruleset(room: [rule("!r:x")]),
+            roomId: RoomId(unchecked: "!other:x"), expected: nil),
+    ]
+
+    @Test("Room modes distinguish override mutes from room rules", arguments: roomModeCases)
+    func roomModes(_ c: RoomModeCase) {
+        #expect(NotificationSettings.roomMode(in: c.ruleset, roomId: c.roomId) == c.expected)
     }
 
     @Test("Custom rooms collect room rules and room conditions")
@@ -122,66 +152,60 @@ struct NotificationSettingsTests {
         #expect(NotificationSettings.keywords(in: set) == ["matrix"])
     }
 
-    @Test("Room mentions prefer the modern rule")
-    func roomMentions() {
-        let modern = ruleset(override: [rule(".m.rule.is_room_mention", enabled: false)])
-        #expect(!NotificationSettings.roomMentionEnabled(in: modern))
-
-        let legacy = ruleset(override: [rule(".m.rule.roomnotif")])
-        #expect(NotificationSettings.roomMentionEnabled(in: legacy))
-
-        let legacySilent = ruleset(override: [rule(".m.rule.roomnotif", actions: [])])
-        #expect(!NotificationSettings.roomMentionEnabled(in: legacySilent))
-
-        #expect(!NotificationSettings.roomMentionEnabled(in: ruleset()))
+    @Test("Room mentions prefer the modern rule", arguments: [
+        (ruleset(override: [rule(".m.rule.is_room_mention", enabled: false)]), false),
+        (ruleset(override: [rule(".m.rule.roomnotif")]), true),
+        (ruleset(override: [rule(".m.rule.roomnotif", actions: [])]), false),
+        (ruleset(), false),
+    ])
+    func roomMentions(_ set: PushRuleset, expected: Bool) {
+        #expect(NotificationSettings.roomMentionEnabled(in: set) == expected)
     }
 
-    @Test("User mentions prefer the modern rule over legacy")
-    func userMentions() {
-        let modern = ruleset(
+    @Test("User mentions prefer the modern rule over legacy", arguments: [
+        (ruleset(
             override: [rule(".m.rule.is_user_mention")],
-            content: [rule(".m.rule.contains_user_name", enabled: false)])
-        #expect(NotificationSettings.userMentionEnabled(in: modern))
-
-        let legacyName = ruleset(content: [rule(".m.rule.contains_user_name")])
-        #expect(NotificationSettings.userMentionEnabled(in: legacyName))
-
-        let legacyDisplay = ruleset(override: [rule(".m.rule.contains_display_name")])
-        #expect(NotificationSettings.userMentionEnabled(in: legacyDisplay))
-
-        #expect(!NotificationSettings.userMentionEnabled(in: ruleset()))
+            content: [rule(".m.rule.contains_user_name", enabled: false)]), true),
+        (ruleset(content: [rule(".m.rule.contains_user_name")]), true),
+        (ruleset(override: [rule(".m.rule.contains_display_name")]), true),
+        (ruleset(), false),
+    ])
+    func userMentions(_ set: PushRuleset, expected: Bool) {
+        #expect(NotificationSettings.userMentionEnabled(in: set) == expected)
     }
 
-    @Test("Push actions encode spec shapes")
-    func actionEncoding() throws {
-        func encoded(_ action: PushAction) throws -> AnyCodable {
-            let data = try JSONEncoder().encode(action)
-            return try JSONDecoder().decode(AnyCodable.self, from: data)
-        }
-        #expect(try encoded(.notify) == .string("notify"))
-        #expect(
-            try encoded(.sound("default"))
-                == .object(["set_tweak": .string("sound"), "value": .string("default")]))
-        #expect(
-            try encoded(.highlight(nil)) == .object(["set_tweak": .string("highlight")]))
-        #expect(
-            try encoded(.highlight(false))
-                == .object(["set_tweak": .string("highlight"), "value": .bool(false)]))
+    @Test("Push actions encode spec shapes", arguments: [
+        (PushAction.notify, AnyCodable.string("notify")),
+        (
+            PushAction.sound("default"),
+            AnyCodable.object(["set_tweak": .string("sound"), "value": .string("default")])),
+        (
+            PushAction.highlight(nil),
+            AnyCodable.object(["set_tweak": .string("highlight")])),
+        (
+            PushAction.highlight(false),
+            AnyCodable.object(["set_tweak": .string("highlight"), "value": .bool(false)])),
+    ])
+    func actionEncoding(_ action: PushAction, expected: AnyCodable) throws {
+        let data = try JSONEncoder().encode(action)
+        #expect(try JSONDecoder().decode(AnyCodable.self, from: data) == expected)
     }
 
-    @Test("Underride and poll IDs map the room matrix")
-    func ruleIds() {
-        #expect(NotificationSettings.underrideId(encrypted: true, oneToOne: true)
-            == ".m.rule.encrypted_room_one_to_one")
-        #expect(NotificationSettings.underrideId(encrypted: false, oneToOne: true)
-            == ".m.rule.room_one_to_one")
-        #expect(NotificationSettings.underrideId(encrypted: true, oneToOne: false)
-            == ".m.rule.encrypted")
-        #expect(NotificationSettings.underrideId(encrypted: false, oneToOne: false)
-            == ".m.rule.message")
-        #expect(NotificationSettings.pollIds(oneToOne: true)
-            == [".m.rule.poll_start_one_to_one", ".org.matrix.msc3381.poll_start_one_to_one"])
-        #expect(NotificationSettings.pollIds(oneToOne: false)
-            == [".m.rule.poll_start", ".org.matrix.msc3381.poll_start"])
+    @Test("Underride IDs map the room matrix", arguments: [
+        ((true, true), ".m.rule.encrypted_room_one_to_one"),
+        ((false, true), ".m.rule.room_one_to_one"),
+        ((true, false), ".m.rule.encrypted"),
+        ((false, false), ".m.rule.message"),
+    ])
+    func underrideIds(flags: (Bool, Bool), expected: String) {
+        #expect(NotificationSettings.underrideId(encrypted: flags.0, oneToOne: flags.1) == expected)
+    }
+
+    @Test("Poll IDs map one-to-one rooms", arguments: [
+        (true, [".m.rule.poll_start_one_to_one", ".org.matrix.msc3381.poll_start_one_to_one"]),
+        (false, [".m.rule.poll_start", ".org.matrix.msc3381.poll_start"]),
+    ])
+    func pollIds(oneToOne: Bool, expected: [String]) {
+        #expect(NotificationSettings.pollIds(oneToOne: oneToOne) == expected)
     }
 }

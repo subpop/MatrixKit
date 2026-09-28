@@ -51,8 +51,14 @@ struct MegolmSessionTests {
         }
     }
 
-    @Test("Any wire tamper fails the signature check")
-    func tamper() throws {
+    enum MessageTamper: Sendable {
+        case middle
+        case last
+        case version
+    }
+
+    @Test("Wire tamper fails the signature check", arguments: [MessageTamper.middle, .last, .version])
+    func tamper(_ site: MessageTamper) throws {
         var outbound = MegolmSession.create()
         let body = try outbound.encrypt(Data("secret".utf8))
         var inbound = try MegolmSession.importSessionKey(
@@ -60,52 +66,56 @@ struct MegolmSessionTests {
         // The Ed25519 signature covers payload + MAC, so content flips
         // surface as invalidSignature (the HMAC is defense in depth);
         // flipping the version byte fails the version check first.
-        for offset in [body.count / 2, body.count - 1] {
-            var bad = body
-            bad[offset] ^= 0xFF
-            do {
-                _ = try inbound.decrypt(bad)
-                Issue.record("tamper at \(offset) should throw")
-            } catch let error {
-                #expect(error == .invalidSignature)
-            }
+        var bad = body
+        let expected: CryptoError
+        switch site {
+        case .middle:
+            bad[body.count / 2] ^= 0xFF
+            expected = .invalidSignature
+        case .last:
+            bad[body.count - 1] ^= 0xFF
+            expected = .invalidSignature
+        case .version:
+            bad[bad.startIndex] ^= 0xFF
+            expected = .unsupportedVersion(0xFC)
         }
-        var badVersion = body
-        badVersion[badVersion.startIndex] ^= 0xFF
         do {
-            _ = try inbound.decrypt(badVersion)
-            Issue.record("version tamper should throw")
+            _ = try inbound.decrypt(bad)
+            Issue.record("tamper at \(site) should throw")
         } catch let error {
-            #expect(error == .unsupportedVersion(0xFC))
+            #expect(error == expected)
         }
     }
 
-    @Test("Malformed session blobs are rejected")
-    func badSessionKey() throws {
+    enum BlobTamper: Sendable {
+        case truncated
+        case badVersion
+        case badSignature
+    }
+
+    @Test("Malformed session blobs are rejected", arguments: [BlobTamper.truncated, .badVersion, .badSignature])
+    func badSessionKey(_ tamper: BlobTamper) throws {
         var outbound = MegolmSession.create()
         _ = try outbound.encrypt(Data("x".utf8))
         let blob = try outbound.sessionKey()
-        do {
-            _ = try MegolmSession.importSessionKey(blob.prefix(100))
-            Issue.record("truncated blob should throw")
-        } catch let error {
-            #expect(error == .malformedMessage("Session-sharing blob must be 229 bytes"))
+        var bad = blob
+        let expected: CryptoError
+        switch tamper {
+        case .truncated:
+            bad = Data(bad.prefix(100))
+            expected = .malformedMessage("Session-sharing blob must be 229 bytes")
+        case .badVersion:
+            bad[bad.startIndex] = 0x09
+            expected = .unsupportedVersion(0x09)
+        case .badSignature:
+            bad[bad.count - 1] ^= 0xFF
+            expected = .invalidSignature
         }
-        var badVersion = blob
-        badVersion[badVersion.startIndex] = 0x09
         do {
-            _ = try MegolmSession.importSessionKey(badVersion)
-            Issue.record("bad version should throw")
+            _ = try MegolmSession.importSessionKey(bad)
+            Issue.record("\(tamper) blob should throw")
         } catch let error {
-            #expect(error == .unsupportedVersion(0x09))
-        }
-        var badSig = blob
-        badSig[badSig.count - 1] ^= 0xFF
-        do {
-            _ = try MegolmSession.importSessionKey(badSig)
-            Issue.record("bad signature should throw")
-        } catch let error {
-            #expect(error == .invalidSignature)
+            #expect(error == expected)
         }
     }
 

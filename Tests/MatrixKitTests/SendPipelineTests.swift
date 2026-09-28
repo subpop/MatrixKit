@@ -1,6 +1,8 @@
 import Foundation
 import Testing
 
+import MatrixKitTesting
+
 @testable import MatrixKit
 @testable import MatrixKitCrypto
 
@@ -35,45 +37,34 @@ struct SendPipelineTests {
         #expect(json["m.mentions"]?["room"]?.boolValue == true)
     }
 
-    @Test("Staged echo is pending in the timeline")
-    func stage() async {
+    enum EchoOp: Sendable {
+        case confirm
+        case fail
+        case cancel
+    }
+
+    @Test("Echo lifecycle: stage, then confirm, fail, or cancel", arguments: [EchoOp.confirm, .fail, .cancel])
+    func echoLifecycle(_ op: EchoOp) async {
         let room = RoomActor(roomId: RoomId(unchecked: "!r:x"))
         await room.stageEcho(
             echoEvent(id: "local:t1", txn: "t1"), transactionId: TransactionId("t1"))
-        #expect(await room.timeline.map(\.eventId.value) == ["local:t1"])
         #expect(await room.sendStates[EventId(unchecked: "local:t1")] == .pending)
-    }
-
-    @Test("Sync confirm replaces the echo with the server event")
-    func confirm() async {
-        let room = RoomActor(roomId: RoomId(unchecked: "!r:x"))
-        await room.stageEcho(
-            echoEvent(id: "local:t1", txn: "t1"), transactionId: TransactionId("t1"))
-        let confirmed = echoEvent(id: "$real:x", txn: "t1")
-        await room.applyJoined(JoinedRoomDelta(timeline: [confirmed]))
-        #expect(await room.timeline.map(\.eventId.value) == ["$real:x"])
-        #expect(await room.sendStates.isEmpty)
-    }
-
-    @Test("Failed echo stays visible with its reason")
-    func fail() async {
-        let room = RoomActor(roomId: RoomId(unchecked: "!r:x"))
-        await room.stageEcho(
-            echoEvent(id: "local:t1", txn: "t1"), transactionId: TransactionId("t1"))
-        await room.failEcho(transactionId: TransactionId("t1"), reason: "offline")
-        #expect(await room.timeline.map(\.eventId.value) == ["local:t1"])
-        #expect(await room.sendStates[EventId(unchecked: "local:t1")] == .failed("offline"))
-    }
-
-    @Test("Cancelled echo is dropped")
-    func cancel() async {
-        let room = RoomActor(roomId: RoomId(unchecked: "!r:x"))
-        await room.stageEcho(
-            echoEvent(id: "local:t1", txn: "t1"), transactionId: TransactionId("t1"))
-        #expect(await room.cancelEcho(transactionId: TransactionId("t1")))
-        #expect(await room.timeline.isEmpty)
-        #expect(await room.sendStates.isEmpty)
-        #expect(!(await room.cancelEcho(transactionId: TransactionId("t1"))))
+        switch op {
+        case .confirm:
+            let confirmed = echoEvent(id: "$real:x", txn: "t1")
+            await room.applyJoined(JoinedRoomDelta(timeline: [confirmed]))
+            #expect(await room.timeline.map(\.eventId.value) == ["$real:x"])
+            #expect(await room.sendStates.isEmpty)
+        case .fail:
+            await room.failEcho(transactionId: TransactionId("t1"), reason: "offline")
+            #expect(await room.timeline.map(\.eventId.value) == ["local:t1"])
+            #expect(await room.sendStates[EventId(unchecked: "local:t1")] == .failed("offline"))
+        case .cancel:
+            #expect(await room.cancelEcho(transactionId: TransactionId("t1")))
+            #expect(await room.timeline.isEmpty)
+            #expect(await room.sendStates.isEmpty)
+            #expect(!(await room.cancelEcho(transactionId: TransactionId("t1"))))
+        }
     }
 
     @Test("Encryption state tracks m.room.encryption")

@@ -39,6 +39,9 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-log.git", from: "1.6.0"),
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.6.0"),
         .package(url: "https://github.com/apple/swift-docc-plugin.git", from: "1.4.0"),
+        // Test harness only: the in-process spec server speaks HTTP/1.1
+        // over NIO (already in the graph via async-http-client).
+        .package(url: "https://github.com/apple/swift-nio.git", from: "2.81.0"),
     ],
     targets: [
         .target(
@@ -81,15 +84,37 @@ let package = Package(
         ),
         .testTarget(
             name: "MatrixRTCTests",
-            dependencies: ["MatrixRTC"]
+            dependencies: ["MatrixRTC", "MatrixKit", "MatrixKitCrypto", "MatrixKitTesting"]
         ),
         .testTarget(
             name: "MatrixKitCryptoTests",
-            dependencies: ["MatrixKitCrypto"]
+            dependencies: ["MatrixKitCrypto", "MatrixKitTesting"],
+            // Interop fixtures are loaded via #filePath, not the bundle,
+            // so keep the raw files (JSON/Python generator) out of
+            // target discovery to avoid "unhandled file" warnings.
+            exclude: ["InteropFixtures"]
         ),
         .testTarget(
             name: "MatrixKitTests",
-            dependencies: ["MatrixKit", "MatrixKitCrypto", "MatrixKitSQLite", "MatrixKitSwiftData"]
+            dependencies: [
+                "MatrixKit", "MatrixKitCrypto", "MatrixKitSQLite", "MatrixKitSwiftData",
+                "MatrixKitTesting",
+            ]
+        ),
+        // Shared test support: spec harness, fixtures, fakes, table helpers.
+        // A library-style target (not a product) so suites share one harness.
+        .target(
+            name: "MatrixKitTesting",
+            dependencies: [
+                "MatrixKit",
+                "MatrixKitCrypto",
+                "MatrixKitSQLite",
+                "MatrixKitSwiftData",
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
+                .product(name: "NIOHTTP1", package: "swift-nio"),
+            ],
+            path: "Tests/Support"
         ),
         .executableTarget(
             name: "mx",

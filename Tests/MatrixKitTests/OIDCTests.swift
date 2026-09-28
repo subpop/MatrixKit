@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 
+import MatrixKitTesting
 @testable import MatrixKit
 
 private let sampleMetadataJSON = """
@@ -103,41 +104,47 @@ struct OIDCTests {
         #expect(json?["application_type"] as? String == "native")
     }
 
-    @Test("Registration request carries branding URIs when set")
-    func registrationBranding() throws {
+    @Test("Registration request carries branding URIs when set", arguments: [true, false])
+    func registrationBranding(branded: Bool) throws {
         let request = OIDCRegistrationRequest(
             clientName: "Relay",
-            clientURI: "https://subpop.github.io/Relay",
-            logoURI: "https://subpop.github.io/Relay/logo-256.png",
-            redirectURIs: ["io.github.subpop.relay:/"])
+            clientURI: branded ? "https://subpop.github.io/Relay" : nil,
+            logoURI: branded ? "https://subpop.github.io/Relay/logo-256.png" : nil,
+            redirectURIs: branded ? ["io.github.subpop.relay:/"] : [])
         let data = try JSONEncoder().encode(request)
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-        #expect(json?["client_uri"] as? String == "https://subpop.github.io/Relay")
-        #expect(json?["logo_uri"] as? String == "https://subpop.github.io/Relay/logo-256.png")
-        #expect(json?["redirect_uris"] as? [String] == ["io.github.subpop.relay:/"])
-
-        let bare = OIDCRegistrationRequest(clientName: "Relay")
-        let bareData = try JSONEncoder().encode(bare)
-        let bareJSON = try JSONSerialization.jsonObject(with: bareData) as? [String: Any]
-        #expect(bareJSON?["client_uri"] == nil)
-        #expect(bareJSON?["logo_uri"] == nil)
+        if branded {
+            #expect(json?["client_uri"] as? String == "https://subpop.github.io/Relay")
+            #expect(json?["logo_uri"] as? String == "https://subpop.github.io/Relay/logo-256.png")
+            #expect(json?["redirect_uris"] as? [String] == ["io.github.subpop.relay:/"])
+        } else {
+            #expect(json?["client_uri"] == nil)
+            #expect(json?["logo_uri"] == nil)
+        }
     }
 
     @Test("Restore records OIDC metadata for later refreshes")
-    func restoreOIDCMetadata() async {
-        let client = await MatrixClient.restore(
-            homeserver: URL(string: "https://matrix.org")!,
-            userId: UserId(unchecked: "@a:b"), deviceId: DeviceId("D"),
-            accessToken: "t", refreshToken: "r",
-            oidcClientId: "cid", oidcTokenEndpoint: "https://account.b/oauth2/token")
-        #expect(await client.session.isOIDC == true)
-        #expect(await client.session.oidcClientId == "cid")
+    func restoreOIDCMetadata() async throws {
+        // Restore against the harness, never the live network: the old
+        // form of this test fetched well-known + versions from matrix.org.
+        try await withHarness { harness in
+            let baseURL = await harness.baseURL
+            let client = await MatrixClient.restore(
+                homeserver: baseURL,
+                userId: UserId(unchecked: "@a:b"), deviceId: DeviceId("D"),
+                accessToken: "t", refreshToken: "r",
+                oidcClientId: "cid", oidcTokenEndpoint: "https://account.b/oauth2/token")
+            #expect(await client.session.isOIDC == true)
+            #expect(await client.session.oidcClientId == "cid")
 
-        let legacy = await MatrixClient.restore(
-            homeserver: URL(string: "https://matrix.org")!,
-            userId: UserId(unchecked: "@a:b"), deviceId: DeviceId("D"),
-            accessToken: "t", refreshToken: "r")
-        #expect(await legacy.session.isOIDC == false)
+            let legacy = await MatrixClient.restore(
+                homeserver: baseURL,
+                userId: UserId(unchecked: "@a:b"), deviceId: DeviceId("D"),
+                accessToken: "t", refreshToken: "r")
+            #expect(await legacy.session.isOIDC == false)
+            try? await client.transport.shutdown()
+            try? await legacy.transport.shutdown()
+        }
     }
 
     @Test("Scope strings use Matrix URNs")
@@ -197,12 +204,15 @@ struct OIDCTests {
         #expect(await session.oidcTokenEndpoint == nil)
     }
 
-    @Test("MatrixVersion covers OIDC-era spec releases")
-    func versions() {
+    @Test("MatrixVersion covers OIDC-era spec releases", arguments: [
+        (MatrixVersion.v1_19, MatrixVersion.v1_15, true),
+        (MatrixVersion.v1_15, MatrixVersion.v1_15, true),
+        (MatrixVersion.v1_13, MatrixVersion.v1_15, false),
+        (MatrixVersion.v1_13, MatrixVersion.v1_0, true),
+    ])
+    func versions(_ a: MatrixVersion, _ b: MatrixVersion, expected: Bool) {
         #expect(MatrixVersion.latestKnown == .v1_19)
-        #expect(MatrixVersion.v1_19.isAtLeast(.v1_15))
-        #expect(MatrixVersion.v1_15.isAtLeast(.v1_15))
-        #expect(!MatrixVersion.v1_13.isAtLeast(.v1_15))
+        #expect(a.isAtLeast(b) == expected)
     }
 
     @Test("Login grants always include the code grant for MAS compatibility")

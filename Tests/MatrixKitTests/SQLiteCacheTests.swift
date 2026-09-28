@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 
+import MatrixKitTesting
 @testable import MatrixKit
 import MatrixKitSQLite
 
@@ -15,38 +16,8 @@ struct SQLiteCacheTests {
         return try SQLiteCache(database: file)
     }
 
-    private func message(_ body: String, id: String = "$e") -> MessageEvent {
-        MessageEvent(
-            type: "m.room.message",
-            eventId: EventId(unchecked: id),
-            sender: UserId(unchecked: "@alice:example.com"),
-            originServerTs: 1_700_000_000_000,
-            content: ["msgtype": .string("m.text"), "body": .string(body)]
-        )
-    }
-
     private func snapshot() -> StoreSnapshot {
-        let roomId = RoomId(unchecked: "!room1:example.com")
-        return StoreSnapshot(
-            syncToken: "s105_106",
-            localUser: UserId(unchecked: "@me:example.com"),
-            accountData: ["m.push_rules": ["global": .string("yes")]],
-            rooms: [
-                RoomSnapshot(
-                    roomId: roomId,
-                    name: "General",
-                    membership: .join,
-                    members: [
-                        UserId(unchecked: "@alice:example.com"): MemberContent(
-                            membership: .join, displayname: "Alice")
-                    ],
-                    timeline: [message("hello")],
-                    unreadCount: 3,
-                    highlightCount: 1,
-                    prevBatch: "s100_101"
-                )
-            ]
-        )
+        populatedSnapshot()
     }
 
     @Test("Save/load round-trips the snapshot")
@@ -109,5 +80,42 @@ struct SQLiteCacheTests {
         // Must not throw despite the missing parents.
         _ = try SQLiteCache(database: file)
         #expect(FileManager.default.fileExists(atPath: file.path))
+    }
+
+    @Test("Garbage file fails to open")
+    func garbageFileFailsOpen() throws {
+        let file = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathComponent("store.sqlite")
+        try FileManager.default.createDirectory(
+            at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("not a database".utf8).write(to: file)
+        #expect(throws: SQLiteError.self) {
+            try SQLiteCache(database: file)
+        }
+    }
+
+    @Test("Room details round-trip through scalar columns")
+    func roomDetails() async throws {
+        let cache = try database()
+        var snap = snapshot()
+        snap.rooms[0].topic = "All chat"
+        snap.rooms[0].avatarURL = MXCURI(unchecked: "mxc://x/avatar")
+        snap.rooms[0].fullyReadEventId = EventId(unchecked: "$read:test")
+        try await cache.save(snap)
+        let room = try #require(await cache.load()?.rooms.first)
+        #expect(room.topic == "All chat")
+        #expect(room.avatarURL?.value == "mxc://x/avatar")
+        #expect(room.fullyReadEventId == EventId(unchecked: "$read:test"))
+    }
+
+    @Test("databaseURL sanitizes the user ID", arguments: [
+        ("@alice:example.com", "_alice_example_com"),
+        ("@bob:x", "_bob_x"),
+    ])
+    func databaseURL(userId: String, expected: String) {
+        let url = SQLiteCache.databaseURL(for: UserId(unchecked: userId))
+        #expect(url?.lastPathComponent == "store.sqlite")
+        #expect(url?.deletingLastPathComponent().lastPathComponent == expected)
     }
 }

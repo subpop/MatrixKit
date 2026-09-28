@@ -32,17 +32,21 @@ struct SignatureUploadTests {
         #expect(sigs?["ed25519:sss"] as? String == "sig")
     }
 
-    @Test("response surfaces per-signature failures")
-    func responseFailures() throws {
-        let accepted = try JSONDecoder().decode(
-            UploadSignaturesResponse.self, from: Data("{}".utf8))
-        #expect(accepted.failures == nil)
-        let raw =
-            #"{"failures": {"@subpop:matrix.org": {"vLJAYVbFIBMI": {"errcode": "M_INVALID_PARAM", "error": "400: Expected UserID string to start with '@'"}}}}"#
-        let rejected = try JSONDecoder().decode(
-            UploadSignaturesResponse.self, from: Data(raw.utf8))
-        #expect(
-            rejected.failures?["@subpop:matrix.org"]?["vLJAYVbFIBMI"]?
-                .errcode == "M_INVALID_PARAM")
+    @Test("Response surfaces per-signature failures", arguments: [
+        ("{}", false),
+        (
+            #"{"failures": {"@subpop:matrix.org": {"vLJAYVbFIBMI": {"errcode": "M_INVALID_PARAM", "error": "400: Expected UserID string to start with '@'"}}}}"#,
+            true),
+    ])
+    func responseFailures(json: String, rejected: Bool) throws {
+        let response = try JSONDecoder().decode(
+            UploadSignaturesResponse.self, from: Data(json.utf8))
+        if rejected {
+            #expect(
+                response.failures?["@subpop:matrix.org"]?["vLJAYVbFIBMI"]?
+                    .errcode == "M_INVALID_PARAM")
+        } else {
+            #expect(response.failures == nil)
+        }
     }
 }
