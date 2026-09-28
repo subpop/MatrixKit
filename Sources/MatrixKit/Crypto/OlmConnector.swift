@@ -558,6 +558,59 @@ public actor OlmConnector {
         evictUser(user)
     }
 
+    /// Drop cached Olm sessions for a peer device (all of the user's
+    /// devices when `device` is nil), so the next send re-claims fresh
+    /// instead of reusing a half the peer may have torn down (cancel,
+    /// timeout, restart). Used at verification flow start and after
+    /// undecryptable peer traffic. No-op when nothing is cached.
+    ///
+    /// With `keepingMostRecent`, the most-recently-used session
+    /// survives: a responder answering a request it just decrypted
+    /// keeps that handshake's live session while purging older,
+    /// possibly forked halves.
+    public func dropSessions(
+        user: UserId, device: String? = nil, keepingMostRecent: Bool = false
+    ) async {
+        let devices: [String]
+        if let device {
+            devices = [device]
+        } else {
+            devices = (try? await deviceIds(for: user)) ?? []
+        }
+        var dropped = false
+        for device in devices {
+            guard let curve = await peerCurve(user: user, device: device),
+                var list = sessions[curve], !list.isEmpty
+            else { continue }
+            if keepingMostRecent {
+                list.removeFirst(list.count - 1)
+            } else {
+                list.removeAll()
+            }
+            if list.isEmpty {
+                sessions.removeValue(forKey: curve)
+            } else {
+                sessions[curve] = list
+            }
+            dropped = true
+        }
+        if dropped {
+            await persistCryptoState()
+        }
+    }
+
+    /// This peer's session-cache key, resolving (and caching) device
+    /// keys on a miss. Post-restart the peer map is empty while
+    /// restored sessions may exist, so the query fallback is what lets
+    /// a stale restored half still be found and dropped.
+    private func peerCurve(user: UserId, device: String) async -> String? {
+        let cacheKey = user.value + "\0" + device
+        if let peer = resolvedPeers[cacheKey] {
+            return peer.curveB64
+        }
+        return try? await resolvePeer(user: user, device: DeviceId(device)).curveB64
+    }
+
     /// Encrypt with a cached session, else claim a key and start one.
     private func encryptToPeer(
         peer: ResolvedPeer, plaintext: Data
@@ -738,8 +791,19 @@ public actor OlmConnector {
         let plaintext: Data
         let sessionCurve: Data
         if typeInt == OlmWireType.normal.rawValue {
-            (plaintext, sessionCurve) = try decryptWithSessions(
-                senderKeyB64: senderKeyB64, body: body)
+            do {
+                (plaintext, sessionCurve) = try decryptWithSessions(
+                    senderKeyB64: senderKeyB64, body: body)
+            } catch {
+                // Spec recovery from undecryptable messages: a normal
+                // message no cached session can read means our halves
+                // are desynced (peer tore down, restarted, or forked),
+                // so discard them — the next send re-claims fresh.
+                // (Pre-key messages skip this: existing sessions are
+                // never expected to read a new handshake.)
+                sessions.removeValue(forKey: senderKeyB64)
+                throw error
+            }
         } else if typeInt == OlmWireType.preKey.rawValue {
             (plaintext, sessionCurve) = try await decryptPreKey(
                 senderKeyB64: senderKeyB64, senderKey: senderKey,

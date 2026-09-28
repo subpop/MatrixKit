@@ -547,4 +547,105 @@ struct VerificationMonitorDriverTests {
         }
         try? await transport.shutdown()
     }
+
+    @Test("Second flow completes after asymmetric session loss")
+    func secondFlowAfterAsymmetricDrop() async throws {
+        // Encrypted monitor pair: real Olm, no sender override, sends
+        // pumped peer-to-peer through the receiver's decrypt (mirrors
+        // MatrixClient.routeToDeviceEvents).
+        struct EncryptedFixture: Sendable {
+            let user: UserId
+            let device: String
+            let monitor: VerificationMonitor
+            let olm: OlmConnector
+            let fake: FakeSender
+            let transport: MatrixTransport
+            var pumpIndex: Int = 0
+        }
+        let keys = FakeKeys()
+        func makeEncrypted(
+            user: String, device: String
+        ) async throws -> EncryptedFixture {
+            let userId = UserId(unchecked: user)
+            let session = Session(
+                homeserver: URL(string: "https://example.com")!,
+                userId: userId, deviceId: DeviceId(device),
+                accessToken: "token")
+            let transport = MatrixTransport(
+                homeserver: URL(string: "https://example.com")!)
+            let fake = FakeSender()
+            let olm = OlmConnector(keys: keys, sender: fake)
+            try await olm.configure(
+                identity: DeviceIdentityKeys.generate(),
+                userId: userId, deviceId: DeviceId(device))
+            try await olm.ensureKeys()
+            let monitor = VerificationMonitor(
+                toDevice: ToDeviceClient(
+                    transport: transport, session: session),
+                olm: olm, session: session,
+                keys: KeyClient(transport: transport, session: session))
+            return EncryptedFixture(
+                user: userId, device: device, monitor: monitor,
+                olm: olm, fake: fake, transport: transport)
+        }
+        func pumpEncrypted(
+            from: inout EncryptedFixture, to: EncryptedFixture
+        ) async {
+            let sent = await from.fake.sent
+            let fresh = Array(sent.dropFirst(from.pumpIndex))
+            from.pumpIndex = sent.count
+            let events = fresh.map {
+                BasicEvent(
+                    type: $0.type, sender: from.user, content: $0.content)
+            }
+            let decrypted = await to.olm.decrypt(events)
+            await to.monitor.receive(decrypted)
+        }
+        func keysExchanged(
+            _ fixture: EncryptedFixture, txn: String
+        ) async -> Bool {
+            guard let session = await fixture.monitor.session(for: txn) else {
+                return false
+            }
+            return await session.state == .keysExchanged
+        }
+        // Drive one full handshake to SAS, accepting on bob's side.
+        func handshake(
+            alice: inout EncryptedFixture, bob: inout EncryptedFixture
+        ) async throws -> String {
+            let session = try await alice.monitor.requestVerification(
+                userId: bob.user, deviceId: bob.device)
+            let txn = await session.transactionId
+            for _ in 0..<16 {
+                await pumpEncrypted(from: &alice, to: bob)
+                if let request = await bob.monitor.pendingRequests.first {
+                    _ = try await bob.monitor.acceptRequest(request)
+                }
+                await pumpEncrypted(from: &bob, to: alice)
+                let aliceDone = await keysExchanged(alice, txn: txn)
+                let bobDone = await keysExchanged(bob, txn: txn)
+                if aliceDone && bobDone {
+                    break
+                }
+            }
+            return txn
+        }
+        var alice = try await makeEncrypted(user: "@alice:x", device: "ALICE")
+        var bob = try await makeEncrypted(user: "@bob:x", device: "BOB")
+        let first = try await handshake(alice: &alice, bob: &bob)
+        let firstAlice = await keysExchanged(alice, txn: first)
+        let firstBob = await keysExchanged(bob, txn: first)
+        #expect(firstAlice)
+        #expect(firstBob)
+        // Asymmetric teardown (cancel processed on one side, restart or
+        // loss on the other): bob's half is gone, alice keeps hers.
+        await bob.olm.dropSessions(user: alice.user, device: alice.device)
+        let second = try await handshake(alice: &alice, bob: &bob)
+        let secondAlice = await keysExchanged(alice, txn: second)
+        let secondBob = await keysExchanged(bob, txn: second)
+        #expect(secondAlice)
+        #expect(secondBob)
+        try? await alice.transport.shutdown()
+        try? await bob.transport.shutdown()
+    }
 }

@@ -345,6 +345,105 @@ struct OlmConnectorTests {
         }))
     }
 
+    @Test("explicit drop forces a fresh claim")
+    func explicitDropForcesFreshClaim() async throws {
+        let (alice, bob, _, aliceSender, bobSender, aliceUser, bobUser) =
+            try await makePair()
+        try await alice.ensureKeys()
+        try await bob.ensureKeys()
+        try await alice.sendEncrypted(
+            eventType: "m.secret.send",
+            content: ["n": .int(1)],
+            to: bobUser, devices: [DeviceId("BOB")])
+        let first = await aliceSender.sent
+        let inner1 = await bob.decrypt([BasicEvent(
+            type: first[0].type, sender: aliceUser,
+            content: first[0].content)])
+        #expect(inner1.count == 1)
+        await bob.dropSessions(user: aliceUser, device: "ALICE")
+        try await bob.sendEncrypted(
+            eventType: "m.secret.send",
+            content: ["n": .int(2)],
+            to: aliceUser, devices: [DeviceId("ALICE")])
+        let reply = await bobSender.sent
+        let replyCipher = reply[0].content["ciphertext"]?.objectValue
+        let replyType = replyCipher?.values.first?.objectValue?["type"]?.intValue
+        #expect(replyType == 0)
+    }
+
+    @Test("undecryptable type-1 discards the sessions")
+    func undecryptableDropsSessions() async throws {
+        let (alice, bob, _, aliceSender, bobSender, aliceUser, bobUser) =
+            try await makePair()
+        try await alice.ensureKeys()
+        try await bob.ensureKeys()
+        // Establish both halves with a full exchange (reply received
+        // on both sides, so later sends are type-1 normal messages).
+        try await alice.sendEncrypted(
+            eventType: "m.secret.send",
+            content: ["n": .int(1)],
+            to: bobUser, devices: [DeviceId("BOB")])
+        let first = await aliceSender.sent
+        let inner1 = await bob.decrypt([BasicEvent(
+            type: first[0].type, sender: aliceUser,
+            content: first[0].content)])
+        #expect(inner1.count == 1)
+        try await bob.sendEncrypted(
+            eventType: "m.secret.send",
+            content: ["n": .int(2)],
+            to: aliceUser, devices: [DeviceId("ALICE")])
+        let back = await bobSender.sent
+        let backCipher = back[0].content["ciphertext"]?.objectValue
+        let backType = backCipher?.values.first?.objectValue?["type"]?.intValue
+        #expect(backType == 1)
+        let inner2 = await alice.decrypt([BasicEvent(
+            type: back[0].type, sender: bobUser,
+            content: back[0].content)])
+        #expect(inner2.count == 1)
+        // Tamper alice's next (type-1) message: flip a mid-body
+        // base64 char (significant bits, so the MAC must fail).
+        try await alice.sendEncrypted(
+            eventType: "m.secret.send",
+            content: ["n": .int(3)],
+            to: bobUser, devices: [DeviceId("BOB")])
+        let second = await aliceSender.sent
+        let wire = second[1]
+        let wireCipher = wire.content["ciphertext"]?.objectValue
+        let wireType = wireCipher?.values.first?.objectValue?["type"]?.intValue
+        #expect(wireType == 1)
+        var content = wire.content
+        var cipher = try #require(content["ciphertext"]?.objectValue)
+        let slot = try #require(cipher.keys.first)
+        var entry = try #require(cipher[slot]?.objectValue)
+        let body = try #require(entry["body"]?.stringValue)
+        let flipIndex = body.index(body.startIndex, offsetBy: 10)
+        let flipped = body[flipIndex] == "A" ? "B" : "A"
+        entry["body"] = .string(
+            String(body[..<flipIndex]) + String(flipped)
+                + String(body[body.index(after: flipIndex)...]))
+        cipher[slot] = .object(entry)
+        content["ciphertext"] = .object(cipher)
+        #expect(await bob.decrypt([BasicEvent(
+            type: wire.type, sender: aliceUser, content: content)]).isEmpty)
+        // Bob's poisoned half is gone: his next send re-claims (type 0)
+        // and decrypts on alice's side.
+        let sentBefore = await bobSender.sent.count
+        try await bob.sendEncrypted(
+            eventType: "m.secret.send",
+            content: ["n": .int(4)],
+            to: aliceUser, devices: [DeviceId("ALICE")])
+        let reply = await bobSender.sent
+        let fresh = reply[sentBefore]
+        let replyCipher = fresh.content["ciphertext"]?.objectValue
+        let replyEntry = replyCipher?.values.first?.objectValue
+        #expect(replyEntry?["type"]?.intValue == 0)
+        let inner = await alice.decrypt([BasicEvent(
+            type: fresh.type, sender: bobUser,
+            content: fresh.content)])
+        #expect(inner.count == 1)
+        #expect(inner[0].content["n"] == .int(4))
+    }
+
     @Test("sessions never cross between local devices of one user")
     func sessionsScopedPerDevice() async throws {
         let (aliceUser, bobUser) = try users()

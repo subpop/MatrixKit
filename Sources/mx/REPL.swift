@@ -409,6 +409,10 @@ final class REPL {
         if await ensureDeviceIdentity(client: client) {
             printInfo("Device keys published for \(label).")
         }
+        // Arm the sync → decrypt → monitor pipeline: without this,
+        // inbound to-device events never reach Olm or the verification
+        // monitor, and this client is deaf to every handshake.
+        await client.configureEncryption()
         if await client.secrets.autoload() {
             printInfo("Loaded persisted cross-signing keys.")
         }

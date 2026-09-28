@@ -99,6 +99,10 @@ public actor VerificationMonitor {
     /// producing traffic — otherwise a slow subscriber task misses them.
     var subscriberCount: Int { continuations.count }
 
+    /// Test hook: the live connector, so encrypted tests can pump
+    /// recorded sends through the peer's decrypt before delivery.
+    var olmForTesting: OlmConnector { olm }
+
     /// Flows already surfaced via `sasReady` (notified once per flow).
     private var sasNotified: Set<String> = []
 
@@ -154,6 +158,16 @@ public actor VerificationMonitor {
         pendingRequests.removeAll { $0.transactionId == transactionId }
     }
 
+    /// Reset the Olm channel to a flow's peer devices so the flow
+    /// starts with fresh claims, never a half the peer may have torn
+    /// down (cancel, timeout, restart). Completed flows keep working
+    /// sessions; only new flows reset.
+    private func dropPeerSessions(user: UserId, devices: [String]) async {
+        for device in devices {
+            await olm.dropSessions(user: user, device: device)
+        }
+    }
+
     /// Start verifying a peer device (requester role).
     @discardableResult
     public func requestVerification(
@@ -168,6 +182,11 @@ public actor VerificationMonitor {
                 user: userId, excluding: ourDevice)
         } else {
             recipients = ["*"]
+        }
+        if recipients == ["*"] {
+            await olm.dropSessions(user: userId, device: nil)
+        } else {
+            await dropPeerSessions(user: userId, devices: recipients)
         }
         let session = VerificationSession(
             toDevice: await sender(),
@@ -211,6 +230,13 @@ public actor VerificationMonitor {
             peerDeviceId: request.deviceId,
             peerDevices: [request.deviceId],
             transactionId: request.transactionId)
+        // Reset the channel but keep the handshake's live session: it
+        // was just rotated most-recent by decrypting this request, so
+        // ready/start continue on the request's own pairing while older
+        // halves (cancelled, forked, pre-restart) are purged.
+        await olm.dropSessions(
+            user: request.sender, device: request.deviceId,
+            keepingMostRecent: true)
         try await session.sendReady()
         sessions[request.transactionId] = session
         dropRequest(transactionId: request.transactionId)
