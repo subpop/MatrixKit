@@ -67,6 +67,10 @@ public actor OlmConnector {
     /// Optional persistent store for sessions + one-time keys. Pass at
     /// construction (before `configure`) to survive restarts; without
     /// one, state is in-memory only (sessions re-establish after restart).
+    /// Entries are scoped per (user, device): Olm sessions bind a device
+    /// identity, so two local devices of one user must never share a
+    /// pool — a restored foreign session encrypts type-1 first-contact
+    /// the peer cannot decrypt.
     private var keystore: (any KeyStore)?
 
     private var material: DeviceIdentityKeys?
@@ -113,6 +117,7 @@ public actor OlmConnector {
         self.material = identity
         self.userId = userId
         self.deviceId = deviceId
+        await deleteLegacyCryptoState()
         await restoreCryptoState()
     }
 
@@ -136,10 +141,28 @@ public actor OlmConnector {
 
     private static let storeService = "MatrixKit.Olm"
 
+    /// Per-device persistence accounts. Sessions and one-time keys
+    /// belong to one device identity: scoping by user alone lets a
+    /// second local device restore (and send on) the first device's
+    /// established sessions, producing type-1 first-contact messages
+    /// the peer has no session for and silently drops.
+    private static func sessionsAccount(user: UserId, device: DeviceId) -> String {
+        "sessions-" + user.value + "-" + device.value
+    }
+
+    private static func otksAccount(user: UserId, device: DeviceId) -> String {
+        "otks-" + user.value + "-" + device.value
+    }
+
     /// Save sessions + OTK pool to the keystore. No-op when unset.
     private func persistCryptoState() async {
-        guard let keystore, let userId else { return }
-        let account = userId.value
+        guard let keystore, let userId, let deviceId else { return }
+        let sessionsKey = KeyStoreKey(
+            service: Self.storeService,
+            account: Self.sessionsAccount(user: userId, device: deviceId))
+        let otksKey = KeyStoreKey(
+            service: Self.storeService,
+            account: Self.otksAccount(user: userId, device: deviceId))
         var stored: [StoredSession] = []
         for (_, list) in sessions {
             for entry in list {
@@ -160,15 +183,8 @@ public actor OlmConnector {
             let otksData = try? JSONEncoder().encode(otks)
         else { return }
         do {
-            try await keystore.save(
-                sessionsData,
-                for: KeyStoreKey(
-                    service: Self.storeService,
-                    account: "sessions-" + account))
-            try await keystore.save(
-                otksData,
-                for: KeyStoreKey(
-                    service: Self.storeService, account: "otks-" + account))
+            try await keystore.save(sessionsData, for: sessionsKey)
+            try await keystore.save(otksData, for: otksKey)
         } catch {
             MatrixKitLog.crypto.warning("Olm state persist failed error=\(error, privacy: .public)")
         }
@@ -177,27 +193,40 @@ public actor OlmConnector {
     /// Delete persisted sessions + OTK pool (e.g. on logout). Absent
     /// entries are not an error; failures are logged, not thrown.
     public func deletePersistedState() async {
-        guard let keystore, let userId else { return }
-        let account = userId.value
+        guard let keystore, let userId, let deviceId else { return }
         do {
             try await keystore.delete(KeyStoreKey(
                 service: Self.storeService,
-                account: "sessions-" + account))
+                account: Self.sessionsAccount(
+                    user: userId, device: deviceId)))
             try await keystore.delete(KeyStoreKey(
-                service: Self.storeService, account: "otks-" + account))
+                service: Self.storeService,
+                account: Self.otksAccount(user: userId, device: deviceId)))
         } catch {
             MatrixKitLog.crypto.warning("Olm state delete failed error=\(error, privacy: .public)")
         }
+    }
+
+    /// Delete the pre-per-device user-scoped entries (see
+    /// `sessionsAccount`): they may hold another local device's
+    /// sessions, which must never be restored here. Best-effort.
+    private func deleteLegacyCryptoState() async {
+        guard let keystore, let userId else { return }
+        try? await keystore.delete(KeyStoreKey(
+            service: Self.storeService,
+            account: "sessions-" + userId.value))
+        try? await keystore.delete(KeyStoreKey(
+            service: Self.storeService, account: "otks-" + userId.value))
     }
 
     /// Reload sessions + OTK pool persisted by `persistCryptoState`.
     /// No-op when no keystore set; corrupt entries are skipped so fresh
     /// keys/sessions replace them.
     private func restoreCryptoState() async {
-        guard let keystore, let userId else { return }
-        let account = userId.value
+        guard let keystore, let userId, let deviceId else { return }
         if let data = try? await keystore.load(KeyStoreKey(
-            service: Self.storeService, account: "sessions-" + account)),
+            service: Self.storeService,
+            account: Self.sessionsAccount(user: userId, device: deviceId))),
             let stored = try? JSONDecoder().decode(
                 [StoredSession].self, from: data)
         {
@@ -211,7 +240,8 @@ public actor OlmConnector {
             }
         }
         if let data = try? await keystore.load(KeyStoreKey(
-            service: Self.storeService, account: "otks-" + account)),
+            service: Self.storeService,
+            account: Self.otksAccount(user: userId, device: deviceId))),
             let stored = try? JSONDecoder().decode(
                 StoredOTKs.self, from: data)
         {

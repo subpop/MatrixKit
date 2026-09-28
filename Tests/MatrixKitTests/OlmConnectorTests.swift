@@ -308,6 +308,66 @@ struct OlmConnectorTests {
         #expect(inner3.count == 1)
         #expect(inner3[0].content["n"] == .int(3))
     }
+
+    @Test("sessions never cross between local devices of one user")
+    func sessionsScopedPerDevice() async throws {
+        let (aliceUser, bobUser) = try users()
+        let keys = FakeKeys()
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = FileKeyStore(directory: dir)
+        // First local device establishes a two-way session with bob
+        // (reply received, so the session is established, not fresh).
+        let aliceSender1 = FakeSender()
+        let alice1 = OlmConnector(
+            keys: keys, sender: aliceSender1, keystore: store)
+        try await alice1.configure(
+            identity: DeviceIdentityKeys.generate(),
+            userId: aliceUser, deviceId: DeviceId("ALICE1"))
+        try await alice1.ensureKeys()
+        let bob = OlmConnector(keys: keys, sender: FakeSender())
+        try await bob.configure(
+            identity: DeviceIdentityKeys.generate(),
+            userId: bobUser, deviceId: DeviceId("BOB"))
+        try await bob.ensureKeys()
+        try await alice1.sendEncrypted(
+            eventType: "m.secret.send",
+            content: ["n": .int(1)],
+            to: bobUser, devices: [DeviceId("BOB")])
+        let first = await aliceSender1.sent
+        _ = await bob.decrypt([BasicEvent(
+            type: first[0].type, sender: aliceUser,
+            content: first[0].content)])
+        try await bob.sendEncrypted(
+            eventType: "m.secret.send",
+            content: ["n": .int(2)],
+            to: aliceUser, devices: [DeviceId("ALICE1")])
+        // Second local device, same user and store: first contact
+        // with bob must be a pre-key message, never a reuse of the
+        // first device's established session (which the peer would
+        // silently drop as an unknown type-1).
+        let aliceSender2 = FakeSender()
+        let alice2 = OlmConnector(
+            keys: keys, sender: aliceSender2, keystore: store)
+        try await alice2.configure(
+            identity: DeviceIdentityKeys.generate(),
+            userId: aliceUser, deviceId: DeviceId("ALICE2"))
+        try await alice2.sendEncrypted(
+            eventType: "m.secret.send",
+            content: ["n": .int(3)],
+            to: bobUser, devices: [DeviceId("BOB")])
+        let second = await aliceSender2.sent
+        #expect(second.count == 1)
+        let cipher = second[0].content["ciphertext"]?.objectValue
+        let entry = cipher?.values.first?.objectValue
+        #expect(entry?["type"]?.intValue == 0)
+        let inner = await bob.decrypt([BasicEvent(
+            type: second[0].type, sender: aliceUser,
+            content: second[0].content)])
+        #expect(inner.count == 1)
+        #expect(inner[0].content["n"] == .int(3))
+    }
 }
 
 @Suite("EncryptedToDeviceSender")
