@@ -159,4 +159,53 @@ struct TransportComplianceTests {
         unsetenv("MATRIXKIT_DEBUG")
         #expect(MatrixTransport.resolveLogLevel() == nil)
     }
+
+    /// One endpoint-classification case: the request path (or absolute
+    /// URL) plus the expected `http.kind` tag, if any.
+    struct EndpointKindCase: Sendable {
+        var path: String
+        var kind: MatrixTransport.HTTPLogKind?
+    }
+
+    @Test("Endpoint classification tags known classes", arguments: [
+        EndpointKindCase(
+            path: "/_matrix/client/v3/sendToDevice/m.room.encrypted/txn1",
+            kind: .toDevice),
+        EndpointKindCase(path: "/_matrix/client/v3/keys/query", kind: .keys),
+        EndpointKindCase(path: "/_matrix/client/v3/keys/upload", kind: .keys),
+        EndpointKindCase(path: "/_matrix/client/v3/keys/claim", kind: .keys),
+        EndpointKindCase(
+            path: "/_matrix/client/v3/keys/device_signing/upload", kind: .keys),
+        EndpointKindCase(
+            path: "/_matrix/client/v3/room_keys/version", kind: .keys),
+        EndpointKindCase(path: "/_matrix/client/v3/sync", kind: .sync),
+        EndpointKindCase(
+            path: "/_matrix/client/unstable/org.matrix.simplified_msc3575/sync",
+            kind: .sync),
+        EndpointKindCase(path: "/_matrix/media/v3/upload", kind: .media),
+        EndpointKindCase(
+            path: "/_matrix/client/v1/media/download/abc", kind: .media),
+        EndpointKindCase(path: "/_matrix/client/v3/login", kind: .auth),
+        EndpointKindCase(path: "/_matrix/client/v3/logout", kind: .auth),
+        EndpointKindCase(path: "/_matrix/client/v3/refresh", kind: .auth),
+        EndpointKindCase(
+            path: "/_matrix/client/v3/register/available", kind: .auth),
+        EndpointKindCase(path: "/.well-known/matrix/client", kind: .auth),
+        EndpointKindCase(
+            path: "/_matrix/client/versions", kind: .auth),
+        EndpointKindCase(
+            path: "/_matrix/client/v3/user/@a:b/openid/request_token",
+            kind: .auth),
+        EndpointKindCase(
+            path: "https://issuer.example/token", kind: nil),
+        EndpointKindCase(
+            path: "/_matrix/client/v3/rooms/!x:y/send/m.room.message/t1",
+            kind: nil),
+        EndpointKindCase(
+            path: "/_matrix/client/v3/user/@a:b/account_data/m.direct",
+            kind: nil),
+    ])
+    func endpointKinds(_ row: EndpointKindCase) {
+        #expect(MatrixTransport.endpointKind(for: row.path) == row.kind)
+    }
 }
