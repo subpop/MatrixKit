@@ -425,6 +425,13 @@ public actor RoomCrypto {
                     "sender": "\(event.sender.value)",
                     "sessionId": "\(sessionId.prefix(8))…",
                 ])
+            logger?.trace(
+                "RoomCrypto decrypt failure: unknown inbound session",
+                metadata: [
+                    "sender": "\(event.sender.value)",
+                    "sessionId": "\(sessionId)",
+                    "eventId": "\(event.eventId.value)",
+                ])
             if event.sender != localUserId,
                 claimUnknownSession(roomId: roomId, sessionId: sessionId)
             {
@@ -434,8 +441,27 @@ public actor RoomCrypto {
             }
             return nil
         }
+        let plaintext: Data
+        do {
+            plaintext = try session.decrypt(wire)
+        } catch {
+            logger?.debug(
+                "RoomCrypto cannot decrypt: Megolm payload failed",
+                metadata: [
+                    "sender": "\(event.sender.value)",
+                    "sessionId": "\(sessionId.prefix(8))…",
+                ])
+            logger?.trace(
+                "RoomCrypto decrypt failure",
+                metadata: [
+                    "sender": "\(event.sender.value)",
+                    "sessionId": "\(sessionId)",
+                    "eventId": "\(event.eventId.value)",
+                    "error": "\(error)",
+                ])
+            return nil
+        }
         guard
-            let plaintext = try? session.decrypt(wire),
             let json = try? JSONSerialization.jsonObject(with: plaintext),
             let dict = json as? [String: Any],
             let type = dict["type"] as? String,
@@ -450,6 +476,13 @@ public actor RoomCrypto {
                 metadata: [
                     "sender": "\(event.sender.value)",
                     "sessionId": "\(sessionId.prefix(8))…",
+                ])
+            logger?.trace(
+                "RoomCrypto decrypt failure: plaintext is not JSON",
+                metadata: [
+                    "sender": "\(event.sender.value)",
+                    "sessionId": "\(sessionId)",
+                    "eventId": "\(event.eventId.value)",
                 ])
             return nil
         }
