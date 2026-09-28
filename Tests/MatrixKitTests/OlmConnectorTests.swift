@@ -309,6 +309,42 @@ struct OlmConnectorTests {
         #expect(inner3[0].content["n"] == .int(3))
     }
 
+    @Test("legacy OTK pool migrates instead of regenerating")
+    func legacyPoolMigrates() async throws {
+        let (aliceUser, _) = try users()
+        let keystore = InMemoryKeyStore()
+        // Seed the pre-per-device user-scoped pool directly.
+        let legacy = KeyStoreKey(
+            service: "MatrixKit.Olm", account: "otks-" + aliceUser.value)
+        let pool = Data([9, 9, 9])
+        try await keystore.save(pool, for: legacy)
+        try await keystore.save(
+            Data([7]), for: KeyStoreKey(
+                service: "MatrixKit.Olm",
+                account: "sessions-" + aliceUser.value))
+        let alice = OlmConnector(
+            keys: FakeKeys(), sender: FakeSender(), keystore: keystore)
+        try await alice.configure(
+            identity: DeviceIdentityKeys.generate(),
+            userId: aliceUser, deviceId: DeviceId("ALICE"))
+        // Adopted into the per-device slot (so already-uploaded
+        // server-side keys stay matchable); legacy entries gone, and
+        // legacy sessions never adopted.
+        let migrated = KeyStoreKey(
+            service: "MatrixKit.Olm",
+            account: "otks-" + aliceUser.value + "-ALICE")
+        #expect(try await keystore.load(migrated) == pool)
+        let keys = await keystore.keys
+        #expect(!keys.contains(legacy))
+        #expect(!keys.contains(KeyStoreKey(
+            service: "MatrixKit.Olm",
+            account: "sessions-" + aliceUser.value)))
+        #expect(!keys.contains(where: {
+            $0.service == "MatrixKit.Olm"
+                && $0.account.contains("sessions-")
+        }))
+    }
+
     @Test("sessions never cross between local devices of one user")
     func sessionsScopedPerDevice() async throws {
         let (aliceUser, bobUser) = try users()

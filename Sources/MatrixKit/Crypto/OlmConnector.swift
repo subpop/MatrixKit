@@ -117,7 +117,7 @@ public actor OlmConnector {
         self.material = identity
         self.userId = userId
         self.deviceId = deviceId
-        await deleteLegacyCryptoState()
+        await migrateLegacyCryptoState()
         await restoreCryptoState()
     }
 
@@ -207,16 +207,29 @@ public actor OlmConnector {
         }
     }
 
-    /// Delete the pre-per-device user-scoped entries (see
-    /// `sessionsAccount`): they may hold another local device's
-    /// sessions, which must never be restored here. Best-effort.
-    private func deleteLegacyCryptoState() async {
-        guard let keystore, let userId else { return }
-        try? await keystore.delete(KeyStoreKey(
+    /// Migrate the pre-per-device user-scoped entries. The one-time-key
+    /// pool is *adopted* when this device has none: regenerating would
+    /// orphan already-uploaded server-side keys (uploads are additive),
+    /// leaving senders claiming keys this device cannot match. Sessions
+    /// always re-establish via fresh claims instead — never adopt
+    /// another device's ratchet state. Best-effort.
+    private func migrateLegacyCryptoState() async {
+        guard let keystore, let userId, let deviceId else { return }
+        let legacySessions = KeyStoreKey(
             service: Self.storeService,
-            account: "sessions-" + userId.value))
-        try? await keystore.delete(KeyStoreKey(
-            service: Self.storeService, account: "otks-" + userId.value))
+            account: "sessions-" + userId.value)
+        let legacyOtks = KeyStoreKey(
+            service: Self.storeService, account: "otks-" + userId.value)
+        let poolKey = KeyStoreKey(
+            service: Self.storeService,
+            account: Self.otksAccount(user: userId, device: deviceId))
+        let hasPool =
+            ((try? await keystore.load(poolKey)) ?? nil) != nil
+        if !hasPool, let legacy = try? await keystore.load(legacyOtks) {
+            try? await keystore.save(legacy, for: poolKey)
+        }
+        try? await keystore.delete(legacySessions)
+        try? await keystore.delete(legacyOtks)
     }
 
     /// Reload sessions + OTK pool persisted by `persistCryptoState`.
