@@ -297,8 +297,9 @@ public actor RoomCrypto {
     }
 
     /// Share the room's current outbound session (created if needed) with
-    /// one user's explicit devices. Backs `shareRoomKey` and key-request
-    /// serving (the request carries its own `requesting_device_id`).
+    /// one user's explicit devices. Backs `shareRoomKey` (key-request
+    /// serving goes through `shareRequestedSession` so it answers with
+    /// the requested session, not the current one).
     public func shareCurrentSession(
         roomId: RoomId, to user: UserId, devices: [DeviceId]
     ) async throws(MatrixError) {
@@ -321,6 +322,43 @@ public actor RoomCrypto {
         try await sharer.sendEncrypted(
             eventType: Self.roomKeyType, content: content,
             to: user, devices: devices)
+    }
+
+    /// Current outbound session ID for a room, if one exists. Test seam
+    /// for key-request flows (requests name the session they need).
+    public func outboundSessionId(for roomId: RoomId) -> String? {
+        outbound[roomId.value]?.id
+    }
+
+    /// Share the requested session when held, and only then. Outbound
+    /// matches go out as the signed sharing blob; inbound sessions we
+    /// are forwarding go out as the unsigned export blob (importable
+    /// via `importSessionKey`, like backup restores). Returns false
+    /// when the session is unknown — the caller must not fall back to
+    /// a different session, or the requester stays undecryptable.
+    public func shareRequestedSession(
+        roomId: RoomId, sessionId: String, to user: UserId,
+        devices: [DeviceId]
+    ) async throws(MatrixError) -> Bool {
+        if outbound[roomId.value]?.id == sessionId {
+            try await shareCurrentSession(
+                roomId: roomId, to: user, devices: devices)
+            return true
+        }
+        guard let held = inbound["\(roomId.value)|\(sessionId)"] else {
+            return false
+        }
+        let content: [String: AnyCodable] = [
+            "algorithm": .string(Self.megolmAlgorithm),
+            "room_id": .string(roomId.value),
+            "session_id": .string(sessionId),
+            "session_key": .string(
+                Primitives.base64UnpaddedEncode(held.export())),
+        ]
+        try await sharer.sendEncrypted(
+            eventType: Self.roomKeyType, content: content,
+            to: user, devices: devices)
+        return true
     }
 
     /// Share only when the current outbound session hasn't been shared
