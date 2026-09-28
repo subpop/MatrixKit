@@ -58,6 +58,11 @@ final class REPL {
     private var seenEventIds = Set<EventId>()
     private var visibleEvents: [MessageEvent] = []
     private var syncTask: Task<Void, Never>?
+    /// Decrypted to-device consumer: the sync pipeline (armed by
+    /// `configureEncryption`) already decrypts every batch exactly
+    /// once, so this only handles the decrypted stream — re-decrypting
+    /// here would fail every message as a replay and poison logging.
+    private var toDeviceTask: Task<Void, Never>?
     private var running = true
     /// Unlocked 4S storage key from `recover`, kept for `show-secret`.
     private var unlockedStorageKey: (key: Data, keyId: String)?
@@ -1157,9 +1162,15 @@ final class REPL {
     private func startSyncLoop() async throws {
         guard let client else { return }
         let stream = try await client.sync.start(filter: .leanInitial)
+        let toDeviceStream = await client.decryptedToDevice()
         syncTask = Task {
             for await delta in stream {
                 await self.handleDelta(delta)
+            }
+        }
+        toDeviceTask = Task {
+            for await events in toDeviceStream {
+                await self.handleDecryptedToDevice(events)
             }
         }
     }
@@ -1167,19 +1178,50 @@ final class REPL {
     private func stopSyncLoop() async {
         syncTask?.cancel()
         syncTask = nil
+        toDeviceTask?.cancel()
+        toDeviceTask = nil
         if let client {
             await client.sync.stop()
         }
     }
 
+    /// Secret receipts and verification prompts for decrypted
+    /// to-device traffic (single consumption point — see `toDeviceTask`).
+    private func handleDecryptedToDevice(_ events: [BasicEvent]) async {
+        guard let client else { return }
+        for event in events where event.type == "m.secret.send" {
+            switch await client.secrets.receive(event) {
+            case .ignored:
+                break
+            case .unknownRequest:
+                break
+            case .stored(let name):
+                emit("\n🔑 Received secret \(name)…")
+            case .completed:
+                emit("\n🔑 Cross-signing keys received, imported, and persisted.")
+            }
+        }
+        for event in events
+        where event.type == "m.key.verification.request" {
+            guard let sender = event.sender else { continue }
+            pendingVerificationRequests[sender.value] = event
+            let from = event.content["from_device"]?.stringValue ?? "?"
+            emit(
+                "\n🔐 \(styled(sender.value, ANSI.bold)) (\(from)) "
+                    + "wants to verify. Run "
+                    + styled("verify \(sender.value)", ANSI.bold)
+                    + " to answer.")
+        }
+    }
+
     private func handleDelta(_ delta: SyncDelta) async {
         guard let client else { return }
-        // Decrypt Olm to-device first: encrypted answers (m.secret.send,
-        // verification events) arrive as m.room.encrypted.
-        var toDevice = delta.toDevice
-        if await client.olm.isConfigured {
-            toDevice += await client.olm.decrypt(delta.toDevice)
-        }
+        // Raw batch only: decrypted traffic arrives separately via
+        // `handleDecryptedToDevice` (decrypting here too would process
+        // every message twice). Plaintext request/secret events still
+        // match below; encrypted ones never match by type until
+        // decrypted, so nothing is double-handled.
+        let toDevice = delta.toDevice
         for event in toDevice where event.type == "m.secret.send" {
             switch await client.secrets.receive(event) {
             case .ignored:

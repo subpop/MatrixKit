@@ -791,19 +791,11 @@ public actor OlmConnector {
         let plaintext: Data
         let sessionCurve: Data
         if typeInt == OlmWireType.normal.rawValue {
-            do {
-                (plaintext, sessionCurve) = try decryptWithSessions(
-                    senderKeyB64: senderKeyB64, body: body)
-            } catch {
-                // Spec recovery from undecryptable messages: a normal
-                // message no cached session can read means our halves
-                // are desynced (peer tore down, restarted, or forked),
-                // so discard them — the next send re-claims fresh.
-                // (Pre-key messages skip this: existing sessions are
-                // never expected to read a new handshake.)
-                sessions.removeValue(forKey: senderKeyB64)
-                throw error
-            }
+            // `decryptWithSessions` drops desynced halves itself
+            // (skipping replays); pre-key messages never drop.
+            (plaintext, sessionCurve) = try decryptWithSessions(
+                senderKeyB64: senderKeyB64, body: body,
+                dropOnFailure: true)
         } else if typeInt == OlmWireType.preKey.rawValue {
             (plaintext, sessionCurve) = try await decryptPreKey(
                 senderKeyB64: senderKeyB64, senderKey: senderKey,
@@ -819,12 +811,13 @@ public actor OlmConnector {
     /// Try cached sessions (most-recent first). Returns plaintext + the
     /// session's peer Curve25519 key.
     private func decryptWithSessions(
-        senderKeyB64: String, body: Data
+        senderKeyB64: String, body: Data, dropOnFailure: Bool
     ) throws(MatrixError) -> (Data, Data) {
         guard var list = sessions[senderKeyB64], !list.isEmpty else {
             throw .invalidIdentifier("No Olm session for sender key")
         }
         // Most-recent last → try from the end.
+        var replaySeen = false
         for i in list.indices.reversed() {
             var entry = list[i]
             do {
@@ -834,9 +827,22 @@ public actor OlmConnector {
                 list.append(used)
                 sessions[senderKeyB64] = list
                 return (plaintext, used.peerCurve)
+            } catch CryptoError.replayDetected {
+                // Duplicate delivery (retry, dual consume): the peer
+                // half that produced this index is alive, so this is
+                // liveness evidence, never desync — keep everything.
+                replaySeen = true
+                continue
             } catch {
                 continue
             }
+        }
+        // Spec recovery from undecryptable messages: sessions no cached
+        // half can read are useless for receiving and suspect for
+        // sending, so discard them — the next send re-claims fresh.
+        // (`decrypt()` persists the removal afterwards.)
+        if dropOnFailure, !replaySeen {
+            sessions.removeValue(forKey: senderKeyB64)
         }
         throw .invalidIdentifier("No session decrypted the message")
     }
@@ -848,8 +854,10 @@ public actor OlmConnector {
     ) async throws(MatrixError) -> (Data, Data) {
         let (identity, _, _, _) = try requireConfigured()
         // Cached sessions get first try (spec: existing session first).
+        // Never drop here: a pre-key message is a new handshake no
+        // existing session is expected to read.
         if let hit = try? decryptWithSessions(
-            senderKeyB64: senderKeyB64, body: body)
+            senderKeyB64: senderKeyB64, body: body, dropOnFailure: false)
         {
             return hit
         }

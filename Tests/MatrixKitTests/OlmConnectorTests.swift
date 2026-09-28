@@ -345,6 +345,54 @@ struct OlmConnectorTests {
         }))
     }
 
+    @Test("duplicate delivery never drops the session")
+    func replayKeepsSessions() async throws {
+        let (alice, bob, _, aliceSender, bobSender, aliceUser, bobUser) =
+            try await makePair()
+        try await alice.ensureKeys()
+        try await bob.ensureKeys()
+        // Establish both halves with a full exchange.
+        try await alice.sendEncrypted(
+            eventType: "m.secret.send",
+            content: ["n": .int(1)],
+            to: bobUser, devices: [DeviceId("BOB")])
+        let first = await aliceSender.sent
+        let inner1 = await bob.decrypt([BasicEvent(
+            type: first[0].type, sender: aliceUser,
+            content: first[0].content)])
+        #expect(inner1.count == 1)
+        try await bob.sendEncrypted(
+            eventType: "m.secret.send",
+            content: ["n": .int(2)],
+            to: aliceUser, devices: [DeviceId("ALICE")])
+        let back = await bobSender.sent
+        let inner2 = await alice.decrypt([BasicEvent(
+            type: back[0].type, sender: bobUser,
+            content: back[0].content)])
+        #expect(inner2.count == 1)
+        // Redeliver bob's message (retry, dual consume): replay failure
+        // must not discard the live session.
+        #expect(await alice.decrypt([BasicEvent(
+            type: back[0].type, sender: bobUser,
+            content: back[0].content)]).isEmpty)
+        // Alice's next send still uses the kept session (type 1) and
+        // decrypts on bob's side.
+        let sentBefore = await aliceSender.sent.count
+        try await alice.sendEncrypted(
+            eventType: "m.secret.send",
+            content: ["n": .int(3)],
+            to: bobUser, devices: [DeviceId("BOB")])
+        let second = await aliceSender.sent
+        let fresh = second[sentBefore]
+        let freshCipher = fresh.content["ciphertext"]?.objectValue
+        let freshType = freshCipher?.values.first?.objectValue?["type"]?.intValue
+        #expect(freshType == 1)
+        let inner3 = await bob.decrypt([BasicEvent(
+            type: fresh.type, sender: aliceUser, content: fresh.content)])
+        #expect(inner3.count == 1)
+        #expect(inner3[0].content["n"] == .int(3))
+    }
+
     @Test("explicit drop forces a fresh claim")
     func explicitDropForcesFreshClaim() async throws {
         let (alice, bob, _, aliceSender, bobSender, aliceUser, bobUser) =
