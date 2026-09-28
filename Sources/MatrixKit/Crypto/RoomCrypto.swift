@@ -62,6 +62,10 @@ public actor RoomCrypto {
     /// Outbound sessions by room ID value. Fresh per launch; inbound
     /// sessions persist via the keystore (see `restore()`).
     private var outbound: [String: MegolmSession] = [:]
+    /// Earliest signed state per outbound session, by room ID value:
+    /// `(sessionId, blob)` captured at first-send position (see
+    /// `sendEncryptedContent`). In-memory only like `outbound`.
+    private var initialShares: [String: (sessionId: String, blob: Data)] = [:]
     /// Inbound sessions by `"roomId|sessionId"`.
     private var inbound: [String: MegolmSession] = [:]
     /// Original `session_key` blobs as received, by `"roomId|sessionId"`.
@@ -69,6 +73,11 @@ public actor RoomCrypto {
     /// `shareRequestedSession`). In-memory only: after a restart the
     /// export fallback applies.
     private var receivedBlobs: [String: ReceivedShare] = [:]
+    /// Signed sharing blobs at each outbound session's first-send
+    /// position, by room ID. Key requests for our own sessions are
+    /// answered from here (see `shareRequestedSession`) so old history
+    /// stays decryptable for requesters instead of failing with
+    /// `indexTooOld` against the current ratchet position.
     /// Room IDs whose current outbound session has been shared.
     /// Cleared by `rotateOutbound(_:)`; empty after launch (fresh
     /// outbound), so the first `ensureShared` re-shares post-restart.
@@ -226,6 +235,12 @@ public actor RoomCrypto {
                 let inboundSession = try? MegolmSession.importSessionKey(keyBlob)
             {
                 inbound[inboundKey] = inboundSession
+                // Stash the signed blob at its pre-encrypt position: the
+                // earliest signed state of this outbound session, used to
+                // answer key requests for old history (see
+                // `shareRequestedSession`).
+                initialShares[roomId.value] = (
+                    sessionId: session.id, blob: keyBlob)
             } else {
                 logger?.debug(
                     "RoomCrypto could not register outbound session for self-decrypt",
@@ -355,33 +370,89 @@ public actor RoomCrypto {
         outbound[roomId.value]?.id
     }
 
-    /// Share the requested session when held, and only then. Outbound
-    /// matches go out as the signed sharing blob; inbound sessions we
-    /// are forwarding go out as the unsigned export blob (importable
-    /// via `importSessionKey`, like backup restores). Returns false
-    /// when the session is unknown — the caller must not fall back to
-    /// a different session, or the requester stays undecryptable.
-    public func shareRequestedSession(
-        roomId: RoomId, sessionId: String, to user: UserId,
-        devices: [DeviceId]
-    ) async throws(MatrixError) -> Bool {
-        if outbound[roomId.value]?.id == sessionId {
-            try await shareCurrentSession(
-                roomId: roomId, to: user, devices: devices)
-            return true
-        }
-        guard let held = inbound["\(roomId.value)|\(sessionId)"] else {
-            return false
-        }
-        let content: [String: AnyCodable] = [
+    /// `m.room_key` content for a signed sharing blob.
+    private static func roomKeyContent(
+        roomId: RoomId, sessionId: String, blob: Data
+    ) -> [String: AnyCodable] {
+        [
             "algorithm": .string(Self.megolmAlgorithm),
             "room_id": .string(roomId.value),
             "session_id": .string(sessionId),
             "session_key": .string(
-                Primitives.base64UnpaddedEncode(held.export())),
+                Primitives.base64UnpaddedEncode(blob)),
         ]
+    }
+
+    /// `m.forwarded_room_key` content for a held session. Chain and
+    /// claimed keys are best-effort (see `ReceivedShare`): omitted
+    /// when unknown rather than fabricated. Our own parser accepts
+    /// the missing fields; strict third parties may require them.
+    private static func forwardedKeyContent(
+        roomId: RoomId, sessionId: String, blob: Data,
+        chain: [String], claimedEd25519: String?, senderKey: String?
+    ) -> [String: AnyCodable] {
+        var content: [String: AnyCodable] = [
+            "algorithm": .string(Self.megolmAlgorithm),
+            "room_id": .string(roomId.value),
+            "session_id": .string(sessionId),
+            "session_key": .string(
+                Primitives.base64UnpaddedEncode(blob)),
+            "forwarding_curve25519_key_chain": .array(
+                chain.map(AnyCodable.string)),
+        ]
+        if let claimedEd25519 {
+            content["sender_claimed_ed25519_key"] = .string(claimedEd25519)
+        }
+        if let senderKey {
+            content["sender_key"] = .string(senderKey)
+        }
+        return content
+    }
+
+    /// Share the requested session when held, and only then. Own
+    /// sessions go out as `m.room_key` with the earliest SIGNED state
+    /// (first-send stash, else current) so third-party clients accept
+    /// them and old history stays decryptable. Other sessions go out
+    /// as `m.forwarded_room_key`: byte-identical originals when the
+    /// share arrived this launch (originator signature intact), else
+    /// the export fallback. Returns false when the session is unknown
+    /// — the caller must not fall back to a different session, or the
+    /// requester stays undecryptable.
+    public func shareRequestedSession(
+        roomId: RoomId, sessionId: String, to user: UserId,
+        devices: [DeviceId]
+    ) async throws(MatrixError) -> Bool {
+        let mapKey = "\(roomId.value)|\(sessionId)"
+        if outbound[roomId.value]?.id == sessionId {
+            if let initial = initialShares[roomId.value],
+                initial.sessionId == sessionId
+            {
+                try await sharer.sendEncrypted(
+                    eventType: Self.roomKeyType,
+                    content: Self.roomKeyContent(
+                        roomId: roomId, sessionId: sessionId,
+                        blob: initial.blob),
+                    to: user, devices: devices)
+                return true
+            }
+            try await shareCurrentSession(
+                roomId: roomId, to: user, devices: devices)
+            return true
+        }
+        guard let held = inbound[mapKey] else { return false }
+        let content: [String: AnyCodable]
+        if let received = receivedBlobs[mapKey] {
+            content = Self.forwardedKeyContent(
+                roomId: roomId, sessionId: sessionId, blob: received.blob,
+                chain: received.chain, claimedEd25519: received.claimedEd25519,
+                senderKey: received.senderKey)
+        } else {
+            content = Self.forwardedKeyContent(
+                roomId: roomId, sessionId: sessionId, blob: held.export(),
+                chain: [], claimedEd25519: nil, senderKey: nil)
+        }
         try await sharer.sendEncrypted(
-            eventType: Self.roomKeyType, content: content,
+            eventType: Self.forwardedRoomKeyType, content: content,
             to: user, devices: devices)
         return true
     }

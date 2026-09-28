@@ -445,7 +445,7 @@ struct RoomCryptoTests {
         #expect(await aliceSharer.shares.count == before + 1)
     }
 
-    @Test("shareRequestedSession forwards inbound sessions via export")
+    @Test("shareRequestedSession forwards inbound sessions byte-identical")
     func forwardInbound() async throws {
         let (room, aliceUser, bobUser) = try roomFixture()
         let carolUser = UserId(unchecked: "@carol:x")
@@ -460,6 +460,7 @@ struct RoomCryptoTests {
         try await alice.shareRoomKey(roomId: room, users: [bobUser])
         let shares = await aliceSharer.shares
         let sessionId = try #require(shares.first?.content["session_id"]?.stringValue)
+        let originalKey = try #require(shares.first?.content["session_key"]?.stringValue)
         await bob.receiveRoomKey(BasicEvent(
             type: "m.room_key", sender: aliceUser,
             content: try #require(shares.first).content))
@@ -470,20 +471,63 @@ struct RoomCryptoTests {
             eventId: EventId(unchecked: "$fwd"),
             sender: aliceUser, roomId: room, originServerTs: 1,
             content: sent[0].content)
-        // Bob forwards the inbound session to Carol; Carol decrypts.
+        // Bob forwards the inbound session to Carol as
+        // `m.forwarded_room_key` with the originator's bytes intact, so
+        // the signature still verifies for third-party clients.
         let forwarded = try await bob.shareRequestedSession(
             roomId: room, sessionId: sessionId, to: carolUser,
             devices: [DeviceId("CAROL")])
         #expect(forwarded)
         let bobShares = await bobSharer.shares
         #expect(bobShares.count == 1)
+        #expect(bobShares.first?.eventType == "m.forwarded_room_key")
         #expect(bobShares.first?.content["session_id"]?.stringValue == sessionId)
+        #expect(bobShares.first?.content["session_key"]?.stringValue == originalKey)
+        #expect(
+            bobShares.first?.content["forwarding_curve25519_key_chain"]?.arrayValue
+                == [])
         await carol.receiveRoomKey(BasicEvent(
-            type: "m.room_key", sender: bobUser,
+            type: try #require(bobShares.first).eventType, sender: bobUser,
             content: try #require(bobShares.first).content))
         let decrypted = await carol.decryptRoomEvent(wire, in: room)
         #expect(decrypted?.type == "m.room.message")
         #expect(decrypted?.content["body"] == .string("forwarded"))
+    }
+
+    @Test("shareRequestedSession answers own sessions from the first-send state")
+    func serveInitialSigned() async throws {
+        let (room, aliceUser, bobUser) = try roomFixture()
+        let aliceSharer = FakeSharer()
+        let aliceSender = FakeRoomSender()
+        let alice = RoomCrypto(sharer: aliceSharer, sender: aliceSender)
+        let bob = RoomCrypto(
+            sharer: FakeSharer(), sender: FakeRoomSender())
+        await aliceSharer.setDevices([bobUser.value: ["BOB"]])
+        try await alice.shareRoomKey(roomId: room, users: [bobUser])
+        // Three sends move the outbound ratchet to index 3; the first
+        // wire still needs the index-0 state.
+        for body in ["zero", "one", "two"] {
+            _ = try await alice.sendEncryptedContent(room, MessageContent.markdown(body))
+        }
+        let sessionId = try #require(await alice.outboundSessionId(for: room))
+        let sent = await aliceSender.sent
+        let served = try await alice.shareRequestedSession(
+            roomId: room, sessionId: sessionId, to: bobUser,
+            devices: [DeviceId("BOB")])
+        #expect(served)
+        let answer = try #require(await aliceSharer.shares.last)
+        // Own sessions go out signed as `m.room_key`, at the
+        // first-send position — not the current ratchet.
+        #expect(answer.eventType == "m.room_key")
+        await bob.receiveRoomKey(BasicEvent(
+            type: answer.eventType, sender: aliceUser, content: answer.content))
+        let wire = MessageEvent(
+            type: sent[0].type, eventId: EventId(unchecked: "$e0"),
+            sender: aliceUser, roomId: room, originServerTs: 1,
+            content: sent[0].content)
+        let decrypted = await bob.decryptRoomEvent(wire, in: room)
+        #expect(decrypted?.type == "m.room.message")
+        #expect(decrypted?.content["body"] == .string("zero"))
     }
 
     @Test("parser carries the signed OTK count")

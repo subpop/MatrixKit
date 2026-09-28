@@ -7,7 +7,10 @@ import MatrixKit
 /// Shared fake (moved from `RoomCryptoTests`).
 public actor FakeSharer: RoomKeySharer {
     public var devices: [String: [String]] = [:]
-    public var shares: [(user: String, devices: [String], content: [String: AnyCodable])] = []
+    public var shares: [(
+        user: String, devices: [String],
+        content: [String: AnyCodable], eventType: String
+    )] = []
     public var identity = "SELFEDKEY"
 
     public init() {}
@@ -25,7 +28,8 @@ public actor FakeSharer: RoomKeySharer {
         eventType: String, content: [String: AnyCodable],
         to user: UserId, devices: [DeviceId]
     ) async throws(MatrixError) {
-        shares.append((user.value, devices.map(\.value), content))
+        shares.append((
+            user.value, devices.map(\.value), content, eventType))
     }
 
     public func identityKey() async throws(MatrixError) -> String { identity }
