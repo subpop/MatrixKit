@@ -24,14 +24,11 @@ let client = try await MatrixClient.login(
 
 `login` performs password authentication, then reconciles the session with
 `whoAmI` so `client.userId` holds the fully-qualified MXID. To resume a
-stored session instead, use ``MatrixClient``'s `restore(homeserver:userId:deviceId:accessToken:refreshToken:oidcClientId:oidcTokenEndpoint:logLevel:keystore:)`.
+stored session instead, use ``MatrixClient``'s `restore(homeserver:userId:deviceId:accessToken:refreshToken:oidcClientId:oidcTokenEndpoint:keystore:)`.
 
-Enable redacted request/response logging while debugging:
-
-```swift
-// Or: MATRIXKIT_DEBUG=1 / MATRIXKIT_LOG_LEVEL=debug in the environment.
-let client = try await MatrixClient.login(..., logLevel: .debug)
-```
+All SDK traffic logs to unified logging (subsystem `app.subpop.MatrixKit`):
+watch it live with `log stream --predicate 'subsystem == "app.subpop.MatrixKit"' --level debug`
+in a second terminal, or browse it after the fact in Console.app.
 
 ## Sync
 

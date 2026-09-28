@@ -5,7 +5,6 @@
 /// so the sync loop never starves while waiting for input.
 import ArgumentParser
 import Foundation
-import Logging
 import MatrixKit
 import MatrixKitCrypto
 import MatrixKitSQLite
@@ -24,7 +23,6 @@ enum CachePreference: String, Sendable, ExpressibleByArgument {
 /// Launch configuration, parsed from flags and handed to the REPL.
 struct REPLConfig: Sendable {
     var cache: CachePreference = .auto
-    var logLevel: Logger.Level?
 }
 
 @main
@@ -34,42 +32,11 @@ struct Mx: AsyncParsableCommand {
         abstract: "Interactive REPL over the MatrixKit SDK."
     )
 
-    @Option(name: .long, help: "Write log output to a file instead of the console.")
-    var logFile: String?
-
-    @Option(
-        name: .long,
-        help:
-            "Log level for protocol traffic: trace, debug, info, notice, warning, error, critical."
-    )
-    var logLevel: String?
-
     @Option(name: .long, help: "Snapshot cache backend: sqlite, swiftdata, or auto.")
     var cache: CachePreference = .auto
 
     mutating func run() async throws {
-        if let path = logFile {
-            do {
-                try FileLogging.enable(path: path)
-                emit("Logging debug output to \(path)")
-            } catch {
-                emit("Error: could not open log file at \(path): \(error)")
-            }
-        }
-        await REPL(config: REPLConfig(cache: cache, logLevel: Self.parseLogLevel(logLevel))).run()
-    }
-
-    private static func parseLogLevel(_ raw: String?) -> Logger.Level? {
-        switch raw?.lowercased() {
-        case "trace": return .trace
-        case "debug": return .debug
-        case "info": return .info
-        case "notice": return .notice
-        case "warning": return .warning
-        case "error": return .error
-        case "critical": return .critical
-        default: return nil
-        }
+        await REPL(config: REPLConfig(cache: cache)).run()
     }
 }
 
@@ -91,13 +58,9 @@ final class REPL {
     private var recoveredBackupKey: Data?
     /// Snapshot cache backend, from `--cache`.
     private let cachePreference: CachePreference
-    /// Protocol log level for new transports, from `--log-level`
-    /// (toggled at runtime by `debug on/off`).
-    private var logLevel: Logger.Level?
 
     init(config: REPLConfig = REPLConfig()) {
         self.cachePreference = config.cache
-        self.logLevel = config.logLevel
     }
     /// Incoming `m.key.verification.request` events by sender user ID.
     /// `verify <user>` with no device arg answers a pending request.
@@ -236,24 +199,11 @@ final class REPL {
             await doIdentity()
         case .pushrules(let room):
             await doPushRules(room: room)
-        case .debug(let enabled):
-            await doDebug(enabled: enabled)
         case .help:
             printHelp()
         case .quit:
             running = false
         }
-    }
-
-    private func doDebug(enabled: Bool?) async {
-        if let enabled {
-            logLevel = enabled ? .debug : nil
-        }
-        let level: Logger.Level = logLevel ?? .info
-        if let client {
-            await client.transport.setLogLevel(level)
-        }
-        printInfo("Debug logging \(logLevel != nil ? "on" : "off") (level: \(level)).")
     }
 
     // MARK: - Auth
@@ -272,7 +222,6 @@ final class REPL {
             let client = try await MatrixClient.login(
                 homeserver: url, user: user, password: password,
                 deviceDisplayName: "mx",
-                logLevel: logLevel,
                 keystore: olmKeystore())
             await completeLogin(client, label: user)
         } catch {
@@ -302,7 +251,6 @@ final class REPL {
                         "Open \(uri) and enter code: \(code) "
                             + "(expires in \(expires / 60) min)")
                 },
-                logLevel: logLevel,
                 keystore: olmKeystore())
             // Persist for zero-interaction `restore`.
             if let dir = OIDCAccountStore.defaultDirectory(),
@@ -347,7 +295,6 @@ final class REPL {
                 deviceId: account.deviceId,
                 accessToken: account.accessToken,
                 refreshToken: account.refreshToken,
-                logLevel: logLevel,
                 keystore: olmKeystore())
             await client.session.updateOIDC(
                 clientId: account.clientId,
@@ -1174,35 +1121,14 @@ final class REPL {
         // verification events) arrive as m.room.encrypted.
         var toDevice = delta.toDevice
         if await client.olm.isConfigured {
-            let decrypted = await client.olm.decrypt(delta.toDevice)
-            if logLevel != nil {
-                for event in decrypted {
-                    emit("🔍 Decrypted \(event.type) from \(event.sender?.value ?? "?")")
-                }
-            }
-            toDevice += decrypted
+            toDevice += await client.olm.decrypt(delta.toDevice)
         }
         for event in toDevice where event.type == "m.secret.send" {
             switch await client.secrets.receive(event) {
             case .ignored:
                 break
             case .unknownRequest:
-                if logLevel != nil {
-                    let requestId: String
-                    if let data = try? JSONEncoder().encode(
-                        AnyCodableDictionary(event.content)),
-                        let send = try? JSONDecoder().decode(
-                            SecretSend.self, from: data)
-                    {
-                        requestId = send.requestId
-                    } else {
-                        requestId = "(undecodable)"
-                    }
-                    let pending = await client.secrets.pendingCount
-                    emit(
-                        "🔍 Ignoring m.secret.send from \(event.sender?.value ?? "?") (request_id \(requestId), \(pending) pending)"
-                    )
-                }
+                break
             case .stored(let name):
                 emit("\n🔑 Received secret \(name)…")
             case .completed:

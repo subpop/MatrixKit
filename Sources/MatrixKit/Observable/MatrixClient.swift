@@ -1,7 +1,7 @@
 import Foundation
-import Logging
 import MatrixKitCrypto
 import Observation
+import os
 
 /// Top-level Matrix client: SwiftUI-ready facade over the actor layer.
 ///
@@ -151,17 +151,10 @@ public final class MatrixClient {
         self.keys = KeyClient(transport: transport, session: session)
         self.crossSigning = CrossSigning(transport: transport, session: session)
         self.toDevice = ToDeviceClient(transport: transport, session: session)
-        // Olm diagnostics follow the same level knobs as transport
-        // (`MATRIXKIT_LOG_LEVEL` / `MATRIXKIT_DEBUG=1`): a default
-        // `.info` logger would swallow the `.debug` decrypt-failure
-        // lines that diagnose stuck verifications.
-        var olmLogger = Logger(label: "MatrixKit.Olm")
-        MatrixTransport.applyConfiguredLevel(to: &olmLogger)
-        var roomLogger = Logger(label: "MatrixKit.RoomCrypto")
-        MatrixTransport.applyConfiguredLevel(to: &roomLogger)
+        // Olm and room crypto log to unified logging (`MatrixKitLog.crypto`).
         self.olm = OlmConnector(
             keys: self.keys, sender: self.toDevice,
-            logger: olmLogger, keystore: keystore)
+            keystore: keystore)
         self.secrets = SecretShare(
             sender: self.toDevice, session: session,
             crossSigning: self.crossSigning,
@@ -169,8 +162,7 @@ public final class MatrixClient {
             olm: self.olm)
         self.secretStorage = SecretStorage(accountData: self.accountData)
         self.roomCrypto = RoomCrypto(
-            sharer: self.olm, sender: self.messages, keystore: keystore,
-            logger: roomLogger)
+            sharer: self.olm, sender: self.messages, keystore: keystore)
         self.backup = KeyBackup(transport: transport, session: session)
         self.verifications = VerificationMonitor(
             toDevice: self.toDevice, olm: self.olm, session: session, keys: self.keys)
@@ -237,20 +229,15 @@ public final class MatrixClient {
     ///
     /// The homeserver URL is resolved through `.well-known/matrix/client`
     /// discovery first (falls back to the declared URL on any failure).
-    ///
-    /// - Parameter logLevel: transport log level. Defaults to
-    ///   `MATRIXKIT_LOG_LEVEL` / `MATRIXKIT_DEBUG=1` env, else `.info`.
-    ///   Pass `.debug` to log redacted request/response bodies.
     public static func login(
         homeserver: URL,
         user: String,
         password: String,
         deviceDisplayName: String? = nil,
-        logLevel: Logger.Level? = nil,
         keystore: (any KeyStore)? = nil
     ) async throws -> MatrixClient {
         let homeserver = await MatrixTransport.resolveHomeserver(declared: homeserver)
-        let transport = MatrixTransport(homeserver: homeserver, logLevel: logLevel)
+        let transport = MatrixTransport(homeserver: homeserver)
         do {
             let session = Session(
                 homeserver: homeserver,
@@ -286,11 +273,10 @@ public final class MatrixClient {
         logoURI: String? = nil,
         redirectURIs: [String] = ["http://localhost/"],
         onUserCode: @Sendable @escaping (String, String, Int) async -> Void,
-        logLevel: Logger.Level? = nil,
         keystore: (any KeyStore)? = nil
     ) async throws -> MatrixClient {
         let homeserver = await MatrixTransport.resolveHomeserver(declared: homeserver)
-        let transport = MatrixTransport(homeserver: homeserver, logLevel: logLevel)
+        let transport = MatrixTransport(homeserver: homeserver)
         do {
             let session = Session(
                 homeserver: homeserver,
@@ -338,11 +324,10 @@ public final class MatrixClient {
         clientName: String = "MatrixKit",
         clientURI: String? = nil,
         logoURI: String? = nil,
-        redirectURI: String,
-        logLevel: Logger.Level? = nil
+        redirectURI: String
     ) async throws -> OIDCAuthorization {
         let homeserver = await MatrixTransport.resolveHomeserver(declared: homeserver)
-        let transport = MatrixTransport(homeserver: homeserver, logLevel: logLevel)
+        let transport = MatrixTransport(homeserver: homeserver)
         do {
             let oidc = OIDCClient(transport: transport)
             guard let metadata = try await oidc.discover() else {
@@ -428,11 +413,10 @@ public final class MatrixClient {
         refreshToken: String? = nil,
         oidcClientId: String? = nil,
         oidcTokenEndpoint: String? = nil,
-        logLevel: Logger.Level? = nil,
         keystore: (any KeyStore)? = nil
     ) async -> MatrixClient {
         let homeserver = await MatrixTransport.resolveHomeserver(declared: homeserver)
-        let transport = MatrixTransport(homeserver: homeserver, logLevel: logLevel)
+        let transport = MatrixTransport(homeserver: homeserver)
         let session = Session(
             homeserver: homeserver,
             userId: userId,
@@ -599,10 +583,9 @@ public final class MatrixClient {
     ) async throws {
         guard slidingSyncTask == nil else { return }
         guard canUseSlidingSync else {
-            var syncLogger = Logger(label: "MatrixKit.SlidingSync")
-            MatrixTransport.applyConfiguredLevel(to: &syncLogger)
-            syncLogger.warning(
-                "Sliding sync unsupported: server versions do not advertise \(UnstableFeature.simplifiedSlidingSync)")
+            MatrixKitLog.slidingSync.warning(
+                "Sliding sync unsupported: server versions do not advertise \(UnstableFeature.simplifiedSlidingSync, privacy: .public)"
+            )
             return
         }
         slidingSyncStatus = .syncing
@@ -649,13 +632,10 @@ public final class MatrixClient {
         await logRoomList()
     }
 
-    /// Friendly debug line for a completed initial fetch: Relay shows it
-    /// as "Fetched room list (N rooms)" under the room-list category.
+    /// Friendly info line for a completed initial fetch.
     private func logRoomList() async {
-        var roomListLogger = Logger(label: "MatrixKit.Client")
-        MatrixTransport.applyConfiguredLevel(to: &roomListLogger)
         let count = await store.joinedRooms().count
-        roomListLogger.debug("Fetched room list (\(count) rooms)")
+        MatrixKitLog.roomList.debug("Fetched room list (\(count, privacy: .public) rooms)")
     }
 
     // MARK: - Encryption
@@ -672,8 +652,6 @@ public final class MatrixClient {
         let olm = self.olm
         let roomCrypto = self.roomCrypto
         let deviceId = self.deviceId
-        var keyLogger = Logger(label: "MatrixKit.RoomCrypto")
-        MatrixTransport.applyConfiguredLevel(to: &keyLogger)
         // Unknown sessions fire once per session (throttled in
         // `RoomCrypto`): recover via backup fetch plus a key request
         // to the sender. Recovery runs on the main actor; this
@@ -697,13 +675,13 @@ public final class MatrixClient {
                     await olm.invalidateDevices(for: user)
                 }
             },
-            handleKeyCounts: { [olm, keyLogger] count in
+            handleKeyCounts: { [olm] count in
                 do {
                     try await olm.maintainKeys(serverCount: count)
                 } catch {
-                    keyLogger.warning(
-                        "RoomCrypto OTK refill failed",
-                        metadata: ["error": "\(error)"])
+                    MatrixKitLog.crypto.warning(
+                        "RoomCrypto OTK refill failed error=\(error, privacy: .public)"
+                    )
                 }
             }
         )
@@ -721,8 +699,6 @@ public final class MatrixClient {
     /// key request; both paths are throttled so pathological timelines
     /// cannot spam the server or peers.
     func recoverSession(_ unknown: RoomCrypto.UnknownSession) async {
-        var keyLogger = Logger(label: "MatrixKit.RoomCrypto")
-        MatrixTransport.applyConfiguredLevel(to: &keyLogger)
         // Backup first: no peer traffic, and backups keep the earliest
         // state per the server merge rules. The attempt is only
         // consumed once a cached key exists, so a later 4S unlock
@@ -741,25 +717,18 @@ public final class MatrixClient {
                         export: export)
                 {
                     _ = await roomCache[unknown.roomId]?.retryDecryption()
-                    keyLogger.debug(
-                        "RoomCrypto recovered session from backup",
-                        metadata: [
-                            "sessionId": "\(unknown.sessionId.prefix(8))…",
-                        ])
+                    MatrixKitLog.crypto.debug(
+                        "RoomCrypto recovered session from backup session=\(String(unknown.sessionId.prefix(8)), privacy: .private(mask: .hash))"
+                    )
                 } else {
-                    keyLogger.debug(
-                        "RoomCrypto backup fetch missed",
-                        metadata: [
-                            "sessionId": "\(unknown.sessionId.prefix(8))…",
-                        ])
+                    MatrixKitLog.crypto.debug(
+                        "RoomCrypto backup fetch missed session=\(String(unknown.sessionId.prefix(8)), privacy: .private(mask: .hash))"
+                    )
                 }
             } catch {
-                keyLogger.debug(
-                    "RoomCrypto backup fetch missed",
-                    metadata: [
-                        "sessionId": "\(unknown.sessionId.prefix(8))…",
-                        "error": "\(error)",
-                    ])
+                MatrixKitLog.crypto.debug(
+                    "RoomCrypto backup fetch missed session=\(String(unknown.sessionId.prefix(8)), privacy: .private(mask: .hash)) error=\(error, privacy: .public)"
+                )
             }
         }
         guard let deviceId else { return }
@@ -769,24 +738,21 @@ public final class MatrixClient {
         do {
             let ids = try await olm.deviceIds(for: unknown.sender)
             guard !ids.isEmpty else {
-                keyLogger.warning(
-                    "RoomCrypto key request: no devices",
-                    metadata: ["user": "\(unknown.sender.value)"])
+                MatrixKitLog.crypto.warning(
+                    "RoomCrypto key request: no devices user=\(unknown.sender.value, privacy: .private(mask: .hash))"
+                )
                 return
             }
             try await olm.sendEncrypted(
                 eventType: RoomCrypto.keyRequestType, content: content,
                 to: unknown.sender, devices: ids.map { DeviceId($0) })
-            keyLogger.debug(
-                "RoomCrypto sent key request",
-                metadata: [
-                    "user": "\(unknown.sender.value)",
-                    "sessionId": "\(unknown.sessionId.prefix(8))…",
-                ])
+            MatrixKitLog.crypto.debug(
+                "RoomCrypto sent key request user=\(unknown.sender.value, privacy: .private(mask: .hash)) session=\(String(unknown.sessionId.prefix(8)), privacy: .private(mask: .hash))"
+            )
         } catch {
-            keyLogger.warning(
-                "RoomCrypto key request failed",
-                metadata: ["error": "\(error)"])
+            MatrixKitLog.crypto.warning(
+                "RoomCrypto key request failed error=\(error, privacy: .public)"
+            )
         }
     }
 
@@ -833,8 +799,6 @@ public final class MatrixClient {
     /// (outbound sessions are fresh per launch), so unknown sessions
     /// are ignored instead of mis-answered.
     func serveKeyRequest(_ event: BasicEvent) async {
-        var keyLogger = Logger(label: "MatrixKit.RoomCrypto")
-        MatrixTransport.applyConfiguredLevel(to: &keyLogger)
         guard
             event.content["action"]?.stringValue != "request_cancellation",
             event.content["algorithm"]?.stringValue == RoomCrypto.megolmAlgorithm,
@@ -849,33 +813,27 @@ public final class MatrixClient {
         do {
             let members = try await rooms.joinedMembers(roomId)
             guard members.keys.contains(requester) else {
-                keyLogger.debug(
-                    "RoomCrypto ignoring key request from non-member",
-                    metadata: ["user": "\(requester.value)"])
+                MatrixKitLog.crypto.debug(
+                    "RoomCrypto ignoring key request from non-member user=\(requester.value, privacy: .private(mask: .hash))"
+                )
                 return
             }
             let shared = try await roomCrypto.shareRequestedSession(
                 roomId: roomId, sessionId: sessionId, to: requester,
                 devices: [DeviceId(requestingDevice)])
             if shared {
-                keyLogger.debug(
-                    "RoomCrypto served key request",
-                    metadata: [
-                        "user": "\(requester.value)",
-                        "sessionId": "\(sessionId.prefix(8))…",
-                    ])
+                MatrixKitLog.crypto.debug(
+                    "RoomCrypto served key request user=\(requester.value, privacy: .private(mask: .hash)) session=\(String(sessionId.prefix(8)), privacy: .private(mask: .hash))"
+                )
             } else {
-                keyLogger.debug(
-                    "RoomCrypto ignoring key request for unknown session",
-                    metadata: [
-                        "user": "\(requester.value)",
-                        "sessionId": "\(sessionId.prefix(8))…",
-                    ])
+                MatrixKitLog.crypto.debug(
+                    "RoomCrypto ignoring key request for unknown session user=\(requester.value, privacy: .private(mask: .hash)) session=\(String(sessionId.prefix(8)), privacy: .private(mask: .hash))"
+                )
             }
         } catch {
-            keyLogger.warning(
-                "RoomCrypto key-request serve failed",
-                metadata: ["error": "\(error)"])
+            MatrixKitLog.crypto.warning(
+                "RoomCrypto key-request serve failed error=\(error, privacy: .public)"
+            )
         }
     }
 

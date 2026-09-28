@@ -8,8 +8,9 @@ media, profiles, and push — with SwiftUI-ready observable view models.
 MatrixKit is a from-scratch Swift 6 implementation of the [Matrix
 Client-Server API](https://spec.matrix.org/latest/client-server-api/). It has
 no dependency on the Matrix Rust SDK; the SDK itself depends only on
-`async-http-client`, `swift-crypto`, and `swift-log` (the `mx` CLI
-additionally uses `swift-argument-parser`).
+`async-http-client` and `swift-crypto` (the `mx` CLI
+additionally uses `swift-argument-parser`). Logging goes to unified
+logging (`os.Logger`, subsystem `app.subpop.MatrixKit`).
 
 Start with ``MatrixClient``. Log in, start sync, and read rooms through
 `@Observable` view models:

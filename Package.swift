@@ -36,7 +36,6 @@ let package = Package(
     dependencies: [
         .package(url: "https://github.com/swift-server/async-http-client.git", from: "1.21.0"),
         .package(url: "https://github.com/apple/swift-crypto.git", from: "4.0.0"),
-        .package(url: "https://github.com/apple/swift-log.git", from: "1.6.0"),
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.6.0"),
         .package(url: "https://github.com/apple/swift-docc-plugin.git", from: "1.4.0"),
         // Test harness only: the in-process spec server speaks HTTP/1.1
@@ -50,7 +49,6 @@ let package = Package(
                 "MatrixKitCrypto",
                 .product(name: "AsyncHTTPClient", package: "async-http-client"),
                 .product(name: "Crypto", package: "swift-crypto"),
-                .product(name: "Logging", package: "swift-log"),
             ]
         ),
         .target(
@@ -123,7 +121,6 @@ let package = Package(
                 "MatrixKitCrypto",
                 "MatrixKitSQLite",
                 "MatrixKitSwiftData",
-                .product(name: "Logging", package: "swift-log"),
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ]
         ),

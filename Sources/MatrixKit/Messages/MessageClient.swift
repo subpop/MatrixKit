@@ -1,17 +1,13 @@
-import Logging
+import os
 
 /// Sending and paginating room messages.
 public actor MessageClient {
     private let transport: MatrixTransport
     private let session: Session
-    private let logger: Logger
 
     public init(transport: MatrixTransport, session: Session) {
         self.transport = transport
         self.session = session
-        var logger = Logger(label: "MatrixKit.MessageClient")
-        MatrixTransport.applyConfiguredLevel(to: &logger)
-        self.logger = logger
     }
 
     private func token() async throws(MatrixError) -> String {
@@ -36,7 +32,9 @@ public actor MessageClient {
             body: content,
             accessToken: try await token()
         )
-        logger.debug("\(Self.friendlySendVerb(eventType: eventType))")
+        MatrixKitLog.messages.debug(
+            "\(Self.friendlySendVerb(eventType: eventType), privacy: .public)"
+        )
         return response.eventId
     }
 

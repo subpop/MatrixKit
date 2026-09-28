@@ -1,4 +1,4 @@
-import Logging
+import os
 
 /// Crypto side-effects applied to each parsed delta before it reaches
 /// the store. Wired by `MatrixClient.configureEncryption()`; nil (the
@@ -36,14 +36,12 @@ public actor SyncClient {
     private let connection: SyncConnection
     private let store: StateStore
     private let session: Session
-    private let logger: Logger
     private var cryptoHooks: SyncCryptoHooks?
 
     public init(connection: SyncConnection, store: StateStore, session: Session) {
         self.connection = connection
         self.store = store
         self.session = session
-        self.logger = Logger(label: "MatrixKit.SyncClient")
     }
 
     /// Install the crypto hooks applied to every delta (see
@@ -58,10 +56,10 @@ public actor SyncClient {
         guard await session.isValid else { throw .notAuthenticated }
         let since = await store.syncToken
         let filterJSON = try filter.map(SyncResponseParser.encodeFilter)
-        logger.info("Starting sync (since: \(since?.value ?? "<initial>"))")
+        MatrixKitLog.sync.info("Starting sync (since: \(since?.value ?? "<initial>", privacy: .public))")
 
         let rawStream = await connection.stream(since: since, filterJSON: filterJSON) { error in
-            self.logger.error("Sync terminated: \(error)")
+            MatrixKitLog.sync.error("Sync terminated: \(error, privacy: .public)")
         }
         let store = self.store
         let (stream, continuation) = AsyncStream<SyncDelta>.makeStream()
@@ -100,7 +98,7 @@ public actor SyncClient {
     /// Stop the sync loop.
     public func stop() async {
         await connection.stop()
-        logger.info("Sync stopped")
+        MatrixKitLog.sync.info("Sync stopped")
     }
 
     /// Whether `start` has been called without a matching `stop`.

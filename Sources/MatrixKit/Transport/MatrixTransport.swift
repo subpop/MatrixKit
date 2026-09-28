@@ -1,8 +1,8 @@
 import AsyncHTTPClient
 import Foundation
-import Logging
 import NIOCore
 import NIOHTTP1
+import os
 
 /// Actor wrapping `AsyncHTTPClient` for Matrix Client-Server API calls.
 ///
@@ -14,7 +14,6 @@ public actor MatrixTransport {
     private let homeserver: URL
     private let decoder: JSONDecoder
     private let encoder: JSONEncoder
-    private var logger: Logger
 
     /// Maximum response body to buffer in memory (64 MiB). Initial syncs on
     /// large homeservers (matrix.org) can exceed 10 MiB of full room state;
@@ -47,11 +46,12 @@ public actor MatrixTransport {
 
     /// Create a transport. Pass your own `HTTPClient` to share an event loop
     /// (you own shutdown then); otherwise one is created and owned.
-    /// `logLevel`, when given, wins; otherwise `MATRIXKIT_LOG_LEVEL` /
-    /// `MATRIXKIT_DEBUG=1` apply; otherwise the bootstrapped handler's
-    /// own level governs (so consumers can bridge SDK logs into their
-    /// own UI via `LoggingSystem.bootstrap`).
-    public init(homeserver: URL, client: HTTPClient? = nil, logLevel: Logger.Level? = nil) {
+    ///
+    /// All traffic logs to unified logging (`MatrixKitLog.transport`):
+    /// request/response lines and redacted bodies at trace level,
+    /// decode/HTTP failures at error level. Filter with Console.app or
+    /// `log stream --predicate 'subsystem == "app.subpop.MatrixKit"'`.
+    public init(homeserver: URL, client: HTTPClient? = nil) {
         self.homeserver = homeserver
         if let client {
             self.client = client
@@ -64,49 +64,6 @@ public actor MatrixTransport {
         self.decoder = decoder
         let encoder = JSONEncoder()
         self.encoder = encoder
-        var logger = Logger(label: "MatrixKit.Transport")
-        if let logLevel {
-            logger.logLevel = logLevel
-        } else {
-            Self.applyConfiguredLevel(to: &logger)
-        }
-        self.logger = logger
-    }
-
-    /// Change the log level at runtime (e.g. from a CLI `debug` command).
-    /// `.debug` logs friendly operation summaries ("Sent sync") plus
-    /// failure diagnostics; `.trace` also logs raw HTTP traffic
-    /// (request/response lines with full redacted bodies).
-    public func setLogLevel(_ level: Logger.Level) {
-        logger.logLevel = level
-    }
-
-    /// Log level from `MATRIXKIT_LOG_LEVEL` (trace/debug/info/...) or
-    /// `MATRIXKIT_DEBUG=1` (→ debug). `nil` when neither is set, so the
-    /// bootstrapped `LogHandler`'s own level governs.
-    static func resolveLogLevel() -> Logger.Level? {
-        let env = ProcessInfo.processInfo.environment
-        if let raw = env["MATRIXKIT_LOG_LEVEL"]?.lowercased(),
-            let level = Logger.Level(rawValue: raw)
-        {
-            return level
-        }
-        if let debug = env["MATRIXKIT_DEBUG"]?.lowercased(),
-            debug == "1" || debug == "true" || debug == "yes"
-        {
-            return .debug
-        }
-        return nil
-    }
-
-    /// Apply the env-configured level to a freshly created logger, if any.
-    /// Call sites use this instead of assigning `resolveLogLevel()`
-    /// unconditionally, so a consumer-installed handler keeps control of
-    /// verbosity when the env is silent.
-    static func applyConfiguredLevel(to logger: inout Logger) {
-        if let level = resolveLogLevel() {
-            logger.logLevel = level
-        }
     }
 
     /// Release the underlying HTTP client if we created it. Must be called
@@ -150,22 +107,14 @@ public actor MatrixTransport {
         return nil
     }
 
-    /// Per-record swift-log metadata for transport lines. Keys are stable
-    /// for consumers: `http.method`, `http.path`, `http.kind` (when the
-    /// endpoint classifies), `http.status` (response lines only).
-    private static func logMetadata(
-        method: HTTPMethod? = nil, path: String, status: Int? = nil
-    ) -> Logger.Metadata {
-        var metadata: Logger.Metadata = ["http.path": "\(path)"]
-        if let method { metadata["http.method"] = "\(method.rawValue)" }
-        if let kind = endpointKind(for: path) {
-            metadata["http.kind"] = "\(kind.rawValue)"
-        }
-        if let status { metadata["http.status"] = "\(status)" }
-        return metadata
-    }
-
-    // MARK: - Requests
+    /// Inline endpoint-class tag (`" [sync]"`, …) for transport lines, so
+    /// Console predicates can isolate traffic classes (e.g. match
+    /// `"[toDevice]"` while debugging verification). Empty for
+    /// unclassified endpoints.
+    static func kindTag(for pathOrURL: String) -> String {
+        guard let kind = endpointKind(for: pathOrURL) else { return "" }
+        return " [\(kind.rawValue)]"
+    }    // MARK: - Requests
 
     /// Send a JSON request and decode the JSON response.
     public func send<Response: Decodable>(
@@ -200,9 +149,8 @@ public actor MatrixTransport {
             else {
                 throw error
             }
-            logger.debug(
-                "Retrying \(method.rawValue) \(path) after token refresh",
-                metadata: Self.logMetadata(method: method, path: path)
+            MatrixKitLog.transport.debug(
+                "Retrying \(method.rawValue, privacy: .public) \(path, privacy: .public) after token refresh"
             )
             let (status, data) = try await sendRaw(
                 method, path: path, query: query, body: body,
@@ -240,9 +188,8 @@ public actor MatrixTransport {
                 }
             }
             if let freshToken, !freshToken.isEmpty, freshToken != accessToken {
-                logger.debug(
-                    "Retrying \(method.rawValue) \(path) after token refresh",
-                    metadata: Self.logMetadata(method: method, path: path)
+                MatrixKitLog.transport.debug(
+                    "Retrying \(method.rawValue, privacy: .public) \(path, privacy: .public) after token refresh"
                 )
                 return try await sendRaw(
                     method, path: path, query: query, rawBody: bytes,
@@ -280,10 +227,9 @@ public actor MatrixTransport {
         } else {
             bodyData = nil
         }
-        // Full bodies log at trace level; skip the redact+serialize cost otherwise.
-        let preview =
-            logger.logLevel <= .trace
-            ? bodyData.map { Self.redactedPreview($0, limit: nil) } : nil
+        // Bodies always stream: verbosity is the consumer's job
+        // (Console.app level filters, `log stream --level`).
+        let preview = bodyData.map { Self.redactedPreview($0, limit: nil) }
         return try await execute(
             urlString: urlString, method: method, bodyData: bodyData,
             contentType: contentType, accessToken: accessToken,
@@ -335,10 +281,9 @@ public actor MatrixTransport {
         } else {
             bodyData = nil
         }
-        // Full bodies log at trace level; skip the redact+serialize cost otherwise.
-        let preview =
-            logger.logLevel <= .trace
-            ? bodyData.map { Self.redactedPreview($0, limit: nil) } : nil
+        // Bodies always stream: verbosity is the consumer's job
+        // (Console.app level filters, `log stream --level`).
+        let preview = bodyData.map { Self.redactedPreview($0, limit: nil) }
         return try await execute(
             urlString: url, method: .post, bodyData: bodyData,
             contentType: bodyData == nil ? nil : "application/json",
@@ -458,43 +403,30 @@ public actor MatrixTransport {
             if let bodyData {
                 request.body = .bytes(ByteBuffer(bytes: bodyData))
             }
-            logger.trace(
-                "→ \(method.rawValue) \(urlString)",
-                metadata: Self.logMetadata(method: method, path: pathForLog)
+            let kind = Self.kindTag(for: pathForLog)
+            MatrixKitLog.transport.trace(
+                "→ \(method.rawValue, privacy: .public) \(urlString, privacy: .public)\(kind, privacy: .public)"
             )
-            if logger.logLevel <= .trace {
-                logger.trace(
-                    "  headers: \(Self.redactedHeaders(request.headers))",
-                    metadata: Self.logMetadata(method: method, path: pathForLog)
-                )
-            }
+            MatrixKitLog.transport.trace(
+                "  headers: \(Self.redactedHeaders(request.headers), privacy: .private)"
+            )
             if let bodyPreview {
-                logger.trace(
-                    "  body: \(bodyPreview)",
-                    metadata: Self.logMetadata(method: method, path: pathForLog)
+                MatrixKitLog.transport.trace(
+                    "  body: \(bodyPreview, privacy: .private)"
                 )
             }
             let response = try await client.execute(
                 request, timeout: .seconds(Int64(timeoutSeconds)))
             let buffer = try await response.body.collect(upTo: maxBodyBytes)
             let data = Data(buffer.readableBytesView)
-            logger.trace(
-                "← \(Int(response.status.code)) \(method.rawValue) \(pathForLog) (\(data.count) bytes)",
-                metadata: Self.logMetadata(
-                    method: method, path: pathForLog,
-                    status: Int(response.status.code))
+            let status = Int(response.status.code)
+            MatrixKitLog.transport.trace(
+                "← \(status, privacy: .public) \(method.rawValue, privacy: .public) \(pathForLog, privacy: .public) (\(data.count, privacy: .public) bytes)\(kind, privacy: .public)"
             )
-            // Full response bodies log at trace level; skip the
-            // redact+serialize cost otherwise.
-            if logger.logLevel <= .trace {
-                logger.trace(
-                    "  body: \(Self.redactedPreview(data, limit: nil))",
-                    metadata: Self.logMetadata(
-                        method: method, path: pathForLog,
-                        status: Int(response.status.code))
-                )
-            }
-            return (Int(response.status.code), data)
+            MatrixKitLog.transport.trace(
+                "  body: \(Self.redactedPreview(data, limit: nil), privacy: .private)"
+            )
+            return (status, data)
         } catch let error as MatrixError {
             throw error
         } catch is NIOTooManyBytesError {
@@ -549,9 +481,8 @@ public actor MatrixTransport {
             } catch {
                 let detail = Self.decodeDetail(error)
                 let snippet = Self.redactedPreview(payload, limit: maxLogBytes)
-                logger.debug(
-                    "✗ decode \(path): \(detail) | body: \(snippet)",
-                    metadata: Self.logMetadata(path: path, status: status)
+                MatrixKitLog.transport.error(
+                    "✗ decode \(path, privacy: .public): \(detail, privacy: .public) | body: \(snippet, privacy: .private)"
                 )
                 throw .decodingError("\(path): \(detail) | body: \(snippet)")
             }
@@ -567,9 +498,8 @@ public actor MatrixTransport {
             throw mapErrorBody(errorBody, status: status)
         }
         let bodyString = Self.redactedPreview(data, limit: maxLogBytes)
-        logger.debug(
-            "✗ HTTP \(status) \(path): \(bodyString)",
-            metadata: Self.logMetadata(path: path, status: status)
+        MatrixKitLog.transport.error(
+            "✗ HTTP \(status, privacy: .public) \(path, privacy: .public): \(bodyString, privacy: .private)"
         )
         throw MatrixError.unexpectedStatus(status, body: bodyString)
     }
@@ -615,7 +545,7 @@ public actor MatrixTransport {
 
     /// Truncated body preview for logs/errors with secrets masked.
     /// Never throws — falls back to a byte count for non-JSON bodies.
-    /// A `nil` limit renders the full body (trace logs); error paths
+    /// A `nil` limit renders the full body (debug wire logs); error paths
     /// pass `maxLogBytes`.
     private static func redactedPreview(_ data: Data, limit: Int?) -> String {
         guard !data.isEmpty else { return "<empty>" }

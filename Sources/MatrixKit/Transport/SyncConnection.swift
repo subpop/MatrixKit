@@ -1,5 +1,5 @@
 import Foundation
-import Logging
+import os
 
 /// Long-poll `GET /sync` loop yielding raw `SyncResponse` values.
 ///
@@ -9,15 +9,11 @@ import Logging
 public actor SyncConnection {
     private let transport: MatrixTransport
     private let session: Session
-    private let logger: Logger
     private var currentTask: Task<Void, Never>?
 
     public init(transport: MatrixTransport, session: Session) {
         self.transport = transport
         self.session = session
-        var logger = Logger(label: "MatrixKit.SyncConnection")
-        MatrixTransport.applyConfiguredLevel(to: &logger)
-        self.logger = logger
     }
 
     private func token() async throws(MatrixError) -> String {
@@ -37,7 +33,6 @@ public actor SyncConnection {
         stop()
         let transport = self.transport
         let session = self.session
-        let logger = self.logger
         var cursor = since?.value
         var backoffSeconds = 1
 
@@ -64,16 +59,18 @@ public actor SyncConnection {
                 } catch let error as MatrixError {
                     if Task.isCancelled { break }
                     if error == .unknownToken || error == .notAuthenticated {
-                        logger.error("Sync fatal: \(error)")
+                        MatrixKitLog.syncConnection.error("Sync fatal: \(error, privacy: .public)")
                         onError?(error)
                         break
                     }
-                    logger.warning("Sync error (\(error)), retry in \(backoffSeconds)s")
+                    MatrixKitLog.syncConnection.warning(
+                        "Sync error (\(error, privacy: .public)), retry in \(backoffSeconds, privacy: .public)s"
+                    )
                     try? await Task.sleep(for: .seconds(backoffSeconds))
                     backoffSeconds = min(backoffSeconds * 2, 30)
                 } catch {
                     // Unreachable: transport only throws MatrixError.
-                    logger.error("Unexpected sync error: \(error)")
+                    MatrixKitLog.syncConnection.error("Unexpected sync error: \(error, privacy: .public)")
                     break
                 }
             }

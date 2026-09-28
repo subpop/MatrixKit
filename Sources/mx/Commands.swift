@@ -28,7 +28,6 @@ enum Command: Sendable {
     case backupRestore
     case identity
     case pushrules(room: String?)
-    case debug(enabled: Bool?)
     case help
     case quit
 }
@@ -152,15 +151,6 @@ func parseCommand(_ line: String) -> Command? {
         return .identity
     case "pushrules":
         return .pushrules(room: rest.isEmpty ? nil : rest)
-    case "debug":
-        switch rest.lowercased() {
-        case "on": return .debug(enabled: true)
-        case "off": return .debug(enabled: false)
-        case "": return .debug(enabled: nil)
-        default:
-            printError("Usage: debug [on|off]")
-            return nil
-        }
     case "help":
         return .help
     case "quit", "exit":

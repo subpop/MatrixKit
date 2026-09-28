@@ -118,12 +118,14 @@ func printHelp() {
           backup-restore                        Download + import backed-up megolm sessions
            identity                              Show server identity vs local keys
            pushrules [room-id]                   Show per-room notification modes
-          debug [on|off]                        Toggle HTTP debug logging
           help                                  Show this help
           quit                                  Exit
 
-        Launch options: --log-file <path>  Write logs to a file instead of the console
-                        --log-level <level>  trace, debug, info, notice, warning, error, critical
-                        --cache <backend>    sqlite, swiftdata, or auto (default)
+        All SDK traffic logs to unified logging (subsystem
+        "app.subpop.MatrixKit"): run
+          log stream --predicate 'subsystem == "app.subpop.MatrixKit"' --level debug
+        in a second terminal, or browse Console.app.
+
+        Launch options: --cache <backend>    sqlite, swiftdata, or auto (default)
         """)
 }

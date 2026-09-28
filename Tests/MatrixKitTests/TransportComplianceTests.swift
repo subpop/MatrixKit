@@ -5,10 +5,10 @@ import MatrixKitTesting
 @testable import MatrixKit
 
 /// Transport compliance suite: token-refresh retries, homeserver
-/// resolution over the network, decoding diagnostics, and log control.
+/// resolution over the network, and decoding diagnostics.
 ///
 /// Exercised: `MatrixTransport.send` retry paths, `resolveHomeserver`,
-/// `decodeDetail`, `setLogLevel`.
+/// `decodeDetail`.
 @Suite("TransportCompliance")
 struct TransportComplianceTests {
     @Test("Unknown token retries once with a fresh token")
@@ -88,15 +88,6 @@ struct TransportComplianceTests {
         }
     }
 
-    @Test("Log level changes at runtime")
-    func logLevel() async throws {
-        try await withHarness { harness in
-            let (_, _, transport) = await harness.authClient()
-            await transport.setLogLevel(.debug)
-            await transport.setLogLevel(.warning)
-        }
-    }
-
     @Test("Byte uploads retry once with a fresh token")
     func sendBytesRetry() async throws {
         try await withHarness { harness in
@@ -145,19 +136,6 @@ struct TransportComplianceTests {
             try MatrixTransport.makeURLString(
                 base: "https://matrix.example", path: "no-leading-slash", query: nil)
         }
-    }
-
-    @Test("Env log levels resolve")
-    func envLogLevels() {
-        setenv("MATRIXKIT_LOG_LEVEL", "warning", 1)
-        defer { unsetenv("MATRIXKIT_LOG_LEVEL") }
-        #expect(MatrixTransport.resolveLogLevel() == .warning)
-        unsetenv("MATRIXKIT_LOG_LEVEL")
-        setenv("MATRIXKIT_DEBUG", "yes", 1)
-        defer { unsetenv("MATRIXKIT_DEBUG") }
-        #expect(MatrixTransport.resolveLogLevel() == .debug)
-        unsetenv("MATRIXKIT_DEBUG")
-        #expect(MatrixTransport.resolveLogLevel() == nil)
     }
 
     /// One endpoint-classification case: the request path (or absolute

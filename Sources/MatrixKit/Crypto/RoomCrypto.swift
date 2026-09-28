@@ -1,6 +1,6 @@
 import Foundation
-import Logging
 import MatrixKitCrypto
+import os
 
 /// Megolm room encryption: outbound sessions, key sharing, inbound decrypt.
 ///
@@ -58,7 +58,6 @@ public actor RoomCrypto {
     private let sharer: any RoomKeySharer
     private let sender: any RoomEventSender
     private let keystore: (any KeyStore)?
-    private let logger: Logger?
 
     /// Outbound sessions by room ID value. Fresh per launch; inbound
     /// sessions persist via the keystore (see `restore()`).
@@ -104,12 +103,11 @@ public actor RoomCrypto {
 
     public init(
         sharer: any RoomKeySharer, sender: any RoomEventSender,
-        keystore: (any KeyStore)? = nil, logger: Logger? = nil
+        keystore: (any KeyStore)? = nil
     ) {
         self.sharer = sharer
         self.sender = sender
         self.keystore = keystore
-        self.logger = logger
     }
 
     // MARK: - Key requests
@@ -208,7 +206,7 @@ public actor RoomCrypto {
                 for: KeyStoreKey(
                     service: Self.storeService, account: "megolm"))
         } catch {
-            logger?.warning("RoomCrypto persist failed: \(error)")
+            MatrixKitLog.crypto.warning("RoomCrypto persist failed error=\(error, privacy: .public)")
         }
     }
 
@@ -221,7 +219,7 @@ public actor RoomCrypto {
             try await keystore.delete(KeyStoreKey(
                 service: Self.storeService, account: "megolm"))
         } catch {
-            logger?.warning("RoomCrypto delete failed: \(error)")
+            MatrixKitLog.crypto.warning("RoomCrypto delete failed error=\(error, privacy: .public)")
         }
     }
 
@@ -260,9 +258,9 @@ public actor RoomCrypto {
                 initialShares[roomId.value] = (
                     sessionId: session.id, blob: keyBlob)
             } else {
-                logger?.debug(
-                    "RoomCrypto could not register outbound session for self-decrypt",
-                    metadata: ["roomId": "\(roomId.value)"])
+                MatrixKitLog.crypto.debug(
+                    "RoomCrypto could not register outbound session for self-decrypt room=\(roomId.value, privacy: .private(mask: .hash))"
+                )
             }
         }
         let plaintext: Data
@@ -331,21 +329,18 @@ public actor RoomCrypto {
             do {
                 ids = try await sharer.deviceIds(for: user)
             } catch {
-                logger?.warning(
-                    "RoomCrypto skipping key share: device query failed",
-                    metadata: [
-                        "user": "\(user.value)",
-                        "error": "\(error)",
-                    ])
+                MatrixKitLog.crypto.warning(
+                    "RoomCrypto skipping key share: device query failed user=\(user.value, privacy: .private(mask: .hash)) error=\(error, privacy: .public)"
+                )
                 continue
             }
             let devices = ids
                 .filter { $0 != excludingDevice?.value }
                 .map { DeviceId($0) }
             guard !devices.isEmpty else {
-                logger?.warning(
-                    "RoomCrypto skipping key share: no devices",
-                    metadata: ["user": "\(user.value)"])
+                MatrixKitLog.crypto.warning(
+                    "RoomCrypto skipping key share: no devices user=\(user.value, privacy: .private(mask: .hash))"
+                )
                 continue
             }
             try await shareCurrentSession(
@@ -523,9 +518,9 @@ public actor RoomCrypto {
         }
         let key = "\(roomId.value)|\(sessionId)"
         if let held = inbound[key], !isEarlier(arrival: session, than: held) {
-            logger?.debug(
-                "RoomCrypto ignoring superseded session import",
-                metadata: ["sessionId": "\(sessionId.prefix(8))…"])
+            MatrixKitLog.crypto.debug(
+                "RoomCrypto ignoring superseded session import session=\(String(sessionId.prefix(8)), privacy: .private(mask: .hash))"
+            )
             return false
         }
         inbound[key] = session
@@ -569,12 +564,9 @@ public actor RoomCrypto {
             let blob = Primitives.base64UnpaddedDecode(keyB64),
             let session = try? MegolmSession.importSessionKey(blob)
         else {
-            logger?.debug(
-                "RoomCrypto ignoring malformed room key",
-                metadata: [
-                    "sender": "\(event.sender?.value ?? "?")",
-                    "type": "\(event.type)",
-                ])
+            MatrixKitLog.crypto.debug(
+                "RoomCrypto ignoring malformed room key sender=\(event.sender?.value ?? "?", privacy: .private(mask: .hash)) type=\(event.type, privacy: .public)"
+            )
             return nil
         }
         let mapKey = "\(roomId)|\(sessionId)"
@@ -584,13 +576,9 @@ public actor RoomCrypto {
         // staying silent when only late state has arrived so far.
         requestedSessions.remove(mapKey)
         if let held = inbound[mapKey], !isEarlier(arrival: session, than: held) {
-            logger?.debug(
-                "RoomCrypto ignoring superseded room key",
-                metadata: [
-                    "sender": "\(event.sender?.value ?? "?")",
-                    "sessionId": "\(sessionId.prefix(8))…",
-                    "type": "\(event.type)",
-                ])
+            MatrixKitLog.crypto.debug(
+                "RoomCrypto ignoring superseded room key sender=\(event.sender?.value ?? "?", privacy: .private(mask: .hash)) session=\(String(sessionId.prefix(8)), privacy: .private(mask: .hash)) type=\(event.type, privacy: .public)"
+            )
             return nil
         }
         inbound[mapKey] = session
@@ -622,25 +610,18 @@ public actor RoomCrypto {
             let cipherB64 = event.content["ciphertext"]?.stringValue,
             let wire = Primitives.base64UnpaddedDecode(cipherB64)
         else {
-            logger?.debug(
-                "RoomCrypto cannot decrypt: malformed envelope",
-                metadata: ["sender": "\(event.sender.value)"])
+            MatrixKitLog.crypto.debug(
+                "RoomCrypto cannot decrypt: malformed envelope sender=\(event.sender.value, privacy: .private(mask: .hash))"
+            )
             return nil
         }
         guard var session = inbound["\(roomId.value)|\(sessionId)"] else {
-            logger?.debug(
-                "RoomCrypto cannot decrypt: unknown inbound session",
-                metadata: [
-                    "sender": "\(event.sender.value)",
-                    "sessionId": "\(sessionId.prefix(8))…",
-                ])
-            logger?.trace(
-                "RoomCrypto decrypt failure: unknown inbound session",
-                metadata: [
-                    "sender": "\(event.sender.value)",
-                    "sessionId": "\(sessionId)",
-                    "eventId": "\(event.eventId.value)",
-                ])
+            MatrixKitLog.crypto.debug(
+                "RoomCrypto cannot decrypt: unknown inbound session sender=\(event.sender.value, privacy: .private(mask: .hash)) session=\(String(sessionId.prefix(8)), privacy: .private(mask: .hash))"
+            )
+            MatrixKitLog.crypto.debug(
+                "RoomCrypto decrypt failure: unknown inbound session sender=\(event.sender.value, privacy: .private(mask: .hash)) session=\(sessionId, privacy: .private(mask: .hash)) event=\(event.eventId.value, privacy: .private(mask: .hash))"
+            )
             if event.sender != localUserId,
                 claimUnknownSession(roomId: roomId, sessionId: sessionId)
             {
@@ -654,20 +635,12 @@ public actor RoomCrypto {
         do {
             plaintext = try session.decrypt(wire)
         } catch {
-            logger?.debug(
-                "RoomCrypto cannot decrypt: Megolm payload failed",
-                metadata: [
-                    "sender": "\(event.sender.value)",
-                    "sessionId": "\(sessionId.prefix(8))…",
-                ])
-            logger?.trace(
-                "RoomCrypto decrypt failure",
-                metadata: [
-                    "sender": "\(event.sender.value)",
-                    "sessionId": "\(sessionId)",
-                    "eventId": "\(event.eventId.value)",
-                    "error": "\(error)",
-                ])
+            MatrixKitLog.crypto.debug(
+                "RoomCrypto cannot decrypt: Megolm payload failed sender=\(event.sender.value, privacy: .private(mask: .hash)) session=\(String(sessionId.prefix(8)), privacy: .private(mask: .hash))"
+            )
+            MatrixKitLog.crypto.debug(
+                "RoomCrypto decrypt failure sender=\(event.sender.value, privacy: .private(mask: .hash)) session=\(sessionId, privacy: .private(mask: .hash)) event=\(event.eventId.value, privacy: .private(mask: .hash)) error=\(error, privacy: .public)"
+            )
             // A held-but-too-old session may still be recoverable: a
             // peer holding an earlier state (or the key backup) can
             // fill the gap, so surface one key request like an unknown
@@ -694,19 +667,12 @@ public actor RoomCrypto {
             let content = try? JSONDecoder().decode(
                 [String: AnyCodable].self, from: contentData)
         else {
-            logger?.debug(
-                "RoomCrypto cannot decrypt: Megolm payload failed",
-                metadata: [
-                    "sender": "\(event.sender.value)",
-                    "sessionId": "\(sessionId.prefix(8))…",
-                ])
-            logger?.trace(
-                "RoomCrypto decrypt failure: plaintext is not JSON",
-                metadata: [
-                    "sender": "\(event.sender.value)",
-                    "sessionId": "\(sessionId)",
-                    "eventId": "\(event.eventId.value)",
-                ])
+            MatrixKitLog.crypto.debug(
+                "RoomCrypto cannot decrypt: Megolm payload failed sender=\(event.sender.value, privacy: .private(mask: .hash)) session=\(String(sessionId.prefix(8)), privacy: .private(mask: .hash))"
+            )
+            MatrixKitLog.crypto.debug(
+                "RoomCrypto decrypt failure: plaintext is not JSON sender=\(event.sender.value, privacy: .private(mask: .hash)) session=\(sessionId, privacy: .private(mask: .hash)) event=\(event.eventId.value, privacy: .private(mask: .hash))"
+            )
             return nil
         }
         inbound["\(roomId.value)|\(sessionId)"] = session

@@ -1,7 +1,7 @@
 import Crypto
 import Foundation
-import Logging
 import MatrixKitCrypto
+import os
 
 /// Minimal key-service surface Olm needs (query / claim / upload), so
 /// `OlmConnector` stays testable with a fake. `KeyClient` conforms.
@@ -63,7 +63,6 @@ public actor OlmConnector {
 
     private let keys: any OlmKeyService
     private let sender: any ToDeviceSender
-    private let logger: Logger?
 
     /// Optional persistent store for sessions + one-time keys. Pass at
     /// construction (before `configure`) to survive restarts; without
@@ -90,11 +89,10 @@ public actor OlmConnector {
 
     public init(
         keys: any OlmKeyService, sender: any ToDeviceSender,
-        logger: Logger? = nil, keystore: (any KeyStore)? = nil
+        keystore: (any KeyStore)? = nil
     ) {
         self.keys = keys
         self.sender = sender
-        self.logger = logger
         self.keystore = keystore
     }
 
@@ -172,7 +170,7 @@ public actor OlmConnector {
                 for: KeyStoreKey(
                     service: Self.storeService, account: "otks-" + account))
         } catch {
-            logger?.warning("Olm state persist failed: \(error)")
+            MatrixKitLog.crypto.warning("Olm state persist failed error=\(error, privacy: .public)")
         }
     }
 
@@ -188,7 +186,7 @@ public actor OlmConnector {
             try await keystore.delete(KeyStoreKey(
                 service: Self.storeService, account: "otks-" + account))
         } catch {
-            logger?.warning("Olm state delete failed: \(error)")
+            MatrixKitLog.crypto.warning("Olm state delete failed error=\(error, privacy: .public)")
         }
     }
 
@@ -378,13 +376,9 @@ public actor OlmConnector {
             case .success(let content):
                 payloads.append((deviceId, content))
             case .failure(.invalidIdentifier(let message)):
-                logger?.warning(
-                    "Olm send skipped device with no keys",
-                    metadata: [
-                        "user": "\(user.value)",
-                        "device": "\(deviceId)",
-                        "error": "\(message)",
-                    ])
+                MatrixKitLog.crypto.warning(
+                    "Olm send skipped device with no keys user=\(user.value, privacy: .private(mask: .hash)) device=\(deviceId, privacy: .private(mask: .hash)) error=\(message, privacy: .public)"
+                )
                 skipped.append(deviceId)
             case .failure(let error):
                 throw error
@@ -672,14 +666,9 @@ public actor OlmConnector {
                     event.content["ciphertext"]?.objectValue?
                     .values.compactMap { $0.objectValue?["type"]?.intValue }
                     .first.map(String.init) ?? "?"
-                logger?.debug(
-                    "Olm decrypt failed",
-                    metadata: [
-                        "sender": "\(event.sender?.value ?? "?")",
-                        "senderKey": "\(senderKey.prefix(8))…",
-                        "msgType": "\(kind)",
-                        "error": "\(error)",
-                    ])
+                MatrixKitLog.crypto.debug(
+                    "Olm decrypt failed sender=\(event.sender?.value ?? "?", privacy: .private(mask: .hash)) senderKey=\(String(senderKey.prefix(8)), privacy: .private(mask: .hash)) msgType=\(kind, privacy: .public) error=\(error, privacy: .public)"
+                )
                 continue
             }
         }

@@ -44,7 +44,7 @@ public enum VerificationMonitorEvent: Hashable, Sendable {
 /// starting/accepting, `confirm(session:)` after the user approves the
 /// SAS match, and cancel/decline.
 import Foundation
-import Logging
+import os
 
 public actor VerificationMonitor {
     /// Requests older than this are ignored as stale.
@@ -102,9 +102,9 @@ public actor VerificationMonitor {
     /// Flows already surfaced via `sasReady` (notified once per flow).
     private var sasNotified: Set<String> = []
 
-    /// Lifecycle diagnostics (`MatrixKit.Verification` label): every
-    /// received verification message and drop reason, so stalled flows
-    /// leave a trail instead of failing silently.
+    /// Lifecycle diagnostics (unified logging, `Verification` category):
+    /// every received verification message and drop reason, so stalled
+    /// flows leave a trail instead of failing silently.
     private var logger: Logger
 
     public init(
@@ -114,9 +114,7 @@ public actor VerificationMonitor {
         self.olm = olm
         self.session = session
         self.keys = keys
-        var logger = Logger(label: "MatrixKit.Verification")
-        MatrixTransport.applyConfiguredLevel(to: &logger)
-        self.logger = logger
+        self.logger = MatrixKitLog.verification
     }
 
     /// Subscribe to request/finish events. Ends on cancellation.
@@ -181,12 +179,9 @@ public actor VerificationMonitor {
             peerDevices: recipients)
         try await session.sendRequest()
         sessions[session.transactionId] = session
-        logger.debug(
-            "Sent verification request",
-            metadata: [
-                "transactionId": "\(session.transactionId)",
-                "peer": "\(userId.value)",
-            ])
+        logger.info(
+            "Sent verification request txn=\(session.transactionId, privacy: .private(mask: .hash)) peer=\(userId.value, privacy: .private(mask: .hash))"
+        )
         return session
     }
 
@@ -219,12 +214,9 @@ public actor VerificationMonitor {
         try await session.sendReady()
         sessions[request.transactionId] = session
         dropRequest(transactionId: request.transactionId)
-        logger.debug(
-            "Sent verification ready",
-            metadata: [
-                "transactionId": "\(request.transactionId)",
-                "peer": "\(request.sender.value)",
-            ])
+        logger.info(
+            "Sent verification ready txn=\(request.transactionId, privacy: .private(mask: .hash)) peer=\(request.sender.value, privacy: .private(mask: .hash))"
+        )
         // Drive: with a single common method the responder starts
         // immediately rather than waiting for the peer's start.
         await drive(session)
@@ -235,12 +227,9 @@ public actor VerificationMonitor {
     public func declineRequest(_ request: IncomingVerificationRequest) async throws(MatrixError) {
         sessions.removeValue(forKey: request.transactionId)
         dropRequest(transactionId: request.transactionId)
-        logger.debug(
-            "Declined verification request",
-            metadata: [
-                "transactionId": "\(request.transactionId)",
-                "peer": "\(request.sender.value)",
-            ])
+        logger.info(
+            "Declined verification request txn=\(request.transactionId, privacy: .private(mask: .hash)) peer=\(request.sender.value, privacy: .private(mask: .hash))"
+        )
         try await sender().send(
             eventType: "m.key.verification.cancel",
             content: VerificationCancel(
@@ -314,13 +303,9 @@ public actor VerificationMonitor {
                 dropRequest(transactionId: session.transactionId)
                 notify(.sessionFinished(transactionId: session.transactionId))
             }
-            logger.debug(
-                "Verification flow state",
-                metadata: [
-                    "transactionId": "\(session.transactionId)",
-                    "role": "\(session.role)",
-                    "state": "\(state)",
-                ])
+            logger.info(
+                "Verification flow state txn=\(session.transactionId, privacy: .private(mask: .hash)) role=\(session.role.rawValue, privacy: .public) state=\(state.rawValue, privacy: .public)"
+            )
         } catch {
             await fail(session, with: error)
         }
@@ -329,12 +314,9 @@ public actor VerificationMonitor {
     /// Cancel a broken flow best-effort and surface why. Always paired
     /// with a following `sessionFinished` for the same transaction.
     private func fail(_ session: VerificationSession, with error: Error) async {
-        logger.debug(
-            "Verification flow failed",
-            metadata: [
-                "transactionId": "\(session.transactionId)",
-                "error": "\((error as? MatrixError)?.description ?? error.localizedDescription)",
-            ])
+        logger.info(
+            "Verification flow failed txn=\(session.transactionId, privacy: .private(mask: .hash)) error=\((error as? MatrixError)?.description ?? error.localizedDescription, privacy: .public)"
+        )
         try? await session.cancel()
         dropRequest(transactionId: session.transactionId)
         notify(.failed(
@@ -379,8 +361,8 @@ public actor VerificationMonitor {
                 let ready: VerificationReady = decode(VerificationReady.self, from: event)
             else {
                 logger.debug(
-                    "Dropped verification ready: undecodable",
-                    metadata: ["peer": "\(event.sender?.value ?? "?")"])
+                    "Dropped verification ready: undecodable peer=\(event.sender?.value ?? "?", privacy: .private(mask: .hash))"
+                )
                 return
             }
             var match: VerificationSession?
@@ -394,13 +376,13 @@ public actor VerificationMonitor {
             }
             guard let match else {
                 logger.debug(
-                    "Dropped verification ready: no session awaiting it",
-                    metadata: ["peer": "\(sender.value)"])
+                    "Dropped verification ready: no session awaiting it peer=\(sender.value, privacy: .private(mask: .hash))"
+                )
                 return
             }
-            logger.debug(
-                "Received verification ready",
-                metadata: ["peer": "\(sender.value)"])
+            logger.info(
+                "Received verification ready peer=\(sender.value, privacy: .private(mask: .hash))"
+            )
             if await apply(to: match, { try await $0.receiveReady(ready) }) {
                 await drive(match)
             }
@@ -410,19 +392,13 @@ public actor VerificationMonitor {
                 let session = sessions[start.transactionId]
             else {
                 logger.debug(
-                    "Dropped verification start: unknown flow",
-                    metadata: [
-                        "transactionId": "\(decode(VerificationStart.self, from: event)?.transactionId ?? "?")",
-                        "peer": "\(event.sender?.value ?? "?")",
-                    ])
+                    "Dropped verification start: unknown flow txn=\(self.decode(VerificationStart.self, from: event)?.transactionId ?? "?", privacy: .private(mask: .hash)) peer=\(event.sender?.value ?? "?", privacy: .private(mask: .hash))"
+                )
                 return
             }
-            logger.debug(
-                "Received verification start",
-                metadata: [
-                    "transactionId": "\(start.transactionId)",
-                    "peer": "\(event.sender?.value ?? "?")",
-                ])
+            logger.info(
+                "Received verification start txn=\(start.transactionId, privacy: .private(mask: .hash)) peer=\(event.sender?.value ?? "?", privacy: .private(mask: .hash))"
+            )
             if await apply(to: session, { try await $0.receiveStart(start) }) {
                 await drive(session)
             }
@@ -435,8 +411,8 @@ public actor VerificationMonitor {
                 let accept: VerificationAccept = decode(VerificationAccept.self, from: event)
             else {
                 logger.debug(
-                    "Dropped verification accept: undecodable",
-                    metadata: ["peer": "\(event.sender?.value ?? "?")"])
+                    "Dropped verification accept: undecodable peer=\(event.sender?.value ?? "?", privacy: .private(mask: .hash))"
+                )
                 return
             }
             var match: VerificationSession?
@@ -450,16 +426,13 @@ public actor VerificationMonitor {
             }
             guard let match else {
                 logger.debug(
-                    "Dropped verification accept: no session awaiting it",
-                    metadata: ["peer": "\(sender.value)"])
+                    "Dropped verification accept: no session awaiting it peer=\(sender.value, privacy: .private(mask: .hash))"
+                )
                 return
             }
-            logger.debug(
-                "Received verification accept",
-                metadata: [
-                    "transactionId": "\(match.transactionId)",
-                    "peer": "\(sender.value)",
-                ])
+            logger.info(
+                "Received verification accept txn=\(match.transactionId, privacy: .private(mask: .hash)) peer=\(sender.value, privacy: .private(mask: .hash))"
+            )
             if await apply(to: match, { try await $0.receiveAccept(accept) }) {
                 await drive(match)
             }
@@ -469,19 +442,13 @@ public actor VerificationMonitor {
                 let session = sessions[key.transactionId]
             else {
                 logger.debug(
-                    "Dropped verification key: unknown flow",
-                    metadata: [
-                        "transactionId": "\(decode(VerificationKey.self, from: event)?.transactionId ?? "?")",
-                        "peer": "\(event.sender?.value ?? "?")",
-                    ])
+                    "Dropped verification key: unknown flow txn=\(self.decode(VerificationKey.self, from: event)?.transactionId ?? "?", privacy: .private(mask: .hash)) peer=\(event.sender?.value ?? "?", privacy: .private(mask: .hash))"
+                )
                 return
             }
-            logger.debug(
-                "Received verification key",
-                metadata: [
-                    "transactionId": "\(key.transactionId)",
-                    "peer": "\(event.sender?.value ?? "?")",
-                ])
+            logger.info(
+                "Received verification key txn=\(key.transactionId, privacy: .private(mask: .hash)) peer=\(event.sender?.value ?? "?", privacy: .private(mask: .hash))"
+            )
             if await apply(to: session, { _ = try await $0.receiveKey(key) }) {
                 await drive(session)
             }
@@ -491,19 +458,13 @@ public actor VerificationMonitor {
                 let session = sessions[mac.transactionId]
             else {
                 logger.debug(
-                    "Dropped verification mac: unknown flow",
-                    metadata: [
-                        "transactionId": "\(decode(VerificationMac.self, from: event)?.transactionId ?? "?")",
-                        "peer": "\(event.sender?.value ?? "?")",
-                    ])
+                    "Dropped verification mac: unknown flow txn=\(self.decode(VerificationMac.self, from: event)?.transactionId ?? "?", privacy: .private(mask: .hash)) peer=\(event.sender?.value ?? "?", privacy: .private(mask: .hash))"
+                )
                 return
             }
-            logger.debug(
-                "Received verification mac",
-                metadata: [
-                    "transactionId": "\(mac.transactionId)",
-                    "peer": "\(event.sender?.value ?? "?")",
-                ])
+            logger.info(
+                "Received verification mac txn=\(mac.transactionId, privacy: .private(mask: .hash)) peer=\(event.sender?.value ?? "?", privacy: .private(mask: .hash))"
+            )
             if await apply(to: session, {
                 _ = try await $0.receiveMac(mac, peerKeys: try await macKeys(for: $0))
             }) {
@@ -515,16 +476,13 @@ public actor VerificationMonitor {
                 sessions[done.transactionId] != nil
             else {
                 logger.debug(
-                    "Dropped verification done: unknown flow",
-                    metadata: ["peer": "\(event.sender?.value ?? "?")"])
+                    "Dropped verification done: unknown flow peer=\(event.sender?.value ?? "?", privacy: .private(mask: .hash))"
+                )
                 return
             }
-            logger.debug(
-                "Received verification done",
-                metadata: [
-                    "transactionId": "\(done.transactionId)",
-                    "peer": "\(event.sender?.value ?? "?")",
-                ])
+            logger.info(
+                "Received verification done txn=\(done.transactionId, privacy: .private(mask: .hash)) peer=\(event.sender?.value ?? "?", privacy: .private(mask: .hash))"
+            )
             dropRequest(transactionId: done.transactionId)
             notify(.sessionFinished(transactionId: done.transactionId))
         case "m.key.verification.cancel":
@@ -533,16 +491,13 @@ public actor VerificationMonitor {
                 let session = sessions[cancel.transactionId]
             else {
                 logger.debug(
-                    "Dropped verification cancel: unknown flow",
-                    metadata: ["peer": "\(event.sender?.value ?? "?")"])
+                    "Dropped verification cancel: unknown flow peer=\(event.sender?.value ?? "?", privacy: .private(mask: .hash))"
+                )
                 return
             }
-            logger.debug(
-                "Received verification cancel",
-                metadata: [
-                    "transactionId": "\(cancel.transactionId)",
-                    "peer": "\(event.sender?.value ?? "?")",
-                ])
+            logger.info(
+                "Received verification cancel txn=\(cancel.transactionId, privacy: .private(mask: .hash)) peer=\(event.sender?.value ?? "?", privacy: .private(mask: .hash))"
+            )
             await session.receiveCancel(cancel)
             dropRequest(transactionId: cancel.transactionId)
             notify(.sessionFinished(transactionId: cancel.transactionId))
@@ -580,35 +535,26 @@ public actor VerificationMonitor {
             !pendingRequests.contains(where: { $0.transactionId == request.transactionId })
         else {
             logger.debug(
-                "Dropped verification request",
-                metadata: ["peer": "\(event.sender?.value ?? "?")"])
+                "Dropped verification request peer=\(event.sender?.value ?? "?", privacy: .private(mask: .hash))"
+            )
             return
         }
         if await isOwnEcho(sender: sender, fromDevice: request.fromDevice) {
             logger.debug(
-                "Dropped verification request: own-device echo",
-                metadata: [
-                    "transactionId": "\(request.transactionId)",
-                    "peer": "\(sender.value)",
-                ])
+                "Dropped verification request: own-device echo txn=\(request.transactionId, privacy: .private(mask: .hash)) peer=\(sender.value, privacy: .private(mask: .hash))"
+            )
             return
         }
         let nowMs = Int(Date.now.timeIntervalSince1970 * 1000)
         guard request.timestamp > nowMs - Self.requestFreshnessMs else {
             logger.debug(
-                "Dropped verification request: stale",
-                metadata: [
-                    "transactionId": "\(request.transactionId)",
-                    "peer": "\(sender.value)",
-                ])
+                "Dropped verification request: stale txn=\(request.transactionId, privacy: .private(mask: .hash)) peer=\(sender.value, privacy: .private(mask: .hash))"
+            )
             return
         }
-        logger.debug(
-            "Received verification request",
-            metadata: [
-                "transactionId": "\(request.transactionId)",
-                "peer": "\(sender.value)",
-            ])
+        logger.info(
+            "Received verification request txn=\(request.transactionId, privacy: .private(mask: .hash)) peer=\(sender.value, privacy: .private(mask: .hash))"
+        )
         let incoming = IncomingVerificationRequest(
             transactionId: request.transactionId,
             sender: sender,

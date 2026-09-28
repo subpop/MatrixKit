@@ -1,5 +1,5 @@
 import Foundation
-import Logging
+import os
 
 /// Sliding sync engine (MSC4186 simplified sliding sync): runs the
 /// `POST` long-poll loop, parses responses, applies deltas to the store,
@@ -36,7 +36,6 @@ public actor SlidingSyncClient {
     private let transport: MatrixTransport
     private let session: Session
     private let store: StateStore
-    private let logger: Logger
     private let endpointPath: String
     private var cryptoHooks: SyncCryptoHooks?
     private var currentTask: Task<Void, Never>?
@@ -57,9 +56,6 @@ public actor SlidingSyncClient {
         self.transport = transport
         self.session = session
         self.store = store
-        var logger = Logger(label: "MatrixKit.SlidingSyncClient")
-        MatrixTransport.applyConfiguredLevel(to: &logger)
-        self.logger = logger
         self.endpointPath = endpointPath
     }
 
@@ -89,7 +85,9 @@ public actor SlidingSyncClient {
         connId = UUID().uuidString
         self.lists = lists
         self.subscriptions = subscriptions
-        logger.info("Starting sliding sync (pos: \(currentPos ?? "<initial>"))")
+        MatrixKitLog.slidingSync.info(
+            "Starting sliding sync (pos: \(self.currentPos ?? "<initial>", privacy: .public))"
+        )
 
         let (stream, continuation) = AsyncStream<SyncDelta>.makeStream()
         currentTask = Task {
@@ -103,15 +101,18 @@ public actor SlidingSyncClient {
                 } catch let error as MatrixError {
                     if Task.isCancelled { break }
                     if error == .unknownToken || error == .notAuthenticated {
-                        logger.error("Sliding sync fatal: \(error)")
+                        MatrixKitLog.slidingSync.error("Sliding sync fatal: \(error, privacy: .public)")
                         break
                     }
-                    logger.warning("Sliding sync error (\(error)), retry in \(backoffSeconds)s")
+                    MatrixKitLog.slidingSync.warning(
+                        "Sliding sync error (\(error, privacy: .public)), retry in \(backoffSeconds, privacy: .public)s"
+                    )
                     try? await Task.sleep(for: .seconds(backoffSeconds))
                     backoffSeconds = min(backoffSeconds * 2, 30)
                 } catch {
                     // Unreachable: transport only throws MatrixError.
-                    logger.error("Unexpected sliding sync error: \(error)")
+                    MatrixKitLog.slidingSync.error(
+                        "Unexpected sliding sync error: \(error, privacy: .public)")
                     break
                 }
             }
