@@ -856,11 +856,26 @@ public actor RoomActor {
                 if let membershipRaw = event.content["membership"]?.stringValue,
                    let membership = Membership(rawValue: membershipRaw)
                 {
-                    members[event.sender] = MemberContent(
+                    // Key by state key (the subject), not the sender: for an
+                    // invite the sender is the inviter while the state key is
+                    // the invitee. Keying by sender clobbers the inviter's
+                    // entry with the invitee's profile.
+                    let userId = UserId(unchecked: event.stateKey)
+                    var content = MemberContent(
                         membership: membership,
                         displayname: event.content["displayname"]?.stringValue,
-                        avatarUrl: event.content["avatar_url"]?.stringValue
+                        avatarUrl: event.content["avatar_url"]?.stringValue,
+                        isDirect: event.content["is_direct"]?.boolValue
                     )
+                    // Stripped events can omit the profile; keep a stored
+                    // one rather than wiping it (as `applyStateEvents` does).
+                    if content.displayname == nil {
+                        content.displayname = members[userId]?.displayname
+                    }
+                    if content.avatarUrl == nil {
+                        content.avatarUrl = members[userId]?.avatarUrl
+                    }
+                    members[userId] = content
                 }
             case .roomCreate:
                 isSpace = event.content["type"]?.stringValue == "m.space"
