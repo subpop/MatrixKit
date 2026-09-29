@@ -28,7 +28,8 @@ struct MatrixHTMLGeneratorTests {
             "<pre><code class=\"language-swift\">let x = 1\n</code></pre>"
         ),
         ("---", "<hr />"),
-        ("line one\nline two", "<p>line one\nline two</p>"),
+        ("line one\nline two", "<p>line one<br />line two</p>"),
+        ("test\ntest\ntest", "<p>test<br />test<br />test</p>"),
         ("# Title\n\nbody", "<h1>Title</h1>\n<p>body</p>"),
         // Typed HTML and special chars escape to literals.
         ("<del>x</del>", "<p>&lt;del&gt;x&lt;/del&gt;</p>"),

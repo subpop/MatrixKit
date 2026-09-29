@@ -747,7 +747,7 @@ public enum MatrixHTMLGenerator {
 
     private static func renderRun(_ run: SourceRun) -> String {
         if run.inline.contains(.softBreak) && run.link == nil {
-            return "\n"
+            return "<br />"
         }
 
         if run.inline.contains(.code) {
