@@ -647,8 +647,7 @@ public actor RoomCrypto {
             // session. Replays and bad crypto are local-only failures
             // that no peer can fix — no request.
             if event.sender != localUserId,
-                let cryptoError = error as? CryptoError,
-                cryptoError == .indexTooOld,
+                error == .indexTooOld,
                 claimUnknownSession(roomId: roomId, sessionId: sessionId)
             {
                 onUnknownSession?(UnknownSession(

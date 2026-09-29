@@ -1162,7 +1162,7 @@ final class REPL {
     private func startSyncLoop() async throws {
         guard let client else { return }
         let stream = try await client.sync.start(filter: .leanInitial)
-        let toDeviceStream = await client.decryptedToDevice()
+        let toDeviceStream = client.decryptedToDevice()
         syncTask = Task {
             for await delta in stream {
                 await self.handleDelta(delta)

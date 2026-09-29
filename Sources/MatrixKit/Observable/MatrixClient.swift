@@ -652,7 +652,6 @@ public final class MatrixClient {
         await roomCrypto.setLocalUserId(userId)
         let olm = self.olm
         let roomCrypto = self.roomCrypto
-        let deviceId = self.deviceId
         // Unknown sessions fire once per session (throttled in
         // `RoomCrypto`): recover via backup fetch plus a key request
         // to the sender. Recovery runs on the main actor; this

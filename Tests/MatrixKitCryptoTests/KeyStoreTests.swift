@@ -29,9 +29,9 @@ struct KeyStoreTests {
             try await store.load(key("k", service: "other-service"))
                 == Data("b".utf8))
         #expect(try await store.load(key("other")) == Data("c".utf8))
-        #expect(try await store.keys.count == 3)
+        #expect(await store.keys.count == 3)
         try await store.delete(key("k"))
-        #expect(try await store.keys.count == 2)
+        #expect(await store.keys.count == 2)
     }
 
     @Test("Binary key material survives intact")
