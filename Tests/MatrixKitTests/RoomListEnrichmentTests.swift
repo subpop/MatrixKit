@@ -254,22 +254,37 @@ struct RoomListEnrichmentTests {
 
         let invited = await client.store.room(
             RoomId(unchecked: "!i:x"), membership: .invite)
-        await invited.applyInvite(InvitedRoomDelta(events: [
-            StrippedStateEvent(
-                type: "m.room.member", stateKey: "@alice:x",
-                sender: UserId(unchecked: "@bob:x"),
-                content: [
-                    "membership": .string("invite"),
-                    "displayname": .string("Bob"),
-                    "avatar_url": .string("mxc://x/bob"),
-                ]),
-        ]))
+        await invited.applyInvite(InvitedRoomDelta(
+            events: [
+                StrippedStateEvent(
+                    type: "m.room.member", stateKey: "@bob:x",
+                    sender: UserId(unchecked: "@bob:x"),
+                    content: [
+                        "membership": .string("join"),
+                        "displayname": .string("Bob"),
+                        "avatar_url": .string("mxc://x/bob"),
+                    ]),
+                StrippedStateEvent(
+                    type: "m.room.member", stateKey: "@alice:x",
+                    sender: UserId(unchecked: "@bob:x"),
+                    content: [
+                        "membership": .string("invite"),
+                        "is_direct": .bool(true),
+                    ]),
+            ],
+            inviter: UserId(unchecked: "@bob:x")))
         let inviteRoom = await ObservableRoom(
             room: invited, messages: client.messages, rooms: client.rooms,
             roomState: client.roomState, accountData: client.accountData,
             media: client.media, localUser: client.userId)
+        let inviteMembers = inviteRoom.memberDetails
+        #expect(inviteMembers[UserId(unchecked: "@bob:x")]?.membership == .join)
+        #expect(inviteMembers[UserId(unchecked: "@bob:x")]?.displayname == "Bob")
+        #expect(inviteMembers[UserId(unchecked: "@alice:x")]?.membership == .invite)
+        #expect(inviteMembers[UserId(unchecked: "@alice:x")]?.isDirect == true)
         #expect(inviteRoom.inviterName == "Bob")
         #expect(inviteRoom.inviterAvatarURL?.value == "mxc://x/bob")
+        #expect(inviteRoom.displayName == "Bob")
         try? await client.transport.shutdown()
         }
     }
