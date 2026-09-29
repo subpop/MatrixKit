@@ -593,9 +593,17 @@ public final class ObservableRoom {
         isDirect = await room.isDirect
         latestMessage = await room.latestMessageEvent()
         if membership == .invite {
-            let inviter = details.first { $0.value.membership == .invite }?.key
-            inviterName = inviter.flatMap { details[$0]?.displayname }
-            inviterAvatarURL = inviter.flatMap { details[$0]?.avatarUrl }.flatMap { try? MXCURI($0) }
+            // The inviter is the invite event's sender, tracked on the
+            // actor: stripped member state alone cannot identify them once
+            // invites and joins interleave. Fall back to the raw MXID when
+            // stripped state lacks their profile.
+            if let inviter = await room.inviterId {
+                inviterName = details[inviter]?.displayname ?? inviter.value
+                inviterAvatarURL = details[inviter]?.avatarUrl.flatMap { try? MXCURI($0) }
+            } else {
+                inviterName = nil
+                inviterAvatarURL = nil
+            }
         } else {
             inviterName = nil
             inviterAvatarURL = nil

@@ -41,6 +41,11 @@ public actor RoomActor {
     public private(set) var membership: Membership
     /// Membership contents keyed by user ID.
     public private(set) var members: [UserId: MemberContent]
+    /// Sender of the `m.room.member` invite event (`delta.inviter`), if
+    /// known. The authoritative inviter signal: stripped member state alone
+    /// cannot identify the inviter once invites and joins interleave.
+    /// Cleared when membership leaves `.invite`.
+    public private(set) var inviterId: UserId?
     /// Last-known sync heroes (candidate display-name fallbacks).
     public private(set) var heroes: [UserId] = []
     /// Child rooms listed by `m.space.child` state (spaces only).
@@ -128,6 +133,7 @@ public actor RoomActor {
         self.roomId = roomId
         self.membership = membership
         self.members = [:]
+        self.inviterId = nil
         self.timeline = []
         self.unreadCount = 0
         self.highlightCount = 0
@@ -228,6 +234,7 @@ public actor RoomActor {
         emitUnreadIfChanged()
         if membership != .join {
             membership = .join
+            inviterId = nil
             notify(.membershipChanged(.join))
         }
     }
@@ -235,6 +242,7 @@ public actor RoomActor {
     /// Apply an invite: set `.invite` membership and record stripped state.
     public func applyInvite(_ delta: InvitedRoomDelta) {
         membership = .invite
+        inviterId = delta.inviter
         applyStrippedState(delta.events)
         notify(.membershipChanged(.invite))
     }
@@ -261,12 +269,14 @@ public actor RoomActor {
         }
         applyRoomAccountData(delta.accountData)
         membership = .leave
+        inviterId = nil
         notify(.membershipChanged(.leave))
     }
 
     /// Apply a knock state change and set `.knock` membership.
     public func applyKnock(_ delta: KnockedRoomDelta) {
         membership = .knock
+        inviterId = nil
         applyStrippedState(delta.events)
         notify(.membershipChanged(.knock))
     }
@@ -665,6 +675,7 @@ public actor RoomActor {
             avatarURL: avatarURL,
             membership: membership,
             members: members,
+            inviterId: inviterId,
             timeline: timeline,
             unreadCount: unreadCount,
             highlightCount: highlightCount,
@@ -696,6 +707,7 @@ public actor RoomActor {
         avatarURL = snapshot.avatarURL
         membership = snapshot.membership
         members = snapshot.members
+        inviterId = snapshot.inviterId
         // Heal windows persisted before every stitch point deduped:
         // duplicate IDs break list rendering, so drop repeats on load.
         timeline = snapshot.timeline.dedupedByEventId()

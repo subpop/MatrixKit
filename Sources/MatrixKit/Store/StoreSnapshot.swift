@@ -47,6 +47,9 @@ public struct RoomSnapshot: Hashable, Sendable, Codable {
     public var membership: Membership
     /// Known members and their details.
     public var members: [UserId: MemberContent]
+    /// Sender of the invite event, if the room is a pending invite.
+    /// Optional so snapshots written before this field decode as nil.
+    public var inviterId: UserId?
     /// Newest timeline window (trimmed to `maxTimelineEvents`).
     public var timeline: [MessageEvent]
     /// Unread notification count.
@@ -108,6 +111,7 @@ public struct RoomSnapshot: Hashable, Sendable, Codable {
         avatarURL: MXCURI? = nil,
         membership: Membership = .join,
         members: [UserId: MemberContent] = [:],
+        inviterId: UserId? = nil,
         timeline: [MessageEvent] = [],
         unreadCount: Int = 0,
         highlightCount: Int = 0,
@@ -138,6 +142,7 @@ public struct RoomSnapshot: Hashable, Sendable, Codable {
         self.avatarURL = avatarURL
         self.membership = membership
         self.members = members
+        self.inviterId = inviterId
         // Keep only the newest window — history re-fetches via /messages.
         self.timeline = Array(timeline.suffix(Self.maxTimelineEvents))
         self.unreadCount = unreadCount
@@ -170,5 +175,5 @@ public struct RoomSnapshot: Hashable, Sendable, Codable {
 public enum SnapshotVersion {
     /// Current schema. Bump when snapshot shape changes; old snapshots are
     /// discarded (never migrated — sync rebuilds them).
-    public static let current = 8
+    public static let current = 9
 }
