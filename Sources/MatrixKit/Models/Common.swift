@@ -56,10 +56,15 @@ extension AnyCodable {
         return nil
     }
 
-    /// The value if `.int`.
+    /// The value if `.int`, coercing spec-legal string and integral
+    /// double forms (power levels allow integers-as-strings).
     public var intValue: Int? {
-        if case .int(let i) = self { return i }
-        return nil
+        switch self {
+        case .int(let i): return i
+        case .string(let s): return Int(s)
+        case .double(let d): return Int(exactly: d)
+        default: return nil
+        }
     }
 
     /// The value if `.bool`.

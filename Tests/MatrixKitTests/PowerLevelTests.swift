@@ -110,6 +110,35 @@ struct PowerLevelTests {
         #expect(!permissions.canSendMessages)
     }
 
+    @Test("String-encoded power levels coerce per spec")
+    func stringLevels() {
+        let content: [String: AnyCodable] = [
+            "users": .object(["@admin:x": .string("100")]),
+            "users_default": .string("10"),
+            "ban": .string("60"),
+        ]
+        #expect(RoomPermissions.powerLevel(
+            of: UserId(unchecked: "@admin:x"), in: content) == 100)
+        #expect(RoomPermissions.powerLevel(
+            of: UserId(unchecked: "@other:x"), in: content) == 10)
+        let permissions = RoomPermissions.evaluate(
+            powerLevels: content, userId: UserId(unchecked: "@admin:x"))
+        #expect(permissions.canBan)
+        #expect(RoomPowerLevelSettings.parse(content).usersDefault == 10)
+    }
+
+    @Test("Non-integral values fall back to defaults")
+    func nonIntegralLevels() {
+        #expect(AnyCodable.string("admin").intValue == nil)
+        #expect(AnyCodable.double(50.5).intValue == nil)
+        #expect(AnyCodable.double(50.0).intValue == 50)
+        let content: [String: AnyCodable] = [
+            "users": .object(["@a:x": .string("high")]),
+        ]
+        #expect(RoomPermissions.powerLevel(
+            of: UserId(unchecked: "@a:x"), in: content) == 0)
+    }
+
     @Test("Roles bucket power levels", arguments: [
         (100, RoomMemberDetails.Role.administrator),
         (150, RoomMemberDetails.Role.administrator),
