@@ -692,6 +692,7 @@ public final class ObservableRoom {
         var powerContent: [String: AnyCodable]?
         var creatorSender: UserId?
         var createContent: [String: AnyCodable]?
+        var roomVersion: String?
         for event in state {
             switch EventType(rawValue: event.type) {
             case .roomName:
@@ -716,6 +717,7 @@ public final class ObservableRoom {
             case .roomCreate:
                 creatorSender = event.sender
                 createContent = event.content
+                roomVersion = event.content["room_version"]?.stringValue
             case .roomMember, .roomMessage, .roomEncryption, .roomTombstone,
                 .roomServerACL, .sticker, .pollStart, .callMember, .redaction, .reaction,
                 .typing, .receipt, .presence, .fullyRead, .tag, .custom, .unknown:
@@ -775,6 +777,7 @@ public final class ObservableRoom {
             isEncrypted: isEncrypted,
             isPublic: joinRule == "public",
             isDirect: isDirect,
+            roomVersion: roomVersion ?? "1",
             canonicalAlias: canonicalAlias ?? self.canonicalAlias,
             alternativeAliases: alternativeAliases,
             memberCount: members.count,
