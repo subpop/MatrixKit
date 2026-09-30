@@ -136,6 +136,16 @@ public struct RoomPermissions: Hashable, Sendable {
         self.canSendMessages = canSendMessages
     }
 
+    /// Permissions for infinitely-powered room creators (room v12+):
+    /// everything granted.
+    public static let infinite = RoomPermissions(
+        canEditName: true, canEditTopic: true, canEditAvatar: true,
+        canInvite: true, canKick: true, canBan: true,
+        canRedactOther: true, canChangePermissions: true,
+        canPin: true, canEditJoinRules: true, canEditHistoryVisibility: true,
+        canEditCanonicalAlias: true, canSendMessages: true
+    )
+
     /// Whether any room-detail field is editable.
     public var canEditDetails: Bool {
         canEditName || canEditTopic || canEditAvatar || canEditCanonicalAlias
@@ -192,7 +202,7 @@ public struct RoomMemberDetails: Hashable, Sendable, Identifiable {
     public var avatarURL: MXCURI?
     /// Role bucket derived from the power level.
     public var role: Role
-    /// Raw power level.
+    /// Raw power level (`.max` denotes infinitely-high room v12+ creator power).
     public var powerLevel: Int
     /// Whether the member created the room.
     public var isCreator: Bool
@@ -226,6 +236,27 @@ public struct RoomMemberDetails: Hashable, Sendable, Identifiable {
         self.role = role
         self.powerLevel = powerLevel
         self.isCreator = isCreator
+    }
+}
+
+extension RoomMemberDetails {
+    /// Creator set and whether creators are infinitely powered, from an
+    /// `m.room.create` event's sender and content. Infinite creator power
+    /// and `additional_creators` are room v12+ concepts (later versions
+    /// assumed to keep them); older rooms only ever have the sender as
+    /// creator, with an ordinary power level.
+    static func creators(
+        sender: UserId, createContent: [String: AnyCodable]
+    ) -> (creators: Set<UserId>, infinite: Bool) {
+        let version = createContent["room_version"]?.stringValue.flatMap(Int.init) ?? 1
+        guard version >= 12 else { return ([sender], false) }
+        var creators: Set<UserId> = [sender]
+        let additional =
+            createContent["additional_creators"]?.arrayValue?.compactMap(\.stringValue) ?? []
+        for id in additional {
+            creators.insert(UserId(unchecked: id))
+        }
+        return (creators, true)
     }
 }
 

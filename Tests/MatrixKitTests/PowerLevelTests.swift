@@ -139,9 +139,52 @@ struct PowerLevelTests {
             of: UserId(unchecked: "@a:x"), in: content) == 0)
     }
 
+    @Test("Room v12 creators are infinite, older rooms sender-only")
+    func creators() {
+        let sender = UserId(unchecked: "@slavi:x")
+        let v12: [String: AnyCodable] = [
+            "room_version": .string("12"),
+            "additional_creators": .array([.string("@beast:x")]),
+        ]
+        let (creators, infinite) = RoomMemberDetails.creators(
+            sender: sender, createContent: v12)
+        #expect(infinite)
+        #expect(creators == [sender, UserId(unchecked: "@beast:x")])
+
+        let v12Bare = RoomMemberDetails.creators(
+            sender: sender, createContent: ["room_version": .string("12")])
+        #expect(v12Bare.infinite)
+        #expect(v12Bare.creators == [sender])
+
+        let v11 = RoomMemberDetails.creators(
+            sender: sender,
+            createContent: [
+                "room_version": .string("11"),
+                "additional_creators": .array([.string("@beast:x")]),
+            ])
+        #expect(!v11.infinite)
+        #expect(v11.creators == [sender])
+
+        let unversioned = RoomMemberDetails.creators(sender: sender, createContent: [:])
+        #expect(!unversioned.infinite)
+        #expect(unversioned.creators == [sender])
+    }
+
+    @Test("Infinite permissions grant everything")
+    func infinitePermissions() {
+        let permissions = RoomPermissions.infinite
+        #expect(permissions.canKick)
+        #expect(permissions.canBan)
+        #expect(permissions.canChangePermissions)
+        #expect(permissions.canInvite)
+        #expect(permissions.canSendMessages)
+        #expect(permissions.canEditDetails)
+    }
+
     @Test("Roles bucket power levels", arguments: [
         (100, RoomMemberDetails.Role.administrator),
         (150, RoomMemberDetails.Role.administrator),
+        (.max, RoomMemberDetails.Role.administrator),
         (50, RoomMemberDetails.Role.moderator),
         (0, RoomMemberDetails.Role.user),
     ])

@@ -690,7 +690,8 @@ public final class ObservableRoom {
         var joinRule: String?
         var historyVisibility: String?
         var powerContent: [String: AnyCodable]?
-        var creator: UserId?
+        var creatorSender: UserId?
+        var createContent: [String: AnyCodable]?
         for event in state {
             switch EventType(rawValue: event.type) {
             case .roomName:
@@ -713,7 +714,8 @@ public final class ObservableRoom {
             case .roomHistoryVisibility:
                 historyVisibility = event.content["history_visibility"]?.stringValue
             case .roomCreate:
-                creator = event.sender
+                creatorSender = event.sender
+                createContent = event.content
             case .roomMember, .roomMessage, .roomEncryption, .roomTombstone,
                 .roomServerACL, .sticker, .pollStart, .callMember, .redaction, .reaction,
                 .typing, .receipt, .presence, .fullyRead, .tag, .custom, .unknown:
@@ -734,22 +736,36 @@ public final class ObservableRoom {
                 uniqueKeysWithValues: activeMemberInfos.map {
                     (UserId(unchecked: $0.stateKey), $0.content)
                 }))
+        let (creators, creatorsInfinite): (Set<UserId>, Bool) = if let creatorSender,
+            let createContent
+        {
+            RoomMemberDetails.creators(sender: creatorSender, createContent: createContent)
+        } else {
+            ([], false)
+        }
+        // Room v12+ creators are infinitely powered, so they bypass the
+        // `m.room.power_levels` lookup (which must not even list them).
+        func effectiveLevel(of userId: UserId) -> Int {
+            if creatorsInfinite && creators.contains(userId) { return .max }
+            return powerContent.map {
+                RoomPermissions.powerLevel(of: userId, in: $0)
+            } ?? 0
+        }
         let members = activeMemberInfos
             .map { info in
             let userId = UserId(unchecked: info.stateKey)
-            let level = powerContent.map {
-                RoomPermissions.powerLevel(of: userId, in: $0)
-            } ?? 0
+            let level = effectiveLevel(of: userId)
             return RoomMemberDetails(
                 userId: userId,
                 displayName: info.content.displayname,
                 avatarURL: info.content.avatarUrl.flatMap { try? MXCURI($0) },
                 role: .of(level),
                 powerLevel: level,
-                isCreator: userId == creator)
+                isCreator: creators.contains(userId))
         }
-        let permissions = localUser.flatMap { user in
-            powerContent.map { RoomPermissions.evaluate(powerLevels: $0, userId: user) }
+        let permissions = localUser.flatMap { user -> RoomPermissions? in
+            if creatorsInfinite && creators.contains(user) { return .infinite }
+            return powerContent.map { RoomPermissions.evaluate(powerLevels: $0, userId: user) }
         }
         return RoomDetails(
             id: roomId,
