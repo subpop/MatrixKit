@@ -245,12 +245,17 @@ public final class ObservableRoom {
     /// AES-CTR ciphertext with a `file` dict; plaintext rooms upload
     /// directly (server thumbnails apply). Returns the echo event ID,
     /// or nil when logged out.
+    ///
+    /// When `onProgress` is set, it receives the overall upload fraction
+    /// (0 to 1): one phase for plaintext rooms, file + thumbnail phases
+    /// weighted by byte size for encrypted rooms.
     @discardableResult
     public func sendAttachment(
         data: Data, filename: String, mimeType: String, caption: String? = nil,
         width: Int? = nil, height: Int? = nil, duration: Int? = nil,
         thumbnailData: Data? = nil, thumbnailMimeType: String? = nil,
-        inReplyTo: EventId? = nil
+        inReplyTo: EventId? = nil,
+        onProgress: (@Sendable (Double) -> Void)? = nil
     ) async -> EventId? {
         guard let localUser else { return nil }
         let txn = TransactionId.random()
@@ -274,14 +279,22 @@ public final class ObservableRoom {
         await room.stageEcho(echo, transactionId: txn)
         do {
             if await room.isEncrypted {
+                let total = data.count + (thumbnailData?.count ?? 0)
+                let fileShare = total > 0 ? Double(data.count) / Double(total) : 1
                 let file = try await media.uploadEncrypted(
-                    data, mimeType: mimeType, filename: filename)
+                    data, mimeType: mimeType, filename: filename
+                ) { fraction in
+                    onProgress?(fraction * fileShare)
+                }
                 var encryptedInfo = info
                 if let thumbnailData {
                     encryptedInfo.thumbnailFile = try await media.uploadEncrypted(
                         thumbnailData,
                         mimeType: thumbnailMimeType ?? "image/png",
-                        filename: "\(filename)-thumbnail")
+                        filename: "\(filename)-thumbnail"
+                    ) { fraction in
+                        onProgress?(fileShare + fraction * (1 - fileShare))
+                    }
                     encryptedInfo.thumbnailUrl = nil
                 }
                 guard let encryptSender else {
@@ -296,7 +309,8 @@ public final class ObservableRoom {
                     txn)
             } else {
                 let mxc = try await media.upload(
-                    data, mimeType: mimeType, filename: filename)
+                    data, mimeType: mimeType, filename: filename,
+                    onProgress: onProgress)
                 _ = try await messages.send(
                     roomId,
                     content: MessageContent(

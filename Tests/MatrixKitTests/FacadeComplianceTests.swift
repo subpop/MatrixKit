@@ -233,6 +233,26 @@ struct FacadeComplianceTests {
         }
     }
 
+    @Test("Room attachment reports progress ending at 1")
+    @MainActor
+    func roomAttachmentProgress() async throws {
+        try await withHarness { harness in
+            let client = await client(harness)
+            let room = try await client.createRoom(CreateRoomRequest())
+            let collector = ProgressCollector()
+            let echo = await room.sendAttachment(
+                data: Data(repeating: 0xAB, count: 200 * 1024),
+                filename: "big.bin", mimeType: "application/octet-stream",
+                onProgress: { collector.append($0) })
+            #expect(echo?.value.hasPrefix("local:") == true)
+            let fractions = collector.values
+            #expect(fractions.count >= 2)
+            #expect(zip(fractions, fractions.dropFirst()).allSatisfy { $0 <= $1 })
+            #expect(fractions.last == 1)
+            try? await client.transport.shutdown()
+        }
+    }
+
     @Test("Room invite, leave, and member loading")
     @MainActor
     func roomMembershipFlows() async throws {

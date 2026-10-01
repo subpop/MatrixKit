@@ -81,6 +81,42 @@ struct MediaComplianceTests {
         }
     }
 
+    @Test("Upload reports monotonic progress ending at 1")
+    func uploadProgress() async throws {
+        try await withHarness { harness in
+            let (media, _, _) = await harness.mediaClient()
+            // Multi-chunk payload (64 KiB chunks).
+            let bytes = Data(repeating: 0xAB, count: 200 * 1024)
+            let collector = ProgressCollector()
+            let uri = try await media.upload(
+                bytes, mimeType: "application/octet-stream", filename: "big.bin",
+                onProgress: { collector.append($0) })
+            #expect(uri.value.hasPrefix("mxc://test/m"))
+            #expect(try await media.download(uri) == bytes)
+            let fractions = collector.values
+            #expect(fractions.count >= 2)
+            #expect(zip(fractions, fractions.dropFirst()).allSatisfy { $0 <= $1 })
+            #expect(fractions.last == 1)
+        }
+    }
+
+    @Test("Encrypted upload reports monotonic progress ending at 1")
+    func encryptedUploadProgress() async throws {
+        try await withHarness { harness in
+            let (media, _, _) = await harness.mediaClient()
+            let plaintext = Data(repeating: 0xCD, count: 200 * 1024)
+            let collector = ProgressCollector()
+            let file = try await media.uploadEncrypted(
+                plaintext, mimeType: "application/octet-stream",
+                onProgress: { collector.append($0) })
+            #expect(try await media.downloadDecrypted(file) == plaintext)
+            let fractions = collector.values
+            #expect(fractions.count >= 2)
+            #expect(zip(fractions, fractions.dropFirst()).allSatisfy { $0 <= $1 })
+            #expect(fractions.last == 1)
+        }
+    }
+
     @Test("httpURL builds the v3 download URL without network")
     func httpURL() async throws {
         try await withHarness { harness in
@@ -104,5 +140,24 @@ struct MediaComplianceTests {
             try await media.upload(Data("x".utf8), mimeType: "image/png")
         }
         try? await transport.shutdown()
+    }
+}
+
+/// Thread-safe sink for synchronous progress callbacks, which arrive
+/// off the test actor as the channel drains.
+final class ProgressCollector: @unchecked Sendable {
+    private let lock = NSLock()
+    private var fractions: [Double] = []
+
+    func append(_ fraction: Double) {
+        lock.lock()
+        defer { lock.unlock() }
+        fractions.append(fraction)
+    }
+
+    var values: [Double] {
+        lock.lock()
+        defer { lock.unlock() }
+        return fractions
     }
 }

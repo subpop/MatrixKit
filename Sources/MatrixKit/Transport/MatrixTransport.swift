@@ -162,6 +162,11 @@ public actor MatrixTransport {
     }
 
     /// Send a request with raw bytes and return the raw response body.
+    ///
+    /// When `onProgress` is set, the body streams in chunks and the
+    /// callback receives the upload fraction (`sent / total`, ending at
+    /// 1) as the channel drains. `nil` (the default) sends single-shot
+    /// with no callbacks.
     public func sendBytes(
         _ method: HTTPMethod,
         path: String,
@@ -169,12 +174,13 @@ public actor MatrixTransport {
         bytes: Data,
         contentType: String,
         accessToken: String? = nil,
-        timeoutSeconds: Int = 60
+        timeoutSeconds: Int = 60,
+        onProgress: (@Sendable (Double) -> Void)? = nil
     ) async throws(MatrixError) -> (status: Int, data: Data) {
         let (status, data) = try await sendRaw(
             method, path: path, query: query, rawBody: bytes,
             contentType: contentType, accessToken: accessToken,
-            timeoutSeconds: timeoutSeconds
+            timeoutSeconds: timeoutSeconds, onProgress: onProgress
         )
         if status == 401,
            let errorBody = try? decoder.decode(MatrixErrorBody.self, from: data),
@@ -194,7 +200,7 @@ public actor MatrixTransport {
                 return try await sendRaw(
                     method, path: path, query: query, rawBody: bytes,
                     contentType: contentType, accessToken: freshToken,
-                    timeoutSeconds: timeoutSeconds
+                    timeoutSeconds: timeoutSeconds, onProgress: onProgress
                 )
             }
         }
@@ -211,7 +217,8 @@ public actor MatrixTransport {
         rawBody: Data? = nil,
         contentType: String?,
         accessToken: String?,
-        timeoutSeconds: Int
+        timeoutSeconds: Int,
+        onProgress: (@Sendable (Double) -> Void)? = nil
     ) async throws(MatrixError) -> (status: Int, data: Data) {
         let urlString = try buildURL(path: path, query: query)
 
@@ -234,7 +241,7 @@ public actor MatrixTransport {
             urlString: urlString, method: method, bodyData: bodyData,
             contentType: contentType, accessToken: accessToken,
             timeoutSeconds: timeoutSeconds, pathForLog: path,
-            bodyPreview: preview
+            bodyPreview: preview, onProgress: onProgress
         )
     }
 
@@ -388,7 +395,8 @@ public actor MatrixTransport {
         accessToken: String?,
         timeoutSeconds: Int,
         pathForLog: String,
-        bodyPreview: String?
+        bodyPreview: String?,
+        onProgress: (@Sendable (Double) -> Void)? = nil
     ) async throws(MatrixError) -> (status: Int, data: Data) {
         do {
             var request = HTTPClientRequest(url: urlString)
@@ -401,7 +409,20 @@ public actor MatrixTransport {
                 request.headers.add(name: "Authorization", value: "Bearer \(accessToken)")
             }
             if let bodyData {
-                request.body = .bytes(ByteBuffer(bytes: bodyData))
+                if let onProgress, !bodyData.isEmpty {
+                    // Known-length stream: the server sees a normal
+                    // `Content-Length` POST; AsyncHTTPClient pulls chunks
+                    // as the channel drains, so callbacks track the
+                    // upload with chunk granularity.
+                    request.body = .stream(
+                        UploadProgressSequence(data: bodyData, onProgress: onProgress),
+                        length: .known(Int64(bodyData.count)))
+                } else {
+                    request.body = .bytes(ByteBuffer(bytes: bodyData))
+                    if bodyData.isEmpty {
+                        onProgress?(1)
+                    }
+                }
             }
             let kind = Self.kindTag(for: pathForLog)
             MatrixKitLog.transport.trace(
@@ -609,6 +630,40 @@ public actor MatrixTransport {
         default:
             return .serverError(code: body.errcode, message: body.error, retryAfter: retryAfter)
         }
+    }
+}
+
+/// An `AsyncSequence` of `ByteBuffer` chunks reporting production
+/// progress. `AsyncHTTPClient` pulls buffers as the channel drains, so
+/// per-chunk callbacks track the upload with chunk granularity
+/// (production trails socket writes by at most one chunk).
+private struct UploadProgressSequence: AsyncSequence, Sendable {
+    typealias Element = ByteBuffer
+
+    /// Bytes per chunk: smooth progress without per-byte overhead.
+    private static let chunkSize = 64 * 1024
+
+    let data: Data
+    let onProgress: @Sendable (Double) -> Void
+
+    struct AsyncIterator: AsyncIteratorProtocol {
+        let data: Data
+        let total: Int
+        let onProgress: @Sendable (Double) -> Void
+        var offset = 0
+
+        mutating func next() async throws -> ByteBuffer? {
+            guard offset < total else { return nil }
+            let end = Swift.min(offset + UploadProgressSequence.chunkSize, total)
+            let buffer = ByteBuffer(bytes: data[offset..<end])
+            offset = end
+            onProgress(Double(offset) / Double(total))
+            return buffer
+        }
+    }
+
+    func makeAsyncIterator() -> AsyncIterator {
+        AsyncIterator(data: data, total: data.count, onProgress: onProgress)
     }
 }
 

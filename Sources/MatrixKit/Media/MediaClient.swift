@@ -22,15 +22,20 @@ public actor MediaClient {
     // MARK: - Upload
 
     /// Upload bytes (`POST /upload?filename=`). Returns the `mxc://` URI.
+    ///
+    /// When `onProgress` is set, the body streams in chunks and the
+    /// callback receives the upload fraction (`sent / total`, ending
+    /// at 1) as the channel drains.
     public func upload(
-        _ data: Data, mimeType: String, filename: String? = nil
+        _ data: Data, mimeType: String, filename: String? = nil,
+        onProgress: (@Sendable (Double) -> Void)? = nil
     ) async throws(MatrixError) -> MXCURI {
         var query: [String: String]? = nil
         if let filename { query = ["filename": filename] }
         let (_, body) = try await transport.sendBytes(
             .post, path: "/_matrix/media/v3/upload",
             query: query, bytes: data, contentType: mimeType,
-            accessToken: try await token()
+            accessToken: try await token(), onProgress: onProgress
         )
         let response: UploadResponse
         do {
@@ -200,13 +205,17 @@ public actor MediaClient {
     }
 
     /// Encrypt and upload bytes, returning the completed file dict.
+    ///
+    /// `onProgress` covers the single ciphertext upload (0 to 1); callers
+    /// with additional uploads (e.g. thumbnails) weight the phases.
     public func uploadEncrypted(
-        _ data: Data, mimeType: String, filename: String? = nil
+        _ data: Data, mimeType: String, filename: String? = nil,
+        onProgress: (@Sendable (Double) -> Void)? = nil
     ) async throws(MatrixError) -> EncryptedFile {
         let encrypted = try Self.encryptFile(data)
         let mxc = try await upload(
             encrypted.ciphertext, mimeType: "application/octet-stream",
-            filename: filename)
+            filename: filename, onProgress: onProgress)
         return EncryptedFile(
             url: mxc.value,
             key: encrypted.key,
