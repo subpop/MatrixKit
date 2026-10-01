@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 
+import MatrixKitTesting
 @testable import MatrixKit
 
 @Suite("Directory, search, and aliases")
@@ -14,6 +15,25 @@ struct DirectorySearchTests {
         let json = try JSONDecoder().decode([String: AnyCodable].self, from: data)
         #expect(json["filter"]?["generic_search_term"]?.stringValue == "matrix")
         #expect(json["limit"]?.intValue == 10)
+        // The spec defines no body `server` field (remote directories are
+        // selected with the `server` query parameter), so it must never
+        // be encoded here: Synapse silently ignores it.
+        #expect(json["server"] == nil)
+    }
+
+    @Test("POST publicRooms sends server as a query parameter")
+    func publicRoomsServerQueryPlacement() async throws {
+        try await withHarness { harness in
+            let (rooms, _, _) = await harness.roomClient()
+            _ = try await rooms.publicRooms(server: "matrixrooms.info")
+            let posted = try #require(await harness.requests.last(where: {
+                $0.method == "POST" && $0.path.hasSuffix("/publicRooms")
+            }))
+            #expect(posted.query["server"] == "matrixrooms.info")
+            let body = try JSONDecoder().decode(
+                [String: AnyCodable].self, from: posted.body)
+            #expect(body["server"] == nil)
+        }
     }
 
     struct DirectoryCase: Sendable {

@@ -169,16 +169,24 @@ public actor RoomClient {
     // MARK: - Directory
 
     /// Public room directory (`POST /publicRooms`).
+    ///
+    /// `server` selects a remote directory and travels as a URL query
+    /// parameter, matching the spec and Synapse: the POST body defines
+    /// no `server` field, so a body value is silently ignored and every
+    /// query falls back to the local directory.
     public func publicRooms(
         limit: Int? = nil,
         since: String? = nil,
         server: String? = nil,
         filter: String? = nil
     ) async throws(MatrixError) -> PublicRoomsResponse {
-        try await transport.send(
+        var query: [String: String] = [:]
+        if let server { query["server"] = server }
+        return try await transport.send(
             .post, path: "/_matrix/client/v3/publicRooms",
+            query: query.isEmpty ? nil : query,
             body: PublicRoomsRequest(
-                limit: limit, since: since, server: server,
+                limit: limit, since: since,
                 filter: filter.map(PublicRoomsFilter.init(genericSearchTerm:))),
             accessToken: try await token()
         )
@@ -444,23 +452,24 @@ public struct JoinedMembersResponse: Hashable, Sendable, Codable {
 }
 
 /// `POST /publicRooms` request body.
+///
+/// The spec defines no `server` field here: a remote directory is
+/// selected with the `server` URL query parameter (which Synapse reads
+/// from the query string only), so it must not be sent in the body.
 public struct PublicRoomsRequest: Hashable, Sendable, Codable {
     /// Max entries per page.
     public var limit: Int?
     /// Pagination cursor from a previous response.
     public var since: String?
-    /// Only rooms published by this server.
-    public var server: String?
     /// Server-side text filter.
     public var filter: PublicRoomsFilter?
 
     public init(
-        limit: Int? = nil, since: String? = nil, server: String? = nil,
+        limit: Int? = nil, since: String? = nil,
         filter: PublicRoomsFilter? = nil
     ) {
         self.limit = limit
         self.since = since
-        self.server = server
         self.filter = filter
     }
 }
