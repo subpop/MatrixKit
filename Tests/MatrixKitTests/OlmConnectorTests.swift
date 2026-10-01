@@ -272,6 +272,9 @@ struct OlmConnectorTests {
         _ = await bob.decrypt([BasicEvent(
             type: first[0].type, sender: aliceUser,
             content: first[0].content)])
+        // Coalesced writes land on flush, not per send (see
+        // `PersistCoalescer`): settle before simulating restart.
+        await bob.flushCryptoState()
         // Simulate restart: fresh connector, same store + identity.
         let bob2 = OlmConnector(
             keys: keys, sender: FakeSender(), keystore: store)
@@ -307,6 +310,38 @@ struct OlmConnectorTests {
             content: third[0].content)])
         #expect(inner3.count == 1)
         #expect(inner3[0].content["n"] == .int(3))
+    }
+
+    @Test("bursty sends collapse into one keystore write")
+    func sendsCoalescePersists() async throws {
+        let (aliceUser, bobUser) = try users()
+        let keys = FakeKeys()
+        let store = CountingKeyStore()
+        let alice = OlmConnector(
+            keys: keys, sender: FakeSender(), keystore: store)
+        try await alice.configure(
+            identity: DeviceIdentityKeys.generate(),
+            userId: aliceUser, deviceId: DeviceId("ALICE"))
+        let bob = OlmConnector(keys: keys, sender: FakeSender())
+        try await bob.configure(
+            identity: DeviceIdentityKeys.generate(),
+            userId: bobUser, deviceId: DeviceId("BOB"))
+        try await bob.ensureKeys()
+        // Settle configure/ensureKeys writes so only the sends count.
+        await alice.flushCryptoState()
+        let settled = await store.saves
+        for i in 0..<5 {
+            try await alice.sendEncrypted(
+                eventType: "m.secret.send",
+                content: ["n": .int(i)],
+                to: bobUser, devices: [DeviceId("BOB")])
+        }
+        await alice.flushCryptoState()
+        // Five sends collapse into one debounced flush, which writes
+        // at most the sessions + OTK entries (uncoalesced: ten writes).
+        let burstWrites = await store.saves - settled
+        #expect(burstWrites > 0)
+        #expect(burstWrites <= 2)
     }
 
     @Test("legacy OTK pool migrates instead of regenerating")

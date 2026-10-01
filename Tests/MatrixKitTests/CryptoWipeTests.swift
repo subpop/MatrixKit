@@ -76,6 +76,7 @@ struct CryptoWipeTests {
             identity: DeviceIdentityKeys.generate(),
             userId: UserId(unchecked: "@bob:x"), deviceId: DeviceId("BOB"))
         try await bob.ensureKeys()
+        await bob.flushCryptoState()
         #expect(await !keystore.keys.isEmpty)
         await bob.deletePersistedState()
         #expect(await keystore.keys.isEmpty)

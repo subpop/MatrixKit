@@ -6,6 +6,28 @@ import Testing
 /// delete, with absent deletes a no-op. Both shipped backends
 /// (`InMemoryKeyStore`, `FileKeyStore`) run this instead of carrying
 /// their own copy of the round-trip.
+/// `KeyStore` decorator counting writes, for coalescing assertions.
+/// Delegates to an `InMemoryKeyStore` so reads observe the writes.
+public actor CountingKeyStore: KeyStore {
+    private let inner = InMemoryKeyStore()
+    public private(set) var saves = 0
+
+    public init() {}
+
+    public func save(_ data: Data, for key: KeyStoreKey) async throws {
+        saves += 1
+        try await inner.save(data, for: key)
+    }
+
+    public func load(_ key: KeyStoreKey) async throws -> Data? {
+        try await inner.load(key)
+    }
+
+    public func delete(_ key: KeyStoreKey) async throws {
+        try await inner.delete(key)
+    }
+}
+
 public func checkKeyStoreRoundTrip(
     _ store: any KeyStore,
     sourceLocation: SourceLocation = #_sourceLocation

@@ -91,6 +91,10 @@ public actor OlmConnector {
     private var resolvedPeers: [String: ResolvedPeer] = [:]
     private var listedDevices: [String: [String]] = [:]
 
+    /// Debounced crypto-state persistence (see `PersistCoalescer`),
+    /// created on first mutation so `init` never captures `self`.
+    private var persister: PersistCoalescer?
+
     public init(
         keys: any OlmKeyService, sender: any ToDeviceSender,
         keystore: (any KeyStore)? = nil
@@ -98,6 +102,23 @@ public actor OlmConnector {
         self.keys = keys
         self.sender = sender
         self.keystore = keystore
+    }
+
+    /// Record a crypto-state mutation for debounced persistence.
+    private func markPersistDirty() async {
+        if persister == nil {
+            persister = PersistCoalescer { [weak self] in
+                await self?.persistCryptoState()
+            }
+        }
+        await persister?.markDirty()
+    }
+
+    /// Write any coalesced crypto state immediately. Call on paths
+    /// where the debounce loss window is unacceptable (e.g. app
+    /// termination) and in tests that re-read the store right away.
+    public func flushCryptoState() async {
+        await persister?.flush()
     }
 
     // MARK: - Configuration
@@ -155,6 +176,8 @@ public actor OlmConnector {
     }
 
     /// Save sessions + OTK pool to the keystore. No-op when unset.
+    /// The coalesced write body — call sites record mutations with
+    /// `markPersistDirty()` instead of calling this directly.
     private func persistCryptoState() async {
         guard let keystore, let userId, let deviceId else { return }
         let sessionsKey = KeyStoreKey(
@@ -193,6 +216,7 @@ public actor OlmConnector {
     /// Delete persisted sessions + OTK pool (e.g. on logout). Absent
     /// entries are not an error; failures are logged, not thrown.
     public func deletePersistedState() async {
+        await persister?.cancel()
         guard let keystore, let userId, let deviceId else { return }
         do {
             try await keystore.delete(KeyStoreKey(
@@ -333,7 +357,7 @@ public actor OlmConnector {
                 deviceKeys: try material.deviceKeys(
                     userId: userId.value, deviceId: deviceId.value),
                 oneTimeKeys: otks, fallbackKeys: fallback))
-        await persistCryptoState()
+        await markPersistDirty()
     }
 
     /// `signed_curve25519` upload object: `{key, signatures}` over
@@ -435,7 +459,7 @@ public actor OlmConnector {
         for (deviceId, content) in payloads {
             messages[user.value, default: [:]][deviceId] = content
         }
-        await persistCryptoState()
+        await markPersistDirty()
         try await sender.sendRaw(
             eventType: Self.encryptedType, messages: messages)
     }
@@ -595,7 +619,7 @@ public actor OlmConnector {
             dropped = true
         }
         if dropped {
-            await persistCryptoState()
+            await markPersistDirty()
         }
     }
 
@@ -768,7 +792,7 @@ public actor OlmConnector {
                 continue
             }
         }
-        await persistCryptoState()
+        await markPersistDirty()
         return out
     }
 
