@@ -108,6 +108,8 @@ struct EncryptedRoomComplianceTests {
             let bob = try await peer(harness, user: "@bob:test", device: "BOB", keystore: store)
             let room = RoomId(unchecked: "!room:test")
             try await shareToBob(harness, alice: alice, bob: bob, room: room)
+            // Coalesced writes land on flush (see `PersistCoalescer`).
+            await bob.crypto.flushCryptoState()
             // A fresh instance restores Bob's inbound sessions from disk
             // and decrypts without re-receiving the key.
             let bob2 = RoomCrypto(

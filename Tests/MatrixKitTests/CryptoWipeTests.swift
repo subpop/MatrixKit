@@ -99,6 +99,7 @@ struct CryptoWipeTests {
         await bob.receiveRoomKey(BasicEvent(
             type: "m.room_key", sender: aliceUser,
             content: shares[0].content))
+        await bob.flushCryptoState()
         #expect(await !keystore.keys.isEmpty)
         await bob.deletePersistedSessions()
         #expect(await keystore.keys.isEmpty)

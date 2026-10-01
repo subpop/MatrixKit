@@ -59,6 +59,10 @@ public actor RoomCrypto {
     private let sender: any RoomEventSender
     private let keystore: (any KeyStore)?
 
+    /// Debounced megolm persistence (see `PersistCoalescer`), created
+    /// on first mutation so `init` never captures `self`.
+    private var persister: PersistCoalescer?
+
     /// Outbound sessions by room ID value. Fresh per launch; inbound
     /// sessions persist via the keystore (see `restore()`).
     private var outbound: [String: MegolmSession] = [:]
@@ -108,6 +112,23 @@ public actor RoomCrypto {
         self.sharer = sharer
         self.sender = sender
         self.keystore = keystore
+    }
+
+    /// Record a megolm-state mutation for debounced persistence.
+    private func markPersistDirty() async {
+        if persister == nil {
+            persister = PersistCoalescer { [weak self] in
+                await self?.persist()
+            }
+        }
+        await persister?.markDirty()
+    }
+
+    /// Write any coalesced megolm state immediately. Call on paths
+    /// where the debounce loss window is unacceptable (e.g. app
+    /// termination) and in tests that re-read the store right away.
+    public func flushCryptoState() async {
+        await persister?.flush()
     }
 
     // MARK: - Key requests
@@ -193,6 +214,8 @@ public actor RoomCrypto {
         }
     }
 
+    /// The coalesced write body — call sites record mutations with
+    /// `markPersistDirty()` instead of calling this directly.
     private func persist() async {
         guard let keystore else { return }
         var stored: [String: String] = [:]
@@ -214,6 +237,7 @@ public actor RoomCrypto {
     /// entry is shared across accounts — see `restore()`. Absent
     /// entries are not an error; failures are logged, not thrown.
     public func deletePersistedSessions() async {
+        await persister?.cancel()
         guard let keystore else { return }
         do {
             try await keystore.delete(KeyStoreKey(
@@ -312,7 +336,7 @@ public actor RoomCrypto {
         let eventId = try await sender.sendEvent(
             roomId, eventType: Self.roomEncryptedType, content: content,
             transactionId: transactionId)
-        await persist()
+        await markPersistDirty()
         return eventId
     }
 
@@ -524,7 +548,7 @@ public actor RoomCrypto {
             return false
         }
         inbound[key] = session
-        await persist()
+        await markPersistDirty()
         return true
     }
 
@@ -589,7 +613,7 @@ public actor RoomCrypto {
             claimedEd25519: event.content["sender_claimed_ed25519_key"]?
                 .stringValue,
             senderKey: event.content["sender_key"]?.stringValue)
-        await persist()
+        await markPersistDirty()
         return RoomId(unchecked: roomId)
     }
 
@@ -675,7 +699,7 @@ public actor RoomCrypto {
             return nil
         }
         inbound["\(roomId.value)|\(sessionId)"] = session
-        await persist()
+        await markPersistDirty()
         return MessageEvent(
             type: type, eventId: event.eventId, sender: event.sender,
             roomId: event.roomId ?? roomId, stateKey: event.stateKey,

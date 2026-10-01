@@ -157,6 +157,9 @@ struct RoomCryptoTests {
             type: "m.room_key", sender: aliceUser,
             content: shares[0].content))
         _ = try await alice.sendEncryptedContent(room, MessageContent.markdown("persistent"))
+        // Coalesced writes land on flush, not per import (see
+        // `PersistCoalescer`): settle before simulating restart.
+        await bob.flushCryptoState()
         // Fresh actor, same keystore: inbound session restored.
         let revived = RoomCrypto(
             sharer: FakeSharer(), sender: FakeRoomSender(),
@@ -169,6 +172,29 @@ struct RoomCryptoTests {
             content: sent[0].content)
         let decrypted = await revived.decryptRoomEvent(wire, in: room)
         #expect(decrypted?.content["body"] == .string("persistent"))
+    }
+
+    @Test("bursty imports collapse into one keystore write")
+    func importsCoalescePersists() async throws {
+        let (_, aliceUser, bobUser) = try roomFixture()
+        let (alice, _, aliceSharer, _) = try wirePair()
+        await aliceSharer.setDevices([bobUser.value: ["BOB"]])
+        let store = CountingKeyStore()
+        let bob = RoomCrypto(
+            sharer: FakeSharer(), sender: FakeRoomSender(),
+            keystore: store)
+        // Distinct sessions per room so every import stores.
+        for i in 0..<5 {
+            let room = RoomId(unchecked: "!room\(i):x")
+            try await alice.shareRoomKey(roomId: room, users: [bobUser])
+            let shares = await aliceSharer.shares
+            let share = try #require(shares.last)
+            await bob.receiveRoomKey(BasicEvent(
+                type: "m.room_key", sender: aliceUser,
+                content: share.content))
+        }
+        await bob.flushCryptoState()
+        #expect(await store.saves == 1)
     }
 
     @Test("megolm share over Olm-encrypted to-device round trips")
