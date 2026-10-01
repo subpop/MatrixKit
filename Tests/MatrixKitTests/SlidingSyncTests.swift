@@ -392,7 +392,7 @@ struct SlidingSyncClientTests {
 
     @Test("M_UNKNOWN_POS is classified for connection reset", arguments: [
         (MatrixError.serverError(code: "M_UNKNOWN_POS", message: "expired", retryAfter: nil), true),
-        (MatrixError.unknownToken, false),
+        (MatrixError.unknownToken(softLogout: nil), false),
         (MatrixError.serverError(code: "M_FORBIDDEN", message: "no", retryAfter: nil), false),
     ])
     func unknownPos(_ error: MatrixError, expected: Bool) {

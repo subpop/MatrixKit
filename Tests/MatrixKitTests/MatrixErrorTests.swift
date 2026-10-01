@@ -15,7 +15,7 @@ struct MatrixErrorTests {
         BoolCase(id: "network error", error: .networkError("boom"), expected: true),
         BoolCase(id: "M_UNKNOWN", error: .serverError(code: "M_UNKNOWN", message: "x", retryAfter: nil), expected: true),
         BoolCase(id: "M_5xx prefix", error: .serverError(code: "M_500", message: "x", retryAfter: nil), expected: true),
-        BoolCase(id: "unknown token", error: .unknownToken, expected: false),
+        BoolCase(id: "unknown token", error: .unknownToken(softLogout: nil), expected: false),
         BoolCase(id: "not authenticated", error: .notAuthenticated, expected: false),
         BoolCase(id: "M_FORBIDDEN", error: .serverError(code: "M_FORBIDDEN", message: "x", retryAfter: nil), expected: false),
         BoolCase(id: "cancelled", error: .cancelled, expected: false),
@@ -28,7 +28,7 @@ struct MatrixErrorTests {
 
     @Test("retryAfter surfaces the server hint", arguments: [
         BoolCase(id: "hint", error: .rateLimited(retryAfter: .milliseconds(500)), expected: true),
-        BoolCase(id: "no hint", error: .unknownToken, expected: false),
+        BoolCase(id: "no hint", error: .unknownToken(softLogout: nil), expected: false),
     ])
     func retryAfter(_ c: BoolCase) {
         switch c.error {
@@ -43,7 +43,7 @@ struct MatrixErrorTests {
         .invalidIdentifier("x"), .invalidURL("x"), .notAuthenticated, .transportClosed,
         .networkError("x"), .encodingError("x"), .decodingError("x"),
         .serverError(code: "M_X", message: "y", retryAfter: nil),
-        .rateLimited(retryAfter: nil), .unknownToken,
+        .rateLimited(retryAfter: nil), .unknownToken(softLogout: nil),
         .unexpectedStatus(418, body: nil), .syncFailed("x"),
         .noReachableDevices("x"), .cancelled,
     ]
@@ -57,7 +57,7 @@ struct MatrixErrorTests {
         BoolCase(id: "cancelled", error: .cancelled, expected: true),
         BoolCase(id: "wrapped CancellationError", error: .networkError("cancelled: \(CancellationError())"), expected: true),
         BoolCase(id: "plain network error", error: .networkError("boom"), expected: false),
-        BoolCase(id: "unknown token", error: .unknownToken, expected: false),
+        BoolCase(id: "unknown token", error: .unknownToken(softLogout: nil), expected: false),
     ]
 
     @Test("Cancellation reads as cancellation, never failure", arguments: cancellationCases)

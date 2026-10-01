@@ -394,7 +394,7 @@ struct VerificationSessionTests {
         try await requester.confirm(keysToMac: [
             VerificationSession.KeyToMAC(id: "ed25519:A", key: "A")
         ])
-        await reqSender.failNext(3, with: .unknownToken)
+        await reqSender.failNext(3, with: .unknownToken(softLogout: nil))
         await #expect(throws: MatrixError.self) {
             try await requester.sendDone()
         }

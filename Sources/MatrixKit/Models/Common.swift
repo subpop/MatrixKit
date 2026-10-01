@@ -99,11 +99,24 @@ public struct MatrixErrorBody: Hashable, Sendable, Codable {
     public var error: String
     /// Retry delay hint for rate limits, in milliseconds.
     public var retryAfterMs: Int?
+    /// Soft-logout hint on `M_UNKNOWN_TOKEN` (401): true when the session
+    /// can be revived by re-authentication, false/nil when it is dead.
+    public var softLogout: Bool?
 
-    public init(errcode: String, error: String, retryAfterMs: Int? = nil) {
+    public init(
+        errcode: String, error: String, retryAfterMs: Int? = nil, softLogout: Bool? = nil
+    ) {
         self.errcode = errcode
         self.error = error
         self.retryAfterMs = retryAfterMs
+        self.softLogout = softLogout
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case errcode
+        case error
+        case retryAfterMs = "retry_after_ms"
+        case softLogout = "soft_logout"
     }
 }
 

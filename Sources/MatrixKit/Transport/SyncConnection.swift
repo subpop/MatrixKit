@@ -58,7 +58,14 @@ public actor SyncConnection {
                     continuation.yield(response)
                 } catch let error as MatrixError {
                     if Task.isCancelled { break }
-                    if error == .unknownToken || error == .notAuthenticated {
+                    let isFatal: Bool
+                    switch error {
+                    case .unknownToken, .notAuthenticated:
+                        isFatal = true
+                    default:
+                        isFatal = false
+                    }
+                    if isFatal {
                         MatrixKitLog.syncConnection.error("Sync fatal: \(error, privacy: .public)")
                         onError?(error)
                         break

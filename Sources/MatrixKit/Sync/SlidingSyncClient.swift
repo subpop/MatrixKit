@@ -100,7 +100,14 @@ public actor SlidingSyncClient {
                     continuation.yield(delta)
                 } catch let error as MatrixError {
                     if Task.isCancelled { break }
-                    if error == .unknownToken || error == .notAuthenticated {
+                    let isFatal: Bool
+                    switch error {
+                    case .unknownToken, .notAuthenticated:
+                        isFatal = true
+                    default:
+                        isFatal = false
+                    }
+                    if isFatal {
                         MatrixKitLog.slidingSync.error("Sliding sync fatal: \(error, privacy: .public)")
                         break
                     }

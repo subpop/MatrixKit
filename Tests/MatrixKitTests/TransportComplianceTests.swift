@@ -47,8 +47,26 @@ struct TransportComplianceTests {
                 method: "GET", path: "/_matrix/client/v3/account/whoami",
                 response: .matrixError(
                     code: "M_UNKNOWN_TOKEN", message: "expired", status: 401))
-            await #expect(throws: MatrixError.unknownToken) {
+            await #expect(throws: MatrixError.unknownToken(softLogout: nil)) {
                 try await auth.whoAmI()
+            }
+        }
+    }
+
+    @Test("Soft-logout hint survives error mapping", arguments: [true, false])
+    func softLogoutHint(soft: Bool) async throws {
+        try await withHarness { harness in
+            let (auth, _, _) = await harness.authClient()
+            await harness.setOverride(
+                method: "GET", path: "/_matrix/client/v3/account/whoami",
+                response: .raw(
+                    #"{"errcode":"M_UNKNOWN_TOKEN","error":"gone","soft_logout":\#(soft)}"#,
+                    status: 401))
+            do {
+                _ = try await auth.whoAmI()
+                Issue.record("expected throw")
+            } catch let error as MatrixError {
+                #expect(error == .unknownToken(softLogout: soft))
             }
         }
     }

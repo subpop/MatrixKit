@@ -143,7 +143,11 @@ struct SyncComplianceTests {
         SyncErrorCase(
             status: 401,
             body: #"{"errcode":"M_UNKNOWN_TOKEN","error":"token dead"}"#,
-            check: { $0 == .unknownToken }),
+            check: { $0 == .unknownToken(softLogout: nil) }),
+        SyncErrorCase(
+            status: 401,
+            body: #"{"errcode":"M_UNKNOWN_TOKEN","error":"gone","soft_logout":true}"#,
+            check: { $0 == .unknownToken(softLogout: true) }),
         SyncErrorCase(
             status: 429,
             body: #"{"errcode":"M_LIMIT_EXCEEDED","error":"slow"}"#,
@@ -218,7 +222,7 @@ struct SyncComplianceTests {
                 try? await Task.sleep(for: .milliseconds(20))
             }
             #expect(await done.ended)
-            #expect(await box.error == .unknownToken)
+            #expect(await box.error == .unknownToken(softLogout: nil))
             await connection.stop()
         }
     }

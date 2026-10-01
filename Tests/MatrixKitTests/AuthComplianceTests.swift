@@ -370,4 +370,21 @@ struct AuthComplianceTests {
             #expect(metadata?.issuer.hasSuffix("/issuer") == true)
         }
     }
+
+    @Test("Rejected OIDC refresh token maps to unknown token")
+    func oidcRefreshRejected() async throws {
+        try await withHarness { harness in
+            let (auth, session, _) = await harness.authClient()
+            let baseURL = await harness.baseURL
+            await session.update(
+                accessToken: "old-access", refreshToken: "bogus",
+                expiresInMs: nil)
+            await session.updateOIDC(
+                clientId: "harness-client",
+                tokenEndpoint: "\(baseURL.absoluteString)/issuer/token")
+            await #expect(throws: MatrixError.unknownToken(softLogout: nil)) {
+                try await auth.refresh()
+            }
+        }
+    }
 }

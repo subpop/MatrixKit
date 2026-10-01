@@ -26,8 +26,10 @@ ones below it:
 ## Transport
 
 ``MatrixTransport`` wraps `AsyncHTTPClient`: JSON encode/decode, Bearer
-auth, Matrix error-body mapping (`M_UNKNOWN_TOKEN` → `unknownToken`,
-429 → `rateLimited`), and redacted debug logging. `SyncConnection` owns the
+auth, Matrix error-body mapping (`M_UNKNOWN_TOKEN` → `unknownToken`
+with the response's `soft_logout` hint, OIDC `invalid_grant` on refresh
+→ `unknownToken` with no hint, 429 → `rateLimited`), and redacted debug
+logging. `SyncConnection` owns the
 long-poll loop with backoff and yields raw `SyncResponse`s as an
 `AsyncStream`.
 

@@ -21,7 +21,9 @@ public enum MatrixError: Error, Sendable, Hashable {
     /// HTTP 429 — retry after the given delay, if present.
     case rateLimited(retryAfter: Duration?)
     /// HTTP 401 with `M_UNKNOWN_TOKEN` — the access token is dead.
-    case unknownToken
+    /// Carries the response's `soft_logout` hint (nil when absent):
+    /// true means re-authentication may revive the session.
+    case unknownToken(softLogout: Bool?)
     /// An HTTP status with no Matrix error body.
     case unexpectedStatus(Int, body: String?)
     /// Sync loop failed and exhausted its retry budget.
@@ -57,7 +59,11 @@ extension MatrixError: CustomStringConvertible {
         case .rateLimited(let after):
             if let after { return "Rate limited, retry after \(after)" }
             return "Rate limited"
-        case .unknownToken: return "Unknown token: access token is invalid or expired"
+        case .unknownToken(let softLogout):
+            if softLogout == true {
+                return "Unknown token (soft logout): re-authentication may revive the session"
+            }
+            return "Unknown token: access token is invalid or expired"
         case .unexpectedStatus(let code, let body): return "Unexpected HTTP \(code): \(body ?? "<empty>")"
         case .syncFailed(let msg): return "Sync failed: \(msg)"
         case .verificationFailed(let msg): return "Verification failed: \(msg)"

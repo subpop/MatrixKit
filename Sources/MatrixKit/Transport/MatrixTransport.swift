@@ -133,7 +133,7 @@ public actor MatrixTransport {
             )
             return try decodeResponse(status: status, data: data, path: path)
         } catch let error {
-            guard error == .unknownToken else { throw error }
+            guard case .unknownToken = error else { throw error }
             // A concurrent rotation may still be in flight: one re-read
             // after a beat before concluding the session is dead.
             var freshToken: String?
@@ -178,7 +178,7 @@ public actor MatrixTransport {
         )
         if status == 401,
            let errorBody = try? decoder.decode(MatrixErrorBody.self, from: data),
-           mapErrorBody(errorBody, status: status) == .unknownToken {
+           case .unknownToken = mapErrorBody(errorBody, status: status) {
             var freshToken: String?
             if let tokenRefresher {
                 freshToken = await tokenRefresher()
@@ -605,7 +605,7 @@ public actor MatrixTransport {
         case (429, _):
             return .rateLimited(retryAfter: retryAfter)
         case (401, "M_UNKNOWN_TOKEN"), (403, "M_UNKNOWN_TOKEN"):
-            return .unknownToken
+            return .unknownToken(softLogout: body.softLogout)
         default:
             return .serverError(code: body.errcode, message: body.error, retryAfter: retryAfter)
         }

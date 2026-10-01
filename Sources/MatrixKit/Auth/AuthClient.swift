@@ -207,7 +207,10 @@ public actor AuthClient {
             clientId: clientId, tokenEndpoint: metadata.tokenEndpoint)
     }
 
-    /// Refresh an OIDC session via its token endpoint.
+    /// Refresh an OIDC session via its token endpoint. A rejected
+    /// refresh token (`invalid_grant`) means the session is dead
+    /// server-side and surfaces as `.unknownToken` with no soft-logout
+    /// hint, matching the legacy `/refresh` mapping.
     public func refreshOIDC() async throws(MatrixError) {
         guard
             let refreshToken = await session.refreshToken,
@@ -216,13 +219,17 @@ public actor AuthClient {
         else {
             throw .notAuthenticated
         }
-        let tokens = try await oidc().refresh(
-            tokenEndpoint: endpoint, clientId: clientId,
-            refreshToken: refreshToken)
-        await session.update(
-            accessToken: tokens.accessToken,
-            refreshToken: tokens.refreshToken,
-            expiresInMs: tokens.expiresIn.map { $0 * 1000 })
+        do {
+            let tokens = try await oidc().refresh(
+                tokenEndpoint: endpoint, clientId: clientId,
+                refreshToken: refreshToken)
+            await session.update(
+                accessToken: tokens.accessToken,
+                refreshToken: tokens.refreshToken,
+                expiresInMs: tokens.expiresIn.map { $0 * 1000 })
+        } catch .serverError(let code, _, _) where code == "invalid_grant" {
+            throw .unknownToken(softLogout: nil)
+        }
     }
 
     /// OIDC logout: best-effort revocation of both tokens, then legacy
