@@ -237,6 +237,25 @@ struct AuthComplianceTests {
         }
     }
 
+    @Test("Concurrent refreshes share one rotation")
+    func concurrentRefreshSingleFlight() async throws {
+        try await withHarness { harness in
+            let (auth, session, _) = await harness.authClient(token: "")
+            try await auth.login(user: "alice", password: "secret")
+            async let first: Void = auth.refresh()
+            async let second: Void = auth.refresh()
+            async let third: Void = auth.refresh()
+            try await first
+            try await second
+            try await third
+            let refreshes = await harness.requests.filter {
+                $0.method == "POST" && $0.path == "/_matrix/client/v3/refresh"
+            }
+            #expect(refreshes.count == 1)
+            #expect(!(await session.accessToken).isEmpty)
+        }
+    }
+
     @Test("Logout and logout-all invalidate the session", arguments: [true, false])
     func logout(all: Bool) async throws {
         try await withHarness { harness in

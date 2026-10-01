@@ -104,8 +104,42 @@ public actor AuthClient {
 
     // MARK: - Refresh & logout
 
+    /// In-flight refresh shared by concurrent callers (single-flight).
+    /// Token rotation is single-use on some servers (MAS): two
+    /// simultaneous refreshes read the same refresh token and the loser
+    /// gets `invalid_grant`, killing a healthy session. Concurrent
+    /// callers therefore join the one in-flight refresh instead of
+    /// starting their own.
+    private var ongoingRefresh: Task<Void, any Error>?
+
     /// Refresh the access token (`POST /refresh`).
     public func refresh() async throws(MatrixError) {
+        if let ongoing = ongoingRefresh {
+            return try await joinRefresh(ongoing)
+        }
+        let task = Task<Void, any Error> { try await self.performRefresh() }
+        ongoingRefresh = task
+        defer { ongoingRefresh = nil }
+        return try await joinRefresh(task)
+    }
+
+    /// Await a refresh task, mapping awaiter cancellation onto
+    /// `.cancelled` (the task itself keeps running: an unstructured
+    /// task is not cancelled by whoever awaits it).
+    private func joinRefresh(_ task: Task<Void, any Error>) async throws(MatrixError) {
+        do {
+            try await task.value
+        } catch let error as MatrixError {
+            throw error
+        } catch is CancellationError {
+            throw MatrixError.cancelled
+        } catch {
+            throw MatrixError.networkError(String(describing: error))
+        }
+    }
+
+    /// One refresh round-trip (single-flight body — see `refresh()`).
+    private func performRefresh() async throws(MatrixError) {
         // OIDC sessions rotate via the token endpoint, not /refresh.
         if await session.isOIDC {
             return try await refreshOIDC()
