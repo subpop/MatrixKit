@@ -47,7 +47,7 @@ while read -r BIN; do REST+=(-object "$BIN"); done < <(tail -n +2 "$MAPFILE")
 rm -f "$MAPFILE"
 
 export LLVM_PROFILE_FILE="$PROFDATA"
-xcrun llvm-cov export "$MAIN" "${REST[@]}" -instr-profile "$PROFDATA" \
+xcrun llvm-cov export "$MAIN" ${REST[@]+"${REST[@]}"} -instr-profile "$PROFDATA" \
     -ignore-filename-regex='\.build|/Tests/|/Checkouts/|/mx/' > /tmp/matrixkit-cov.json
 
 python3 - /tmp/matrixkit-cov.json "$MIN" <<'EOF'
