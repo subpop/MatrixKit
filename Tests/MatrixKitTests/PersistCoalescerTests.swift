@@ -1,4 +1,5 @@
 import Foundation
+import MatrixKitTesting
 import Testing
 
 @testable import MatrixKit
@@ -20,7 +21,8 @@ struct PersistCoalescerTests {
         await coalescer.markDirty()
         await coalescer.markDirty()
         await coalescer.markDirty()
-        try? await Task.sleep(for: .milliseconds(250))
+        await waitUntil("the coalesced write") { await counter.count >= 1 }
+        // The burst shared one pending flush, so no second write follows.
         #expect(await counter.count == 1)
     }
 

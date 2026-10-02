@@ -885,7 +885,7 @@ struct MatrixClientEncryptionTests {
                 deviceId: DeviceId("ALICEDEVICE"),
                 accessToken: "harness-token-alice")
             #expect(client.isAuthenticated)
-            #expect(await client.serverVersions?.supportsVersion(.v1_13) == true)
+            #expect(client.serverVersions?.supportsVersion(.v1_13) == true)
             await client.configureEncryption()
             try? await client.transport.shutdown()
         }

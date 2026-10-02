@@ -266,7 +266,7 @@ struct FacadeComplianceTests {
             try await room.leave()
             try await client.syncOnce()
             await settle { room.membership == .leave }
-            #expect(await room.membership == .leave)
+            #expect(room.membership == .leave)
             try? await client.transport.shutdown()
         }
     }
@@ -288,16 +288,16 @@ struct FacadeComplianceTests {
             try await room.pin(sent)
             try await client.syncOnce()
             await settle { room.pinnedEventIds == [sent.value] }
-            #expect(await room.pinnedEventIds == [sent.value])
+            #expect(room.pinnedEventIds == [sent.value])
             #expect(try await room.pinnedMessages().map(\.eventId) == [sent])
             try await room.unpin(sent)
             try await client.syncOnce()
             await settle { room.pinnedEventIds.isEmpty }
-            #expect(await room.pinnedEventIds.isEmpty)
+            #expect(room.pinnedEventIds.isEmpty)
             try await room.setFavourite(true)
             try await client.syncOnce()
             await settle { room.isFavourite }
-            #expect(await room.isFavourite)
+            #expect(room.isFavourite)
             #expect(try await client.accountData.tags(room.roomId)?.tags["m.favourite"] != nil)
             try? await client.transport.shutdown()
         }
@@ -818,8 +818,8 @@ struct FacadeComplianceTests {
                 deviceKeys: material.deviceKeys(
                     userId: "@alice:test", deviceId: "ALICEDEVICE")))
             await client.refreshVerificationState()
-            #expect(await client.hasCheckedVerificationState)
-            #expect(await client.isSessionVerified)
+            #expect(client.hasCheckedVerificationState)
+            #expect(client.isSessionVerified)
             try? await client.transport.shutdown()
         }
     }

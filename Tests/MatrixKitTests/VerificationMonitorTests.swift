@@ -5,6 +5,13 @@ import MatrixKitTesting
 
 @testable import MatrixKit
 
+extension VerificationSession {
+    /// `transactionId` through an actor-method call: reading the `let`
+    /// directly warns on Swift 6.3 but needs `await` on 6.4, while a
+    /// method call needs it on both.
+    fileprivate func currentTransactionId() -> String { transactionId }
+}
+
 /// The monitor's outbound driver: start/accept/keys flow automatically off
 /// inbound traffic, SAS surfaces exactly once, MAC/done finish the flow,
 /// and broken flows fail paired with finish. Two monitors face each other
@@ -147,7 +154,7 @@ struct VerificationMonitorDriverTests {
         try await awaitSubscription(bob)
         let session = try await alice.monitor.requestVerification(
             userId: bob.user, deviceId: nil)
-        let txn = await session.transactionId
+        let txn = await session.currentTransactionId()
         for _ in 0..<10 {
             await pump(from: &alice, to: bob)
             if let request = await bob.monitor.pendingRequests.first {
@@ -601,7 +608,7 @@ struct VerificationMonitorDriverTests {
         func pumpEncrypted(
             from: inout EncryptedFixture, to: EncryptedFixture
         ) async {
-            let sent = await from.fake.sent
+            let sent = await from.fake.log()
             let fresh = Array(sent.dropFirst(from.pumpIndex))
             from.pumpIndex = sent.count
             let events = fresh.map {

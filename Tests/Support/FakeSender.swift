@@ -12,6 +12,13 @@ public actor FakeSender: ToDeviceSender {
 
     public init() {}
 
+    /// The send log as an actor-method read. Unlike `sent`, calling this
+    /// needs `await` under every Swift toolchain (property reads across
+    /// the actor boundary warn on 6.3 where 6.4 requires the `await`).
+    public func log() -> [(type: String, content: [String: AnyCodable], devices: [String])] {
+        sent
+    }
+
     /// Clear the log between table rows sharing one sender.
     public func reset() {
         sent = []

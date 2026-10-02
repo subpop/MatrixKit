@@ -174,6 +174,6 @@ struct LivePaginationAcrossSyncsTests {
         #expect(observable.hasMore == false)
         await observable.refresh()
         #expect(
-            await observable.events.map(\.eventId.value) == ["$oldest", "$live"])
+            observable.events.map(\.eventId.value) == ["$oldest", "$live"])
     }
 }
