@@ -35,7 +35,7 @@ if [[ -z "$PROFDATA" ]]; then echo "no profdata found"; exit 1; fi
 # Xcode layout builds one test bundle per test target; merge them all so
 # every library target's coverage is captured.
 MAPFILE=$(mktemp)
-find .build -path "*.xctest/Contents/MacOS/*" -type f | sort > "$MAPFILE"
+find .build -path "*.xctest/Contents/MacOS/*" -not -path "*.dSYM*" -type f | sort > "$MAPFILE"
 if [[ ! -s "$MAPFILE" ]]; then
     # SwiftPM-layout fallback: single test binary.
     find .build/debug -name "MatrixKitPackageTests" -path "*MacOS*" | head -1 > "$MAPFILE"
