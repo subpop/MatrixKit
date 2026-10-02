@@ -20,8 +20,22 @@ jobs:
       - name: Swift version
         run: swift --version
 
+      - name: Read spec pin
+        id: spec
+        run: echo "version=$(cat Tools/spec-registry/SPEC_VERSION)" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch pinned Matrix spec
+        # Checked out (not downloaded via api.github.com) so the registry
+        # check never hits the unauthenticated REST rate limit.
+        uses: actions/checkout@v4
+        with:
+          repository: matrix-org/matrix-spec
+          ref: ${{ steps.spec.outputs.version }}
+          path: .spec
+          sparse-checkout: data/api/client-server
+
       - name: Spec registry is current
-        run: python3 Tools/spec-registry/gen_spec_registry.py --check
+        run: python3 Tools/spec-registry/gen_spec_registry.py --check --local .spec/data/api/client-server
 
       - name: Build Olm interop harness
         # Live vodozemac coverage in InteropLiveTests; skipped (known
