@@ -33,7 +33,9 @@ struct InteropLiveTests {
         }
 
         deinit {
-            process.terminate()
+            if process.isRunning {
+                process.terminate()
+            }
         }
 
         func call(_ request: [String: Any]) throws -> [String: Any] {

@@ -23,6 +23,17 @@ jobs:
       - name: Spec registry is current
         run: python3 Tools/spec-registry/gen_spec_registry.py --check
 
+      - name: Build Olm interop harness
+        # Live vodozemac coverage in InteropLiveTests; skipped (known
+        # issue) rather than built when this step is unavailable.
+        run: make -C Tools/OlmInteropHarness build
+
+      - name: Cache Olm interop harness build
+        uses: actions/cache@v4
+        with:
+          path: Tools/OlmInteropHarness/target
+          key: olm-interop-harness-${{ runner.os }}-${{ hashFiles('Tools/OlmInteropHarness/Cargo.lock') }}
+
       - name: Run tests with coverage
         # Ratchet gate: per-library-target floor
         # (Tools/coverage-baseline.json). All targets at or above 90.
