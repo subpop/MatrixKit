@@ -144,7 +144,6 @@ fn dispatch(line: &str) -> String {
         Ok(v) => v,
         Err(e) => return err(&format!("bad json: {e}")),
     };
-    let cmd = req.get("cmd").and_then(|c| c.as_str()).unwrap_or("");
     let result = handle(&req);
     match result {
         Ok(v) => ok(&v),
@@ -249,7 +248,7 @@ fn handle(req: &serde_json::Value) -> Result<serde_json::Value, String> {
         }
         // Outbound session from pickled account + peer keys.
         "olm-outbound" => {
-            let mut account = account_of(&req)?;
+            let account = account_of(&req)?;
             let peer_id = curve_key(&str_field(&req, "peer_identity")?)?;
             let peer_otk = curve_key(&str_field(&req, "peer_one_time")?)?;
             let session = account
