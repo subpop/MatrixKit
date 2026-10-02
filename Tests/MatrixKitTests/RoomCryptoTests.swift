@@ -17,7 +17,7 @@ private func wirePair() throws -> (
     alice: RoomCrypto, bob: RoomCrypto,
     aliceSharer: FakeSharer, aliceSender: FakeRoomSender
 ) {
-    let (_, _, bobUser) = try roomFixture()
+    _ = try roomFixture()
     let aliceSharer = FakeSharer()
     let aliceSender = FakeRoomSender()
     let alice = RoomCrypto(sharer: aliceSharer, sender: aliceSender)
@@ -277,7 +277,7 @@ struct RoomCryptoTests {
         #expect(await alice.decryptRoomEvent(ownWire, in: room) == nil)
         #expect(box.count == 1)
         // Key arrival re-arms: a later re-loss requests again.
-        var outbound = MegolmSession.create()
+        let outbound = MegolmSession.create()
         let blob = try outbound.sessionKey()
         await alice.receiveRoomKey(BasicEvent(
             type: "m.room_key", sender: bobUser,

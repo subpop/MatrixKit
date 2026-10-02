@@ -242,7 +242,7 @@ struct RTCCallComplianceTests {
                 userId: UserId(unchecked: "@alice:test"),
                 deviceId: DeviceId("ALICEDEVICE"))
             try await client.olm.ensureKeys()
-            try await client.configureEncryption()
+            await client.configureEncryption()
             let pump = Task { await session.keys.pumpToDevice() }
             defer { pump.cancel() }
             let key = CallKeyDistributor.generateKey()

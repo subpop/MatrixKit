@@ -232,7 +232,7 @@ struct SecretShareTests {
         let store = tempStore()
         let (first, _, firstKeys, firstTransport) = makeShare(store: store)
         _ = await firstKeys.generate()
-        await first.persist()
+        _ = await first.persist()
         try? await firstTransport.shutdown()
 
         let (second, _, secondKeys, secondTransport) = makeShare(store: store)

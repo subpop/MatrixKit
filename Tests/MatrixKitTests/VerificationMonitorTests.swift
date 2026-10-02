@@ -165,7 +165,7 @@ struct VerificationMonitorDriverTests {
 
     @Test("Handshake drives itself to SAS, surfaced exactly once")
     func autoDriveToSAS() async throws {
-        var (alice, bob, txn, subs) = try await drivenPair()
+        let (alice, bob, txn, subs) = try await drivenPair()
         defer { subs.forEach { $0.cancel() } }
         // Both sides surface SAS with matching emoji…
         try await waitFor("alice sasReady") {
@@ -430,30 +430,35 @@ struct VerificationMonitorDriverTests {
     @Test("Decline cancels the request and drops the session")
     func declineDropsSession() async throws {
         var alice = await makeFixture(user: "@alice:x", device: "ALICE")
-        var bob = await makeFixture(user: "@bob:x", device: "BOB")
-        defer { await shutdown(alice, bob) }
-        let session = try await alice.monitor.requestVerification(
-            userId: bob.user, deviceId: nil)
-        let txn = await session.transactionId
-        await pump(from: &alice, to: bob)
-        let request = try #require(await bob.monitor.pendingRequests.first)
-        try await bob.monitor.declineRequest(request)
-        #expect(await bob.monitor.pendingRequests.isEmpty)
-        #expect(await bob.monitor.session(for: txn) == nil)
-        // The cancel reached Bob's outbox (bound for Alice).
-        let cancels = await bob.fake.sent.filter {
-            $0.type == "m.key.verification.cancel"
+        let bob = await makeFixture(user: "@bob:x", device: "BOB")
+        do {
+            let session = try await alice.monitor.requestVerification(
+                userId: bob.user, deviceId: nil)
+            let txn = await session.transactionId
+            await pump(from: &alice, to: bob)
+            let request = try #require(await bob.monitor.pendingRequests.first)
+            try await bob.monitor.declineRequest(request)
+            #expect(await bob.monitor.pendingRequests.isEmpty)
+            #expect(await bob.monitor.session(for: txn) == nil)
+            // The cancel reached Bob's outbox (bound for Alice).
+            let cancels = await bob.fake.sent.filter {
+                $0.type == "m.key.verification.cancel"
+            }
+            #expect(cancels.count == 1)
+            // Removing an unknown session is a no-op.
+            await alice.monitor.removeSession(transactionId: txn)
+            #expect(await alice.monitor.session(for: txn) == nil)
+        } catch {
+            await shutdown(alice, bob)
+            throw error
         }
-        #expect(cancels.count == 1)
-        // Removing an unknown session is a no-op.
-        await alice.monitor.removeSession(transactionId: txn)
-        #expect(await alice.monitor.session(for: txn) == nil)
+        await shutdown(alice, bob)
     }
 
     @Test("Responder sends start without waiting for the peer")
     func responderSelfStarts() async throws {
         var alice = await makeFixture(user: "@alice:x", device: "ALICE")
-        var bob = await makeFixture(user: "@bob:x", device: "BOB")
+        let bob = await makeFixture(user: "@bob:x", device: "BOB")
         let subs = [subscribe(alice), subscribe(bob)]
         defer { subs.forEach { $0.cancel() } }
         try await awaitSubscription(alice)
@@ -507,21 +512,26 @@ struct VerificationMonitorDriverTests {
 
     @Test("Duplicate ready sends only one start")
     func duplicateReadySendsOneStart() async throws {
-        var alice = await makeFixture(user: "@alice:x", device: "ALICE")
+        let alice = await makeFixture(user: "@alice:x", device: "ALICE")
         let bob = await makeFixture(user: "@bob:x", device: "BOB")
-        defer { await shutdown(alice, bob) }
-        _ = try await alice.monitor.requestVerification(
-            userId: bob.user, deviceId: nil)
-        let ready = try content(VerificationReady(
-            fromDevice: "BOB", methods: ["m.sas.v1"]))
-        for _ in 0..<2 {
-            await alice.monitor.receive([BasicEvent(
-                type: "m.key.verification.ready",
-                sender: bob.user, content: ready)])
+        do {
+            _ = try await alice.monitor.requestVerification(
+                userId: bob.user, deviceId: nil)
+            let ready = try content(VerificationReady(
+                fromDevice: "BOB", methods: ["m.sas.v1"]))
+            for _ in 0..<2 {
+                await alice.monitor.receive([BasicEvent(
+                    type: "m.key.verification.ready",
+                    sender: bob.user, content: ready)])
+            }
+            #expect(await alice.fake.sent.filter {
+                $0.type == "m.key.verification.start"
+            }.count == 1)
+        } catch {
+            await shutdown(alice, bob)
+            throw error
         }
-        #expect(await alice.fake.sent.filter {
-            $0.type == "m.key.verification.start"
-        }.count == 1)
+        await shutdown(alice, bob)
     }
 
     @Test("Sender falls back to plaintext without Olm")

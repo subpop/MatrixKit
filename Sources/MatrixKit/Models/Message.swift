@@ -604,6 +604,10 @@ public enum MatrixHTMLGenerator {
             return BlockComponent(
                 kind: .thematicBreak, identity: component.identity, level: nil,
                 ordinal: nil, languageHint: nil)
+        case .table, .tableHeaderRow, .tableRow, .tableCell:
+            return BlockComponent(
+                kind: .other, identity: component.identity, level: nil,
+                ordinal: nil, languageHint: nil)
         @unknown default:
             return BlockComponent(
                 kind: .other, identity: component.identity, level: nil,

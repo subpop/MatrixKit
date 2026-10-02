@@ -113,7 +113,7 @@ struct SecretStorageTests {
         let wrong = BackupCrypto.recoveryKey(
             privateKey: Data(repeating: 7, count: 32))
         await requireRecoveryFailed("Incorrect recovery key") {
-            try await s.unlock(recoveryKey: wrong)
+            _ = try await s.unlock(recoveryKey: wrong)
         }
     }
 
@@ -132,14 +132,13 @@ struct SecretStorageTests {
             #"{"algorithm": "m.future.v9", "iv": "AA", "mac": "AA"}"#
         let s = Self.storage(json)
         await requireRecoveryFailed("Unsupported secret-storage algorithm") {
-            try await s.unlock(
+            _ = try await s.unlock(
                 recoveryKey: BackupCrypto.recoveryKey(privateKey: Self.storageKey))
         }
     }
 
     @Test("passphrase unlock derives the storage key")
     func unlockPassphrase() async throws {
-        let s = Self.storage(try Self.fixtures(passphraseIterations: 1000))
         let expected = Primitives.pbkdf2SHA512(
             password: Data("correct horse".utf8),
             salt: Data("testsalt".utf8),
@@ -179,7 +178,7 @@ struct SecretStorageTests {
     func wrongPassphrase() async throws {
         let s = Self.storage(try Self.fixtures(passphraseIterations: 1000))
         await requireRecoveryFailed("Incorrect passphrase") {
-            try await s.unlock(passphrase: "wrong horse")
+            _ = try await s.unlock(passphrase: "wrong horse")
         }
     }
 
@@ -187,7 +186,7 @@ struct SecretStorageTests {
     func passphraseWithoutParams() async throws {
         let s = Self.storage(try Self.fixtures())
         await requireRecoveryFailed("no passphrase") {
-            try await s.unlock(passphrase: "anything")
+            _ = try await s.unlock(passphrase: "anything")
         }
     }
 
@@ -226,7 +225,7 @@ struct SecretStorageTests {
             """
         let s = Self.storage(json)
         await requireRecoveryFailed("Could not decrypt") {
-            try await s.secret(
+            _ = try await s.secret(
                 SecretName.master, keyId: Self.keyId,
                 storageKey: Self.storageKey)
         }
@@ -277,14 +276,14 @@ struct SecretStorageTests {
         await requireRecoveryFailed("Malformed secret-storage key check") {
             let s = Self.storage(badCheck)
             let keyString = BackupCrypto.recoveryKey(privateKey: Self.storageKey)
-            try await s.unlock(recoveryKey: keyString)
+            _ = try await s.unlock(recoveryKey: keyString)
         }
         var badEntry = try Self.fixtures()
         badEntry[SecretName.master] =
             #"{"encrypted": {"testkey": {"iv": "!!!", "ciphertext": "!!!", "mac": "!!!"}}}"#
         await requireRecoveryFailed("Malformed stored secret") {
             let s = Self.storage(badEntry)
-            try await s.secret(
+            _ = try await s.secret(
                 SecretName.master, keyId: Self.keyId,
                 storageKey: Self.storageKey)
         }
@@ -301,7 +300,7 @@ struct SecretStorageTests {
                 "m.pbkdf2", with: "argon2id")
         await requireRecoveryFailed("Unsupported passphrase algorithm") {
             let s = Self.storage(argon)
-            try await s.unlock(passphrase: "correct horse")
+            _ = try await s.unlock(passphrase: "correct horse")
         }
     }
 }

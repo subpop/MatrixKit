@@ -86,7 +86,7 @@ struct FacadeComplianceTests {
             let world = await harness.world
             await world.stageMessage(body: "live")
             let client = await client(harness)
-            let deltas = await client.deltas()
+            let deltas = client.deltas()
             try await client.startSync()
             var batches: [String] = []
             for await delta in deltas {
@@ -156,7 +156,7 @@ struct FacadeComplianceTests {
     func profileFlow() async throws {
         try await withHarness { harness in
             let client = await client(harness)
-            let profile = await client.profile(for: UserId(unchecked: "@alice:test"))
+            let profile = client.profile(for: UserId(unchecked: "@alice:test"))
             #expect(profile.isOwn)
             try await profile.load()
             #expect(profile.displayName == "Alice")
@@ -166,7 +166,7 @@ struct FacadeComplianceTests {
             try await profile.updateAvatar(data: Data("avatar".utf8), mimeType: "image/png")
             #expect(profile.avatarURL?.value.hasPrefix("mxc://test/m") == true)
             #expect(try await profile.avatarData() == Data("avatar".utf8))
-            let stranger = await client.profile(for: UserId(unchecked: "@stranger:test"))
+            let stranger = client.profile(for: UserId(unchecked: "@stranger:test"))
             #expect(!stranger.isOwn)
             try await stranger.updateDisplayName("Nope")
             #expect(stranger.displayName == nil)
@@ -179,7 +179,7 @@ struct FacadeComplianceTests {
     func pushRulesFlow() async throws {
         try await withHarness { harness in
             let client = await client(harness)
-            let rules = await client.pushRules()
+            let rules = client.pushRules()
             try await rules.load()
             #expect(!rules.isLoading)
             #expect(rules.rules.map(\.id).contains("override/.m.rule.master"))
@@ -265,7 +265,7 @@ struct FacadeComplianceTests {
             #expect(room.memberDetails[UserId(unchecked: "@bob:test")]?.membership == .invite)
             try await room.leave()
             try await client.syncOnce()
-            await settle { await room.membership == .leave }
+            await settle { room.membership == .leave }
             #expect(await room.membership == .leave)
             try? await client.transport.shutdown()
         }
@@ -287,16 +287,16 @@ struct FacadeComplianceTests {
             let sent = try await client.messages.sendText(room.roomId, "pinnable")
             try await room.pin(sent)
             try await client.syncOnce()
-            await settle { await room.pinnedEventIds == [sent.value] }
+            await settle { room.pinnedEventIds == [sent.value] }
             #expect(await room.pinnedEventIds == [sent.value])
             #expect(try await room.pinnedMessages().map(\.eventId) == [sent])
             try await room.unpin(sent)
             try await client.syncOnce()
-            await settle { await room.pinnedEventIds.isEmpty }
+            await settle { room.pinnedEventIds.isEmpty }
             #expect(await room.pinnedEventIds.isEmpty)
             try await room.setFavourite(true)
             try await client.syncOnce()
-            await settle { await room.isFavourite }
+            await settle { room.isFavourite }
             #expect(await room.isFavourite)
             #expect(try await client.accountData.tags(room.roomId)?.tags["m.favourite"] != nil)
             try? await client.transport.shutdown()
@@ -504,7 +504,7 @@ struct FacadeComplianceTests {
             let world = await harness.world
             await world.stageMessage(body: "streamed")
             let client = await client(harness)
-            let deltas = await client.deltas()
+            let deltas = client.deltas()
             try await client.startSync()
             var batches: [String] = []
             for await delta in deltas {
@@ -730,14 +730,14 @@ struct FacadeComplianceTests {
             let version = try await client.backup.createBackup(publicKey: publicKey)
             var sender = MegolmSession.create()
             let blob = sender.export()
-            let message = try sender.encrypt(Data("backed up".utf8))
+            _ = try sender.encrypt(Data("backed up".utf8))
             try await client.backup.uploadSessions(
                 [(roomId: RoomId(unchecked: "!room:test"), sessionId: "sid1", export: blob)],
                 publicKey: publicKey, version: version)
             let count = try await client.restoreKeyBackup(privateKey: privateKey)
             #expect(count == 1)
             // Restored sessions decrypt.
-            var inbound = try MegolmSession.importSessionKey(blob)
+            let inbound = try MegolmSession.importSessionKey(blob)
             _ = inbound
             try? await client.transport.shutdown()
         }
@@ -969,7 +969,7 @@ struct FacadeComplianceTests {
             let room = try await client.createRoom(CreateRoomRequest())
             let sent = try await client.messages.sendText(room.roomId, "hi")
             try await client.accountData.setFullyRead(room.roomId, eventId: sent)
-            let deltas = await client.deltas()
+            let deltas = client.deltas()
             try await client.startSync()
             var sawAccountData = false
             for await delta in deltas {
