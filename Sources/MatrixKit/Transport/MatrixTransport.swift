@@ -456,6 +456,11 @@ public actor MatrixTransport {
                     + "(\(method.rawValue) \(pathForLog)). Use a lean SyncFilter "
                     + "(lazy-load members, small timeline limit) to shrink sync payloads."
             )
+        } catch let error as HTTPClientError {
+            // `localizedDescription` bridges every case to an opaque
+            // "HTTPClientError error 1"; the description names the case
+            // (`remoteConnectionClosed`, `readTimeout`, …).
+            throw .networkError("\(method.rawValue) \(pathForLog): \(error)")
         } catch {
             throw .networkError(error.localizedDescription)
         }
