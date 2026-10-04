@@ -291,6 +291,8 @@ public struct RoomDetails: Hashable, Sendable {
     public var memberCount: Int
     /// Members with role details.
     public var members: [RoomMemberDetails]
+    /// User IDs currently banned from the room.
+    public var bannedUserIds: Set<UserId>
     /// Pinned event IDs.
     public var pinnedEventIds: [String]
     /// Raw join rule, if known.
@@ -315,6 +317,7 @@ public struct RoomDetails: Hashable, Sendable {
         alternativeAliases: [String] = [],
         memberCount: Int = 0,
         members: [RoomMemberDetails] = [],
+        bannedUserIds: Set<UserId> = [],
         pinnedEventIds: [String] = [],
         joinRule: String? = nil,
         historyVisibility: String? = nil,
@@ -333,6 +336,7 @@ public struct RoomDetails: Hashable, Sendable {
         self.alternativeAliases = alternativeAliases
         self.memberCount = memberCount
         self.members = members
+        self.bannedUserIds = bannedUserIds
         self.pinnedEventIds = pinnedEventIds
         self.joinRule = joinRule
         self.historyVisibility = historyVisibility

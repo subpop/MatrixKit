@@ -744,6 +744,10 @@ public final class ObservableRoom {
         let activeMemberInfos = memberInfos.filter {
             $0.content.membership == .join || $0.content.membership == .invite
         }
+        let bannedUserIds = Set(
+            memberInfos
+                .filter { $0.content.membership == .ban }
+                .map { UserId(unchecked: $0.stateKey) })
         // Feed the fetched profiles back into the store so the sync-cached
         // member map (timeline rendering, profile healing) converges with
         // the list below instead of diverging from it.
@@ -796,6 +800,7 @@ public final class ObservableRoom {
             alternativeAliases: alternativeAliases,
             memberCount: members.count,
             members: members,
+            bannedUserIds: bannedUserIds,
             pinnedEventIds: pinnedEventIds.isEmpty ? self.pinnedEventIds : pinnedEventIds,
             joinRule: joinRule,
             historyVisibility: historyVisibility,
