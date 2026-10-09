@@ -315,6 +315,134 @@ public actor RoomClient {
         )
     }
 
+    // MARK: - Details
+
+    /// Full room snapshot (state walk, membership, permissions) for
+    /// inspector and settings UI.
+    ///
+    /// Network-derived only: `localUser` scopes permissions (nil omits
+    /// them) and `isDirect` carries the spec `m.direct` flag, which is
+    /// account data — a separate read the caller owns. Member profiles
+    /// are not written back anywhere; the caller owns store convergence
+    /// (see `MatrixStoreWriter.mergeMemberProfiles`).
+    public func roomDetails(
+        _ roomId: RoomId, localUser: UserId?, isDirect: Bool = false
+    ) async throws(MatrixError) -> RoomDetails {
+        let roomState = RoomStateClient(transport: transport, session: session)
+        let state = try await roomState.getState(roomId)
+        var name: String?
+        var topic: String?
+        var avatarURL: MXCURI?
+        var canonicalAlias: String?
+        var alternativeAliases: [String] = []
+        var pinnedEventIds: [String] = []
+        var joinRule: String?
+        var historyVisibility: String?
+        var powerContent: [String: AnyCodable]?
+        var creatorSender: UserId?
+        var createContent: [String: AnyCodable]?
+        var roomVersion: String?
+        var isEncrypted = false
+        for event in state {
+            switch EventType(rawValue: event.type) {
+            case .roomName:
+                name = event.content["name"]?.stringValue
+            case .roomTopic:
+                topic = event.content["topic"]?.stringValue
+            case .roomAvatar:
+                avatarURL = event.content["url"]?.stringValue.flatMap { try? MXCURI($0) }
+            case .roomCanonicalAlias:
+                canonicalAlias = event.content["alias"]?.stringValue
+                alternativeAliases =
+                    event.content["alt_aliases"]?.arrayValue?.compactMap(\.stringValue) ?? []
+            case .roomPinnedEvents:
+                pinnedEventIds =
+                    event.content["pinned"]?.arrayValue?.compactMap(\.stringValue) ?? []
+            case .roomPowerLevels:
+                powerContent = event.content
+            case .roomJoinRules:
+                joinRule = event.content["join_rule"]?.stringValue
+            case .roomHistoryVisibility:
+                historyVisibility = event.content["history_visibility"]?.stringValue
+            case .roomCreate:
+                creatorSender = event.sender
+                createContent = event.content
+                roomVersion = event.content["room_version"]?.stringValue
+            case .roomEncryption:
+                isEncrypted = true
+            case .roomMember, .roomMessage, .roomTombstone,
+                .roomServerACL, .sticker, .pollStart, .callMember, .redaction, .reaction,
+                .typing, .receipt, .presence, .fullyRead, .tag, .custom, .unknown:
+                break
+            }
+        }
+        let memberInfos = try await members(roomId)
+        // Only active members belong in the member list: joined users
+        // plus pending invites. Banned, departed, and knocking users are
+        // excluded.
+        let activeMemberInfos = memberInfos.filter {
+            $0.content.membership == .join || $0.content.membership == .invite
+        }
+        let bannedUserIds = Set(
+            memberInfos
+                .filter { $0.content.membership == .ban }
+                .map { UserId(unchecked: $0.stateKey) })
+        let (creators, creatorsInfinite): (Set<UserId>, Bool) =
+            if let creatorSender, let createContent {
+                RoomMemberDetails.creators(
+                    sender: creatorSender, createContent: createContent)
+            } else {
+                ([], false)
+            }
+        // Freeze for the closures below (region isolation: the walked
+        // `var` must not cross into Sendable contexts).
+        let powerLevels = powerContent
+        // Room v12+ creators are infinitely powered, so they bypass the
+        // `m.room.power_levels` lookup (which must not even list them).
+        func effectiveLevel(of userId: UserId) -> Int {
+            if creatorsInfinite && creators.contains(userId) { return .max }
+            return powerLevels.map {
+                RoomPermissions.powerLevel(of: userId, in: $0)
+            } ?? 0
+        }
+        let members = activeMemberInfos.map { info in
+            let userId = UserId(unchecked: info.stateKey)
+            let level = effectiveLevel(of: userId)
+            return RoomMemberDetails(
+                userId: userId,
+                displayName: info.content.displayname,
+                avatarURL: info.content.avatarUrl.flatMap { try? MXCURI($0) },
+                role: .of(level),
+                powerLevel: level,
+                isCreator: creators.contains(userId))
+        }
+        let permissions = localUser.flatMap { user -> RoomPermissions? in
+            if creatorsInfinite && creators.contains(user) { return .infinite }
+            return powerContent.map {
+                RoomPermissions.evaluate(powerLevels: $0, userId: user)
+            }
+        }
+        return RoomDetails(
+            id: roomId,
+            name: name,
+            topic: topic,
+            avatarURL: avatarURL,
+            isEncrypted: isEncrypted,
+            isPublic: joinRule == "public",
+            isDirect: isDirect,
+            roomVersion: roomVersion ?? "1",
+            canonicalAlias: canonicalAlias,
+            alternativeAliases: alternativeAliases,
+            memberCount: members.count,
+            members: members,
+            bannedUserIds: bannedUserIds,
+            pinnedEventIds: pinnedEventIds,
+            joinRule: joinRule,
+            historyVisibility: historyVisibility,
+            permissions: permissions,
+            powerLevelSettings: powerLevels.map(RoomPowerLevelSettings.parse))
+    }
+
     // MARK: - Preview
 
     /// Preview a room before joining: state plus recent messages.

@@ -245,7 +245,7 @@ extension RoomMemberDetails {
     /// and `additional_creators` are room v12+ concepts (later versions
     /// assumed to keep them); older rooms only ever have the sender as
     /// creator, with an ordinary power level.
-    static func creators(
+    public static func creators(
         sender: UserId, createContent: [String: AnyCodable]
     ) -> (creators: Set<UserId>, infinite: Bool) {
         let version = createContent["room_version"]?.stringValue.flatMap(Int.init) ?? 1
