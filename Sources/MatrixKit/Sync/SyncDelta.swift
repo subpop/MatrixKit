@@ -1,7 +1,7 @@
 /// Parsed sync output: diff-friendly per-room deltas.
 ///
 /// `SyncResponseParser` converts raw `SyncResponse` values into `SyncDelta`;
-/// `StateStore.apply(_:)` consumes them.
+/// sync engines fan them out to their `SyncDeltaSink`s.
 public struct SyncDelta: Hashable, Sendable {
     /// Pagination cursor for the next sync (`since`). Persist this to make
     /// the next launch an incremental sync instead of a full one.

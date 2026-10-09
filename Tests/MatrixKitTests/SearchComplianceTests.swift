@@ -17,7 +17,7 @@ struct SearchComplianceTests {
             await world.stageMessage(roomId: "!a:test", body: "hello matrix")
             await world.stageMessage(roomId: "!b:test", body: "goodbye matrix")
             await world.stageMessage(roomId: "!b:test", body: "unrelated")
-            let (search, _, _, _) = await harness.searchClient()
+            let (search, _, _) = await harness.searchClient()
             let (results, _, total) = try await search.search(term: "matrix")
             #expect(results.count == 2)
             #expect(total == 2)
@@ -34,7 +34,7 @@ struct SearchComplianceTests {
             let world = await harness.world
             await world.stageMessage(roomId: "!a:test", sender: "@alice:test", body: "shared word")
             await world.stageMessage(roomId: "!b:test", sender: "@bob:test", body: "shared word")
-            let (search, _, _, _) = await harness.searchClient()
+            let (search, _, _) = await harness.searchClient()
             let roomFiltered = try await search.search(
                 term: "shared",
                 filter: MessageSearchFilter(roomIds: [RoomId(unchecked: "!a:test")]))
@@ -58,7 +58,7 @@ struct SearchComplianceTests {
             deviceId: DeviceId("D"),
             accessToken: "")
         let search = SearchClient(
-            transport: transport, session: session, store: StateStore())
+            transport: transport, session: session)
         await #expect(throws: MatrixError.notAuthenticated) {
             try await search.search(term: "hi")
         }

@@ -5,9 +5,11 @@ import os
 
 /// Top-level Matrix client: SwiftUI-ready facade over the actor layer.
 ///
-/// Holds every API-namespace client plus the store and session. Long-lived
-/// `@Observable` state (`isAuthenticated`, `syncStatus`, rooms) drives views;
-/// all network and state mutation happens in the underlying actors.
+/// Holds every API-namespace client plus the session. Long-lived
+/// `@Observable` state (`isAuthenticated`, `syncStatus`) drives views;
+/// room state persists through an attached `SyncDeltaSink` (typically
+/// the normalized SwiftData store), and SwiftUI reads it via `@Query`.
+/// All network and state mutation happens in the underlying actors.
 @Observable @MainActor
 public final class MatrixClient {
     /// The homeserver this client talks to (e.g. `https://matrix.org`).
@@ -36,15 +38,13 @@ public final class MatrixClient {
     public let transport: MatrixTransport
     /// Tokens, device, and user IDs for this session.
     public let session: Session
-    /// Client-side room state, sync token, and account data.
-    public let store: StateStore
     /// Login, refresh, logout, and server discovery.
     public let auth: AuthClient
     /// Long-poll loop and delta application.
     public let sync: SyncClient
     /// Sliding sync loop (MSC4186) and delta application. Opt-in via
-    /// `startSlidingSync`; shares `store` with `sync` but keeps its own
-    /// `pos` cursor (see `StateStore.applySliding`).
+    /// `startSlidingSync`; shares the delta sinks with `sync` but keeps
+    /// its own `pos` cursor.
     public let slidingSync: SlidingSyncClient
     /// Room membership and directory operations.
     public let rooms: RoomClient
@@ -97,9 +97,6 @@ public final class MatrixClient {
 
     // MARK: - Observable conveniences
 
-    public private(set) var roomList: ObservableRoomList!
-
-    private var roomCache: [RoomId: ObservableRoom] = [:]
     /// The app-provided secret store (Olm sessions, megolm sessions,
     /// cross-signing backup, device identities). Retained so logout
     /// wipes the same backend login wrote to.
@@ -116,9 +113,7 @@ public final class MatrixClient {
     /// session). Follows the `deltas()` pattern; consumed by MatrixRTC
     /// for `io.element.call.encryption_keys`.
     private var decryptedToDeviceContinuations: [AsyncStream<[BasicEvent]>.Continuation] = []
-    /// Decryptor for paginated history, armed by `configureEncryption()`
-    /// alongside the sync hooks (`Timeline.setDecryptor` was previously
-    /// never called, so back-pagination stayed encrypted).
+    /// Decryptor for stored ciphertext, armed by `configureEncryption()`.
     private var timelineDecryptor:
         (@Sendable (MessageEvent, RoomId) async -> MessageEvent?)?
 
@@ -128,7 +123,6 @@ public final class MatrixClient {
         self.transport = transport
         self.serverVersions = serverVersions
         self.keystore = keystore
-        self.store = StateStore()
         let connection = SyncConnection(transport: transport, session: session)
         self.auth = AuthClient(transport: transport, session: session)
         await transport.setTokenRefresher({ [auth, session] in
@@ -136,14 +130,15 @@ public final class MatrixClient {
             let token = await session.accessToken
             return token.isEmpty ? nil : token
         })
-        self.sync = SyncClient(connection: connection, store: store, session: session)
-        self.slidingSync = SlidingSyncClient(transport: transport, session: session, store: store)
+        self.sync = SyncClient(connection: connection, session: session)
+        self.slidingSync = SlidingSyncClient(
+            transport: transport, session: session)
         self.rooms = RoomClient(transport: transport, session: session)
         self.roomState = RoomStateClient(transport: transport, session: session)
-        self.spaces = SpacesClient(transport: transport, session: session, store: store)
+        self.spaces = SpacesClient(transport: transport, session: session)
         self.accountData = AccountDataClient(transport: transport, session: session)
         self.messages = MessageClient(transport: transport, session: session)
-        self.search = SearchClient(transport: transport, session: session, store: store)
+        self.search = SearchClient(transport: transport, session: session)
         self.media = MediaClient(transport: transport, session: session)
         self.profile = ProfileClient(transport: transport, session: session)
         self.push = PushClient(transport: transport, session: session)
@@ -173,10 +168,6 @@ public final class MatrixClient {
         self.deviceId = await session.isValid ? session.deviceId : nil
         self.syncStatus = .idle
         self.slidingSyncStatus = .idle
-        if let userId = self.userId {
-            await store.setLocalUser(userId)
-        }
-        self.roomList = ObservableRoomList(client: self)
     }
 
     // MARK: - Factories
@@ -221,7 +212,9 @@ public final class MatrixClient {
             client.deviceId = deviceId
         }
         client.isAuthenticated = true
-        await client.store.setLocalUser(whoami.userId)
+        // The caller owns the persistent store (if any): set its local
+        // user from `client.userId` so receipts and own-message
+        // detection work.
         return client
     }
 
@@ -435,7 +428,8 @@ public final class MatrixClient {
     /// adopting the server-assigned user/device IDs. Call after `restore(...)`
     /// so a restored session matches login-time identity; without it, a stored
     /// MXID that differs from the server-assigned one breaks own-message
-    /// detection (`sender == localUserId`).
+    /// detection (`sender == localUserId`). Propagate the IDs to the
+    /// persistent store as well (see `adoptSession`).
     public func reconcileIdentity() async throws(MatrixError) {
         let whoami = try await auth.whoAmI()
         await session.updateIDs(userId: whoami.userId, deviceId: whoami.deviceId)
@@ -444,7 +438,6 @@ public final class MatrixClient {
             self.deviceId = deviceId
         }
         isAuthenticated = true
-        await store.setLocalUser(whoami.userId)
     }
 
     // MARK: - Auth
@@ -462,7 +455,6 @@ public final class MatrixClient {
         isAuthenticated = false
         userId = nil
         deviceId = nil
-        roomCache = [:]
     }
 
     /// Delete all local crypto material for the current device: persisted
@@ -483,7 +475,7 @@ public final class MatrixClient {
 
     // MARK: - Sync
 
-    /// Start the sync loop. Room list refreshes on every delta.
+    /// Start the sync loop. Deltas stream to subscribers and sinks.
     public func startSync(filter: SyncFilter? = nil) async throws {
         guard syncTask == nil else { return }
         syncStatus = .syncing
@@ -498,7 +490,6 @@ public final class MatrixClient {
                     if delta.joined.values.contains(where: { !$0.accountData.isEmpty }) {
                         await self.resolveReadMarkers()
                     }
-                    await self.roomList.refresh()
                     self.notifyDelta(delta)
                 }
                 self.syncStatus = .idle
@@ -518,6 +509,46 @@ public final class MatrixClient {
         if case .syncing = syncStatus {
             syncStatus = .idle
         }
+    }
+
+    /// Register a sync-delta consumer on both engines. Deltas reach
+    /// sinks fully decrypted; sink failures never break sync.
+    /// The caller owns the sink's lifecycle (e.g. its local user).
+    public func addDeltaSink(_ sink: any SyncDeltaSink) async {
+        await sync.addDeltaSink(sink)
+        await slidingSync.addDeltaSink(sink)
+    }
+
+    /// Drop all extra delta consumers from both engines.
+    public func clearDeltaSinks() async {
+        await sync.clearDeltaSinks()
+        await slidingSync.clearDeltaSinks()
+    }
+
+    /// Store for out-of-window read-marker healing. Nil by default:
+    /// the pass is then a no-op. Set to the persistent store (which
+    /// implements `MarkerHealingStore`) to heal its markers.
+    private var markerHealer: (any MarkerHealingStore)?
+
+    /// Set the marker-healing store. The caller owns its lifecycle.
+    public func setMarkerHealer(_ healer: (any MarkerHealingStore)?) {
+        markerHealer = healer
+    }
+
+    /// Store for ciphertext refresh over late-arriving keys. Nil by
+    /// default: decryption retry is then a no-op.
+    private var ciphertextStore: (any CiphertextStore)?
+
+    /// Set the ciphertext store. The caller owns its lifecycle.
+    public func setCiphertextStore(_ store: (any CiphertextStore)?) {
+        ciphertextStore = store
+    }
+
+    /// Set the local-state provider for `spaces` and `search`
+    /// enrichment. Nil (the default) serves everything from the network.
+    public func setRoomStateProvider(_ provider: (any RoomStateProvider)?) async {
+        await spaces.setProvider(provider)
+        await search.setProvider(provider)
     }
 
     /// Subscribe to live sync deltas (e.g. for local message
@@ -549,33 +580,31 @@ public final class MatrixClient {
     public func syncOnce(filter: SyncFilter? = nil) async throws {
         try await sync.syncOnce(filter: filter)
         await resolveReadMarkers()
-        await roomList.refresh()
-        await logRoomList()
     }
 
     /// Resolve fully-read marker timestamps the sync window couldn't:
-    /// one `GET /rooms/{id}/event/{fullyRead}` per room that has a marker
-    /// ID outside its timeline window, once per marker ID (successes are
-    /// cached on the actor; failures retry on the next pass). Without
-    /// this, such rooms count unread from the often-stale receipt
+    /// one `GET /rooms/{id}/event/{fullyRead}` per room the healing
+    /// store reports, adopting each fetched timestamp. Without this,
+    /// such rooms count unread from the often-stale receipt
     /// timestamp — and history pagination widens the phantom.
+    /// No-op unless `setMarkerHealer` was called.
     public func resolveReadMarkers() async {
-        let rooms = await store.joinedRooms()
-        for room in rooms {
+        guard let markerHealer else { return }
+        guard let markers = try? await markerHealer.markersNeedingResolution()
+        else { return }
+        for (roomId, marker) in markers {
             guard !Task.isCancelled else { return }
-            guard await room.needsMarkerResolution,
-                let marker = await room.fullyReadEventId
+            guard let event = try? await messages.event(roomId, marker)
             else { continue }
-            let roomId = room.roomId
-            guard let event = try? await messages.event(roomId, marker) else { continue }
-            await room.adoptResolvedMarkerTs(marker, ts: event.originServerTs)
+            try? await markerHealer.adoptResolvedMarkerTs(
+                marker, roomId: roomId, ts: event.originServerTs)
         }
     }
 
-    /// Start the sliding sync loop. Room list refreshes on every delta.
-    /// Runs independently of `startSync`; E2EE/to-device extensions ride
-    /// along whenever crypto hooks are installed, so the sliding path
-    /// delivers keys and decrypts timelines the same way the v3 loop does.
+    /// Start the sliding sync loop. Runs independently of `startSync`;
+    /// E2EE/to-device extensions ride along whenever crypto hooks are
+    /// installed, so the sliding path delivers keys and decrypts
+    /// timelines the same way the v3 loop does.
     /// No-ops (with a warning) when the server is known not to advertise
     /// simplified sliding sync; unknown versions proceed optimistically.
     public func startSlidingSync(
@@ -598,7 +627,6 @@ public final class MatrixClient {
                     if delta.joined.values.contains(where: { !$0.accountData.isEmpty }) {
                         await self.resolveReadMarkers()
                     }
-                    await self.roomList.refresh()
                     self.notifyDelta(delta)
                 }
                 self.slidingSyncStatus = .idle
@@ -620,7 +648,7 @@ public final class MatrixClient {
         }
     }
 
-    /// Single sliding sync round-trip, applied to the store. Same
+    /// Single sliding sync round-trip, applied to the sinks. Same
     /// support gate as `startSlidingSync` (no-op when known-unsupported).
     public func slidingSyncOnce(
         lists: [String: SlidingSyncList]? = nil,
@@ -629,14 +657,6 @@ public final class MatrixClient {
         guard canUseSlidingSync else { return }
         try await slidingSync.syncOnce(lists: lists, subscriptions: subscriptions)
         await resolveReadMarkers()
-        await roomList.refresh()
-        await logRoomList()
-    }
-
-    /// Friendly info line for a completed initial fetch.
-    private func logRoomList() async {
-        let count = await store.joinedRooms().count
-        MatrixKitLog.roomList.debug("Fetched room list (\(count, privacy: .public) rooms)")
     }
 
     // MARK: - Encryption
@@ -688,9 +708,6 @@ public final class MatrixClient {
         await sync.setCryptoHooks(hooks)
         await slidingSync.setCryptoHooks(hooks)
         timelineDecryptor = hooks.decryptRoomEvent
-        for room in roomCache.values {
-            await room.setTimelineDecryptor(hooks.decryptRoomEvent)
-        }
     }
 
     /// Recover one undecryptable session sighting: try a targeted key
@@ -716,7 +733,7 @@ public final class MatrixClient {
                         roomId: unknown.roomId, sessionId: unknown.sessionId,
                         export: export)
                 {
-                    _ = await roomCache[unknown.roomId]?.retryDecryption()
+                    await refreshRoomDecryption(unknown.roomId)
                     MatrixKitLog.crypto.debug(
                         "RoomCrypto recovered session from backup session=\(String(unknown.sessionId.prefix(8)), privacy: .private(mask: .hash))"
                     )
@@ -779,7 +796,7 @@ public final class MatrixClient {
             // that room — re-decrypt it immediately instead of leaving
             // "Unable to decrypt" placeholders until relaunch.
             if let roomId = await roomCrypto.receiveRoomKey(event) {
-                _ = await roomCache[roomId]?.retryDecryption()
+                await refreshRoomDecryption(roomId)
             }
         }
         for event in decrypted where event.type == "m.secret.send" {
@@ -1104,80 +1121,65 @@ public final class MatrixClient {
 
     // MARK: - Rooms
 
-    /// Re-run Megolm decryption over every cached room's stored
-    /// ciphertext (see `RoomActor.retryDecryption`). Late key arrivals
-    /// — backup restores, room-key shares — and rooms opened from the
-    /// on-disk snapshot land here. Returns the total decrypted.
+    /// Re-run the decryptor over every room's stored ciphertext.
+    /// Late-arriving keys — backup restores, room-key shares, sessions
+    /// persisted across relaunch — otherwise never refresh
+    /// already-stored failures, leaving "Unable to decrypt" placeholders
+    /// stuck even though the keys are in the store. Returns the number
+    /// of events decrypted. No-op unless `setCiphertextStore` was called.
     @discardableResult
     public func retryTimelineDecryption() async -> Int {
+        guard let ciphertextStore else { return 0 }
+        guard let rooms = try? await ciphertextStore.knownRoomIds() else {
+            return 0
+        }
         var total = 0
-        for room in roomCache.values {
-            total += await room.retryDecryption()
+        for roomId in rooms {
+            total += await refreshRoomDecryption(roomId)
         }
         return total
     }
 
-    /// Observable view model for a room (cached per ID).
-    public func room(_ roomId: RoomId) async -> ObservableRoom {
-        if let cached = roomCache[roomId] {
-            return cached
-        }
-        let actor = await store.room(roomId)
-        let observable = await ObservableRoom(
-            room: actor,
-            messages: messages,
-            rooms: rooms,
-            roomState: roomState,
-            accountData: accountData,
-            media: media,
-            localUser: userId
-        )
-        observable.encryptSender = { [weak self] roomId, content, txn in
-            guard let self else { throw MatrixError.notAuthenticated }
-            return try await self.sendEncryptedContent(
-                roomId, content, transactionId: txn)
-        }
-        // Heal senders whose `m.room.member` sync omitted under lazy
-        // member loading. `GET /profile/{userId}` reports no membership,
-        // so healed entries read as joined senders.
-        observable.profileFetcher = { [weak self] userId in
-            guard let self else { return nil }
+    /// Re-run the decryptor over one room's stored ciphertext. Returns
+    /// the number of events decrypted.
+    @discardableResult
+    func refreshRoomDecryption(_ roomId: RoomId) async -> Int {
+        guard
+            let ciphertextStore,
+            let decryptor = timelineDecryptor,
+            let events = try? await ciphertextStore.encryptedEvents(
+                roomId: roomId)
+        else { return 0 }
+        var changed = 0
+        for event in events {
             guard
-                let profile = try? await self.profile.getProfile(userId),
-                profile.displayname != nil || profile.avatarUrl != nil
-            else { return nil }
-            return MemberContent(
-                membership: .join,
-                displayname: profile.displayname,
-                avatarUrl: profile.avatarUrl)
+                let decrypted = await decryptor(event, roomId),
+                decrypted.type != RoomCrypto.roomEncryptedType
+            else { continue }
+            try? await ciphertextStore.replaceEvent(decrypted, roomId: roomId)
+            changed += 1
         }
-        await observable.setTimelineDecryptor(timelineDecryptor)
-        roomCache[roomId] = observable
-        // Snapshot-backed timelines open as ciphertext; decrypt with
-        // whatever sessions the store already holds (persisted across
-        // relaunch or imported before this room was opened).
-        _ = await observable.retryDecryption()
-        return observable
+        return changed
     }
 
-    /// Create a room and return its view model.
+    /// Create a room and return its ID.
     @discardableResult
-    public func createRoom(_ request: CreateRoomRequest) async throws -> ObservableRoom {
-        let roomId = try await rooms.create(request)
-        await roomList.refresh()
-        return await room(roomId)
+    public func createRoom(_ request: CreateRoomRequest) async throws -> RoomId {
+        try await rooms.create(request)
     }
 
-    /// Join a room by ID and return its view model.
+    /// Join a room by ID. Syncs after joining so the `.join` membership
+    /// lands in attached stores, and returns the room ID.
     @discardableResult
-    public func joinRoom(_ roomId: RoomId) async throws -> ObservableRoom {
+    public func joinRoom(_ roomId: RoomId) async throws -> RoomId {
         try await rooms.join(roomId)
         try await syncOnce()
-        return await room(roomId)
+        return roomId
     }
 
     /// Knock on a room by ID. Syncs after knocking so the `.knock`
-    /// membership lands in the store, and returns the knocked room's ID.
+    /// membership lands in attached stores, and returns the knocked
+    /// room's ID.
     @discardableResult
     public func knockRoom(_ roomId: RoomId, reason: String? = nil) async throws -> RoomId {
         let resolved = try await rooms.knock(roomId, reason: reason)
@@ -1186,7 +1188,7 @@ public final class MatrixClient {
     }
 
     /// Knock on a room by alias. Syncs after knocking so the `.knock`
-    /// membership lands in the store, and returns the resolved room ID.
+    /// membership lands in attached stores, and returns the resolved room ID.
     @discardableResult
     public func knockRoom(_ alias: RoomAlias, reason: String? = nil) async throws -> RoomId {
         let resolved = try await rooms.knock(alias, reason: reason)

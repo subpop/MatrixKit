@@ -6,6 +6,11 @@ import MatrixKitTesting
 @testable import MatrixKit
 @testable import MatrixKitCrypto
 
+#if canImport(SwiftData)
+import SwiftData
+import MatrixKitSwiftData
+#endif
+
 private func roomFixture() throws -> (RoomId, UserId, UserId) {
     (
         RoomId(unchecked: "!room:x"),
@@ -735,92 +740,8 @@ struct TimelinePagingTests {
             content: ["body": .string(body)])
     }
 
-    @Test("paginateBack loads a canned page into the room")
-    func paginate() async throws {
-        let roomId = RoomId(unchecked: "!room:x")
-        let room = RoomActor(roomId: roomId)
-        await room.prependHistory([], prevBatch: BatchToken("p1"))
-        let pager = FakePager()
-        await pager.setPage(PaginationChunk(
-            start: "p1", end: nil, chunk: [message("a"), message("b")]))
-        let timeline = Timeline(roomId: roomId, messages: pager, room: room)
-        #expect(await timeline.canPaginateBack())
-        #expect(try await timeline.paginateBack() == 2)
-        #expect(await pager.calls == 1)
-        #expect(await timeline.events().count == 2)
-        // No further cursor: second call is a no-op.
-        #expect(try await timeline.paginateBack() == 0)
-    }
-
-    @Test("paginateBack applies the decryptor")
-    func decryptor() async throws {
-        let roomId = RoomId(unchecked: "!room:x")
-        let room = RoomActor(roomId: roomId)
-        await room.prependHistory([], prevBatch: BatchToken("p1"))
-        let pager = FakePager()
-        await pager.setPage(PaginationChunk(
-            start: "p1", end: nil, chunk: [message("cipher")]))
-        let timeline = Timeline(roomId: roomId, messages: pager, room: room)
-        await timeline.setDecryptor { event, _ in
-            var copy = event
-            copy.content["body"] = .string("plain")
-            return copy
-        }
-        #expect(try await timeline.paginateBack() == 1)
-        #expect(
-            await timeline.events().first?.content["body"]
-                == .string("plain"))
-    }
-
-    @Test("retryDecryption unlocks stored ciphertext once the key arrives")
-    func retryAfterKeyArrival() async throws {
-        let (roomId, aliceUser, bobUser) = try roomFixture()
-        let (alice, bob, aliceSharer, aliceSender) = try wirePair()
-        await aliceSharer.setDevices([bobUser.value: ["BOB"]])
-        try await alice.shareRoomKey(roomId: roomId, users: [bobUser])
-        _ = try await alice.sendEncryptedContent(roomId, MessageContent.markdown("late key"))
-        let sent = await aliceSender.sent
-        let wire = MessageEvent(
-            type: sent[0].type, eventId: EventId(unchecked: "$late"),
-            sender: aliceUser, roomId: roomId, originServerTs: 1,
-            content: sent[0].content)
-        let clear = MessageEvent(
-            type: "m.room.message", eventId: EventId(unchecked: "$clear"),
-            sender: aliceUser, roomId: roomId, originServerTs: 2,
-            content: ["body": .string("plain")])
-        let room = RoomActor(roomId: roomId)
-        let stream = await room.updates()
-        var iterator = stream.makeAsyncIterator()
-        await room.prependHistory([wire, clear], prevBatch: nil)
-        // prependHistory's own reset; drain so the next read is ours.
-        #expect(await iterator.next() == .timelineReset)
-        let decryptor: @Sendable (MessageEvent, RoomId) async -> MessageEvent? = {
-            (event: MessageEvent, room: RoomId) in
-            await bob.decryptRoomEvent(event, in: room)
-        }
-        // No session yet: nothing decrypts, no update fires.
-        #expect(await room.retryDecryption(decryptor) == 0)
-        #expect(await room.timeline.first?.type == "m.room.encrypted")
-        // The shared key arrives late (backup restore, room-key share):
-        // stored ciphertext decrypts in place and observers rebuild.
-        let shares = await aliceSharer.shares
-        await bob.receiveRoomKey(BasicEvent(
-            type: "m.room_key", sender: aliceUser,
-            content: shares[0].content))
-        #expect(await room.retryDecryption(decryptor) == 1)
-        #expect(await iterator.next() == .timelineReset)
-        let events = await room.timeline
-        #expect(events[0].type == "m.room.message")
-        #expect(events[0].content["body"] == .string("late key"))
-        #expect(events[1].type == "m.room.message")
-    }
-
-    @Test("reactionEvent finds own reaction for toggling")
-    func reactionLookup() async throws {
-        let roomId = RoomId(unchecked: "!room:x")
-        let room = RoomActor(roomId: roomId)
-        let target = EventId(unchecked: "$target:x")
-        let reaction = MessageEvent(
+    private func reaction() -> MessageEvent {
+        MessageEvent(
             type: "m.reaction",
             eventId: EventId(unchecked: "$reaction:x"),
             sender: UserId(unchecked: "@alice:x"),
@@ -830,43 +751,70 @@ struct TimelinePagingTests {
                 "rel_type": .string("m.annotation"),
                 "key": .string("👍"),
             ])])
-        await room.appendLocalEcho(reaction)
-        let timeline = Timeline(roomId: roomId, messages: FakePager(), room: room)
-        #expect(await timeline.reactionEvent(
+    }
+
+    @Test("reactionEvent finds own reaction for toggling")
+    func reactionLookup() async throws {
+        let target = EventId(unchecked: "$target:x")
+        let events = [reaction()]
+        #expect(events.reactionEvent(
             target: target, key: "👍",
             sender: UserId(unchecked: "@alice:x"))?.value == "$reaction:x")
-        #expect(await timeline.reactionEvent(
+        #expect(events.reactionEvent(
             target: target, key: "👎",
             sender: UserId(unchecked: "@alice:x")) == nil)
-        #expect(await timeline.reactionEvent(
+        #expect(events.reactionEvent(
             target: target, key: "👍",
             sender: UserId(unchecked: "@bob:x")) == nil)
     }
 
     @Test("reactionEvent skips redacted reactions")
     func reactionLookupSkipsRedacted() async throws {
-        let roomId = RoomId(unchecked: "!room:x")
-        let room = RoomActor(roomId: roomId)
         let target = EventId(unchecked: "$target:x")
-        let reaction = MessageEvent(
-            type: "m.reaction",
-            eventId: EventId(unchecked: "$reaction:x"),
-            sender: UserId(unchecked: "@alice:x"),
-            originServerTs: 1,
-            content: ["m.relates_to": .object([
-                "event_id": .string("$target:x"),
-                "rel_type": .string("m.annotation"),
-                "key": .string("👍"),
-            ])],
-            unsigned: ["redacted_because": .object([
-                "event_id": .string("$redaction:x"),
-            ])])
-        await room.appendLocalEcho(reaction)
-        let timeline = Timeline(roomId: roomId, messages: FakePager(), room: room)
-        #expect(await timeline.reactionEvent(
+        var stamped = reaction()
+        stamped.unsigned = ["redacted_because": .object([
+            "event_id": .string("$redaction:x"),
+        ])]
+        #expect([stamped].reactionEvent(
             target: target, key: "👍",
             sender: UserId(unchecked: "@alice:x")) == nil)
     }
+
+#if canImport(SwiftData)
+    @Test("Stored ciphertext decrypts through replaceEvent")
+    func storedCiphertextRoundTrip() async throws {
+        let (room, aliceUser, bobUser) = try roomFixture()
+        let (alice, bob, aliceSharer, aliceSender) = try wirePair()
+        await aliceSharer.setDevices([bobUser.value: ["BOB"]])
+        try await alice.shareRoomKey(roomId: room, users: [bobUser])
+        _ = try await alice.sendEncryptedContent(room, MessageContent.markdown("late key"))
+        let sent = await aliceSender.sent
+        let wire = MessageEvent(
+            type: sent[0].type, eventId: EventId(unchecked: "$late"),
+            sender: aliceUser, roomId: room, originServerTs: 1,
+            content: sent[0].content)
+        let container = try MatrixStore.makeInMemory()
+        let writer = MatrixStoreWriter(modelContainer: container)
+        try await writer.apply(joinedTimelineDelta([wire], roomId: room.value))
+        #expect(
+            try await writer.encryptedEvents(roomId: room).map(\.eventId.value)
+                == ["$late"])
+        // The key arrives late (backup restore, room-key share): decrypt
+        // the stored row and write the plaintext back.
+        let shares = await aliceSharer.shares
+        await bob.receiveRoomKey(BasicEvent(
+            type: "m.room_key", sender: aliceUser,
+            content: shares[0].content))
+        guard let decrypted = await bob.decryptRoomEvent(wire, in: room) else {
+            Issue.record("stored ciphertext did not decrypt after key arrival")
+            return
+        }
+        try await writer.replaceEvent(decrypted, roomId: room)
+        #expect(try await writer.encryptedEvents(roomId: room).isEmpty)
+        let stored = try await writer.storedEvents(roomId: room)
+        #expect(stored.first?.messageContent?.body == "late key")
+    }
+#endif
 }
 
 @Suite("MatrixClientEncryption")

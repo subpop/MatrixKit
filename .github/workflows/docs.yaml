@@ -30,7 +30,6 @@ jobs:
             generate-documentation \
             --target MatrixKit \
             --target MatrixKitCrypto \
-            --target MatrixKitSQLite \
             --target MatrixKitSwiftData \
             --target MatrixRTC \
             --enable-experimental-combined-documentation \

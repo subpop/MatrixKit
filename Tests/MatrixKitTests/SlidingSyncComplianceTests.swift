@@ -17,21 +17,19 @@ struct SlidingSyncComplianceTests {
         try await withHarness { harness in
             let world = await harness.world
             await world.stageMessage(roomId: "!a:test", body: "sliding hello")
-            let (sliding, store, _, _) = await harness.slidingSyncClient()
+            let (sliding, _, _) = await harness.slidingSyncClient()
             let delta = try await sliding.syncOnce(lists: SlidingSyncClient.defaultLists)
             #expect(delta.nextBatch.value == "p1")
             #expect(await sliding.pos == "p1")
-            // v2 sync token untouched by the sliding engine.
-            #expect(await store.syncToken == nil)
-            let room = await store.room(RoomId(unchecked: "!a:test"))
-            #expect(await room.timeline.map(\.eventId.value) == ["$e1:test"])
+            let timeline = delta.joined[RoomId(unchecked: "!a:test")]?.timeline
+            #expect(timeline?.map(\.eventId.value) == ["$e1:test"])
         }
     }
 
     @Test("Pos advances monotonically, request carries it")
     func posAdvances() async throws {
         try await withHarness { harness in
-            let (sliding, _, _, _) = await harness.slidingSyncClient()
+            let (sliding, _, _) = await harness.slidingSyncClient()
             _ = try await sliding.syncOnce(lists: SlidingSyncClient.defaultLists)
             _ = try await sliding.syncOnce()
             #expect(await sliding.pos == "p2")
@@ -57,21 +55,22 @@ struct SlidingSyncComplianceTests {
             await world.queueToDevice(BasicEvent(
                 type: "m.room_key", sender: UserId(unchecked: "@bob:test"),
                 content: ["session_id": .string("s1")]))
-            let (sliding, store, _, _) = await harness.slidingSyncClient()
+            let (sliding, _, _) = await harness.slidingSyncClient()
             let log = HookLog()
             await sliding.setCryptoHooks(log.hooks())
             let delta = try await sliding.syncOnce(lists: SlidingSyncClient.defaultLists)
             #expect(delta.toDevice.count == 1)
             #expect(await log.toDeviceBatches.count == 1)
-            let room = await store.room(RoomId(unchecked: "!a:test"))
-            #expect(await room.typingUsers == [UserId(unchecked: "@bob:test")])
+            // The typing extension arrives as synthetic ephemeral data.
+            let typing = delta.joined[RoomId(unchecked: "!a:test")]?.ephemeral
+            #expect(typing?.map(\.type) == ["m.typing"])
         }
     }
 
     @Test("Unknown pos resets the cursor and rethrows")
     func unknownPos() async throws {
         try await withHarness { harness in
-            let (sliding, _, _, _) = await harness.slidingSyncClient()
+            let (sliding, _, _) = await harness.slidingSyncClient()
             _ = try await sliding.syncOnce(lists: SlidingSyncClient.defaultLists)
             #expect(await sliding.pos == "p1")
             await harness.setOverride(
@@ -92,7 +91,7 @@ struct SlidingSyncComplianceTests {
         try await withHarness { harness in
             let world = await harness.world
             await world.stageMessage(body: "live")
-            let (sliding, _, _, _) = await harness.slidingSyncClient()
+            let (sliding, _, _) = await harness.slidingSyncClient()
             let stream = try await sliding.start(lists: SlidingSyncClient.defaultLists)
             var seen: [String] = []
             for await delta in stream {
@@ -114,7 +113,7 @@ struct SlidingSyncComplianceTests {
             deviceId: DeviceId("D"),
             accessToken: "")
         let sliding = SlidingSyncClient(
-            transport: transport, session: session, store: StateStore())
+            transport: transport, session: session)
         await #expect(throws: MatrixError.notAuthenticated) {
             try await sliding.syncOnce()
         }

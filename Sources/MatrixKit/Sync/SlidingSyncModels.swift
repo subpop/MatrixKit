@@ -404,12 +404,12 @@ public struct SlidingSyncRoom: Hashable, Sendable, Codable {
 public enum SlidingSyncResponseParser {
     /// Map a decoded sliding sync response onto per-room deltas. Total
     /// function: missing sections decode to empty defaults, never throws.
-    /// The `pos` cursor becomes `nextBatch`; note `StateStore.applySliding`
-    /// (not `apply`) consumes these deltas so the v2 sync token is untouched.
+    /// The `pos` cursor becomes `nextBatch`; engines apply these via
+    /// `applySliding` (not `apply`) so the v2 sync token is untouched.
     /// E2EE/to-device extensions land in `toDevice`/`deviceChanged`/
     /// `deviceLeft` for the shared crypto hooks. The typing extension
     /// (MSC4508) becomes one synthetic `m.typing` ephemeral event per
-    /// room, so the existing `RoomActor` ephemeral path handles display.
+    /// room for live display.
     public static func parse(_ response: SlidingSyncResponse) -> SyncDelta {
         var joined: [RoomId: JoinedRoomDelta] = [:]
         for (roomIdString, room) in response.rooms {

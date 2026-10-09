@@ -239,66 +239,6 @@ struct SlidingSyncResponseParserTests {
     }
 }
 
-@Suite("SlidingSyncStateStore")
-struct SlidingSyncStateStoreTests {
-    @Test("applySliding routes rooms without touching the v2 sync token")
-    func applySlidingKeepsToken() async {
-        let store = StateStore()
-        let roomId = RoomId(unchecked: "!r:example.com")
-        await store.apply(SyncDelta(nextBatch: BatchToken("s9")))
-        #expect(await store.syncToken?.value == "s9")
-        await store.applySliding(SyncDelta(
-            nextBatch: BatchToken("pos-ignored"),
-            joined: [roomId: JoinedRoomDelta(
-                timeline: [MessageEvent(
-                    type: "m.room.message",
-                    eventId: EventId(unchecked: "$e"),
-                    sender: UserId(unchecked: "@alice:example.com"),
-                    originServerTs: 1_700_000_000_000,
-                    content: ["body": .string("hi")])])]))
-        #expect(await store.syncToken?.value == "s9")
-        let room = await store.room(roomId)
-        #expect(await room.timeline.count == 1)
-    }
-
-    @Test("Sliding typing ephemeral updates typingUsers")
-    func applySlidingTyping() async {
-        let store = StateStore()
-        let roomId = RoomId(unchecked: "!r:example.com")
-        var room = JoinedRoomDelta()
-        room.ephemeral = [BasicEvent(
-            type: "m.typing",
-            content: ["user_ids": .array([.string("@bob:example.com")])])]
-        await store.applySliding(SyncDelta(nextBatch: BatchToken("1"), joined: [roomId: room]))
-        let stored = await store.room(roomId)
-        #expect(await stored.typingUsers == [UserId(unchecked: "@bob:example.com")])
-    }
-
-    @Test("Limited sliding timelines replace the window")
-    func applySlidingLimitedReset() async {
-        let store = StateStore()
-        let roomId = RoomId(unchecked: "!r:example.com")
-        func message(_ id: String) -> MessageEvent {
-            MessageEvent(
-                type: "m.room.message", eventId: EventId(unchecked: id),
-                sender: UserId(unchecked: "@alice:example.com"),
-                originServerTs: 1_700_000_000_000,
-                content: ["body": .string(id)])
-        }
-        await store.applySliding(SyncDelta(
-            nextBatch: BatchToken("1"),
-            joined: [roomId: JoinedRoomDelta(timeline: [message("$old")])]))
-        await store.applySliding(SyncDelta(
-            nextBatch: BatchToken("2"),
-            joined: [roomId: JoinedRoomDelta(
-                timeline: [message("$new")], timelineLimited: true)]))
-        let room = await store.room(roomId)
-        let timeline = await room.timeline
-        #expect(timeline.count == 1)
-        #expect(timeline.first?.eventId == EventId(unchecked: "$new"))
-    }
-}
-
 @Suite("SlidingSyncClient")
 struct SlidingSyncClientTests {
     private func makeClient(accessToken: String = "t") -> (client: SlidingSyncClient, transport: MatrixTransport) {
@@ -310,7 +250,7 @@ struct SlidingSyncClientTests {
             deviceId: DeviceId("D"),
             accessToken: accessToken)
         let client = SlidingSyncClient(
-            transport: transport, session: session, store: StateStore())
+            transport: transport, session: session)
         return (client, transport)
     }
 

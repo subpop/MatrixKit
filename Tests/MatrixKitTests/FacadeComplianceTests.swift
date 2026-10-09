@@ -19,18 +19,7 @@ struct FacadeComplianceTests {
             accessToken: "harness-token-alice")
     }
 
-    /// View models refresh off the actor's update stream, so assertions
-    /// after an action spin until convergence (or a 2s deadline) instead
-    /// of racing the observer.
-    @MainActor
-    private func settle(until condition: () async -> Bool) async {
-        let deadline = ContinuousClock.now + .seconds(2)
-        while await !condition(), ContinuousClock.now < deadline {
-            try? await Task.sleep(for: .milliseconds(20))
-        }
-    }
-
-    @Test("Sync populates the room list")
+    @Test("Sync populates rooms")
     @MainActor
     func syncPopulatesRooms() async throws {
         try await withHarness { harness in
@@ -39,9 +28,9 @@ struct FacadeComplianceTests {
             await world.stageMessage(roomId: "!b:test", body: "hello b")
             let client = await client(harness)
             #expect(client.isAuthenticated)
-            try await client.syncOnce()
-            #expect(client.roomList.joined.count == 2)
-            #expect(client.roomList.totalUnread == 0)
+            let delta = try await client.sync.syncOnce()
+            #expect(delta.nextBatch.value == "s1")
+            #expect(Set(delta.joined.keys.map(\.value)) == ["!a:test", "!b:test"])
             try? await client.transport.shutdown()
         }
     }
@@ -51,30 +40,31 @@ struct FacadeComplianceTests {
     func createSendReceive() async throws {
         try await withHarness { harness in
             let client = await client(harness)
-            let room = try await client.createRoom(CreateRoomRequest(name: "General"))
-            // The store learns the room on the next sync.
-            try await client.syncOnce()
-            #expect(client.roomList.joined.map(\.roomId) == [room.roomId])
-            let sent = try await client.messages.sendText(room.roomId, "facade hi")
-            try await client.syncOnce()
-            // Same cached view model on repeat access.
-            #expect(await client.room(room.roomId) === room)
-            let actor = await client.store.room(room.roomId)
-            #expect(await actor.timeline.map(\.eventId.value).contains(sent.value))
+            let roomId = try await client.createRoom(CreateRoomRequest(name: "General"))
+            // The room lands on the next sync.
+            var delta = try await client.sync.syncOnce()
+            #expect(delta.joined[roomId] != nil)
+            let sent = try await client.messages.sendText(roomId, "facade hi")
+            delta = try await client.sync.syncOnce()
+            let timeline = delta.joined[roomId]?.timeline
+            #expect(timeline?.map(\.eventId.value).contains(sent.value) == true)
             try? await client.transport.shutdown()
         }
     }
 
-    @Test("Join syncs the new membership into the store")
+    @Test("Join syncs the new membership")
     @MainActor
     func joinFlow() async throws {
         try await withHarness { harness in
             let client = await client(harness)
             let created = try await client.rooms.create(CreateRoomRequest())
-            let room = try await client.joinRoom(created)
-            #expect(room.roomId == created)
-            let members = await client.store.room(created).members
-            #expect(members[UserId(unchecked: "@alice:test")]?.membership == .join)
+            let roomId = try await client.joinRoom(created)
+            #expect(roomId == created)
+            let members = try await client.rooms.members(created)
+            let alice = members.first {
+                $0.userId == UserId(unchecked: "@alice:test")
+            }
+            #expect(alice?.content.membership == .join)
             try? await client.transport.shutdown()
         }
     }
@@ -95,7 +85,6 @@ struct FacadeComplianceTests {
             }
             #expect(batches.count == 1)
             await client.stopSync()
-            #expect(client.roomList.joined.count == 1)
             try? await client.transport.shutdown()
         }
     }
@@ -114,39 +103,19 @@ struct FacadeComplianceTests {
         }
     }
 
-    @Test("Room view model sends with echo, confirms on sync")
-    @MainActor
-    func roomSendConfirm() async throws {
-        try await withHarness { harness in
-            let client = await client(harness)
-            let room = try await client.createRoom(CreateRoomRequest())
-            try await client.syncOnce()
-            let echoId = await room.send(text: "view model hi")
-            let echo = try #require(echoId)
-            #expect(echo.value.hasPrefix("local:"))
-            #expect(room.timeline?.events.map(\.eventId.value).contains(echo.value) == true)
-            try await client.syncOnce()
-            let ids = room.timeline?.events.map(\.eventId.value) ?? []
-            #expect(!ids.contains(echo.value))
-            #expect(ids.contains { $0.hasPrefix("$w") })
-            #expect(room.timeline?.events.allSatisfy { $0.sendState != .pending } == true)
-            try? await client.transport.shutdown()
-        }
-    }
-
-    @Test("Room view model marks read and advances the marker")
+    @Test("Read receipts and fully-read markers round-trip")
     @MainActor
     func roomMarkRead() async throws {
         try await withHarness { harness in
             let world = await harness.world
             let client = await client(harness)
-            let room = try await client.createRoom(CreateRoomRequest())
-            let sent = try await client.messages.sendText(room.roomId, "read me")
-            try await room.markRead(sent)
+            let roomId = try await client.createRoom(CreateRoomRequest())
+            let sent = try await client.messages.sendText(roomId, "read me")
+            try await client.roomState.sendReceipt(roomId, eventId: sent)
             let receipts = await world.recordedReceipts()
             #expect(receipts.map(\.event) == [sent.value])
-            try await room.sendFullyRead(sent)
-            #expect(try await client.accountData.fullyRead(room.roomId) == sent)
+            try await client.accountData.setFullyRead(roomId, eventId: sent)
+            #expect(try await client.accountData.fullyRead(roomId) == sent)
             try? await client.transport.shutdown()
         }
     }
@@ -193,130 +162,88 @@ struct FacadeComplianceTests {
         }
     }
 
-    @Test("Room replies, edits, and reactions round-trip")
+    @Test("Replies, edits, and reactions round-trip")
     @MainActor
     func roomMessagingFlows() async throws {
         try await withHarness { harness in
             let client = await client(harness)
-            let room = try await client.createRoom(CreateRoomRequest())
+            let roomId = try await client.createRoom(CreateRoomRequest())
             try await client.syncOnce()
-            let base = try await client.messages.sendText(room.roomId, "base")
-            try await room.reply(to: base, text: "reply")
-            try await room.threadReply(rootEventId: base, text: "thread")
-            try await room.edit(base, newText: "base fixed")
-            try await room.react(to: base, key: "👍")
+            let base = try await client.messages.sendText(roomId, "base")
+            try await client.messages.reply(roomId, to: base, body: "reply")
+            try await client.messages.threadReply(roomId, root: base, body: "thread")
+            try await client.messages.edit(roomId, eventId: base, newBody: "base fixed")
+            try await client.messages.react(roomId, to: base, key: "👍")
             let annotations = try await client.messages.relations(
-                room.roomId, eventId: base, relType: "m.annotation")
+                roomId, eventId: base, relType: "m.annotation")
             #expect(annotations.chunk.count == 1)
             let threads = try await client.messages.relations(
-                room.roomId, eventId: base, relType: "m.thread")
+                roomId, eventId: base, relType: "m.thread")
             #expect(threads.chunk.count == 1)
             let edits = try await client.messages.relations(
-                room.roomId, eventId: base, relType: "m.replace")
+                roomId, eventId: base, relType: "m.replace")
             #expect(edits.chunk.count == 1)
             try? await client.transport.shutdown()
         }
     }
 
-    @Test("Room attachment uploads and sends")
-    @MainActor
-    func roomAttachment() async throws {
-        try await withHarness { harness in
-            let client = await client(harness)
-            let room = try await client.createRoom(CreateRoomRequest())
-            let echo = await room.sendAttachment(
-                data: Data("bytes".utf8), filename: "f.png", mimeType: "image/png")
-            #expect(echo?.value.hasPrefix("local:") == true)
-            let uploads = await harness.requests.filter { $0.path == "/_matrix/media/v3/upload" }
-            #expect(uploads.count == 1)
-            try? await client.transport.shutdown()
-        }
-    }
-
-    @Test("Room attachment reports progress ending at 1")
-    @MainActor
-    func roomAttachmentProgress() async throws {
-        try await withHarness { harness in
-            let client = await client(harness)
-            let room = try await client.createRoom(CreateRoomRequest())
-            let collector = ProgressCollector()
-            let echo = await room.sendAttachment(
-                data: Data(repeating: 0xAB, count: 200 * 1024),
-                filename: "big.bin", mimeType: "application/octet-stream",
-                onProgress: { collector.append($0) })
-            #expect(echo?.value.hasPrefix("local:") == true)
-            let fractions = collector.values
-            #expect(fractions.count >= 2)
-            #expect(zip(fractions, fractions.dropFirst()).allSatisfy { $0 <= $1 })
-            #expect(fractions.last == 1)
-            try? await client.transport.shutdown()
-        }
-    }
-
-    @Test("Room invite, leave, and member loading")
+    @Test("Invite, leave, and member loading")
     @MainActor
     func roomMembershipFlows() async throws {
         try await withHarness { harness in
             let client = await client(harness)
-            let room = try await client.createRoom(CreateRoomRequest())
-            try await room.invite(UserId(unchecked: "@bob:test"))
-            try await room.loadMembers()
-            #expect(room.members.contains(UserId(unchecked: "@bob:test")))
-            #expect(room.memberDetails[UserId(unchecked: "@bob:test")]?.membership == .invite)
-            try await room.leave()
-            try await client.syncOnce()
-            await settle { room.membership == .leave }
-            #expect(room.membership == .leave)
+            let roomId = try await client.createRoom(CreateRoomRequest())
+            try await client.rooms.invite(roomId, user: UserId(unchecked: "@bob:test"))
+            let members = try await client.rooms.members(roomId)
+            let bob = members.first {
+                $0.userId == UserId(unchecked: "@bob:test")
+            }
+            #expect(bob?.content.membership == .invite)
+            try await client.rooms.leave(roomId)
+            let delta = try await client.sync.syncOnce()
+            #expect(delta.left[roomId] != nil)
             try? await client.transport.shutdown()
         }
     }
 
-    @Test("Room name, topic, details, pins, and favourite")
+    @Test("Name, topic, pins, and favourite round-trip")
     @MainActor
     func roomStateFlows() async throws {
         try await withHarness { harness in
             let client = await client(harness)
-            let room = try await client.createRoom(CreateRoomRequest())
-            try await room.setName("General")
-            try await room.setTopic("All chat")
-            try await client.syncOnce()
-            #expect(room.name == "General")
-            #expect(room.topic == "All chat")
-            let details = try await room.roomDetails()
-            #expect(details.name == "General")
-            let sent = try await client.messages.sendText(room.roomId, "pinnable")
-            try await room.pin(sent)
-            try await client.syncOnce()
-            await settle { room.pinnedEventIds == [sent.value] }
-            #expect(room.pinnedEventIds == [sent.value])
-            #expect(try await room.pinnedMessages().map(\.eventId) == [sent])
-            try await room.unpin(sent)
-            try await client.syncOnce()
-            await settle { room.pinnedEventIds.isEmpty }
-            #expect(room.pinnedEventIds.isEmpty)
-            try await room.setFavourite(true)
-            try await client.syncOnce()
-            await settle { room.isFavourite }
-            #expect(room.isFavourite)
-            #expect(try await client.accountData.tags(room.roomId)?.tags["m.favourite"] != nil)
+            let roomId = try await client.createRoom(CreateRoomRequest())
+            try await client.roomState.setName(roomId, name: "General")
+            try await client.roomState.setTopic(roomId, topic: "All chat")
+            #expect(
+                try await client.roomState.getStateEvent(roomId, type: "m.room.name")["name"]
+                    == .string("General"))
+            #expect(
+                try await client.roomState.getStateEvent(roomId, type: "m.room.topic")["topic"]
+                    == .string("All chat"))
+            let sent = try await client.messages.sendText(roomId, "pinnable")
+            try await client.roomState.sendStateEvent(
+                roomId, type: "m.room.pinned_events",
+                content: ["pinned": .array([.string(sent.value)])])
+            #expect(
+                try await client.roomState.getStateEvent(
+                    roomId, type: "m.room.pinned_events")["pinned"]
+                    == .array([.string(sent.value)]))
+            try await client.accountData.setFavourite(roomId, isFavourite: true)
+            #expect(try await client.accountData.tags(roomId)?.tags["m.favourite"] != nil)
             try? await client.transport.shutdown()
         }
     }
 
-    @Test("Room typing sends and avatar hydrates from state")
+    @Test("Typing notifications reach the server")
     @MainActor
-    func roomTypingAndAvatar() async throws {
+    func roomTyping() async throws {
         try await withHarness { harness in
             let world = await harness.world
             let client = await client(harness)
-            let room = try await client.createRoom(CreateRoomRequest())
-            try await room.setTyping(true)
-            #expect(await world.typingUsers(roomId: room.roomId.value) == ["@alice:test"])
-            _ = try await client.roomState.setAvatar(
-                room.roomId, url: try MXCURI("mxc://test/avatar"))
-            #expect(await room.hydrateMissingAvatar())
-            #expect(room.avatarURL?.value == "mxc://test/avatar")
-            #expect(await room.hydrateMissingAvatar() == false)
+            let roomId = try await client.createRoom(CreateRoomRequest())
+            try await client.roomState.sendTyping(
+                roomId, userId: UserId(unchecked: "@alice:test"), typing: true)
+            #expect(await world.typingUsers(roomId: roomId.value) == ["@alice:test"])
             try? await client.transport.shutdown()
         }
     }
@@ -371,52 +298,6 @@ struct FacadeComplianceTests {
             #expect(await client.slidingSync.pos == "p1")
             try await client.startSlidingSync()
             await client.stopSlidingSync()
-            #expect(client.roomList.joined.count == 1)
-            try? await client.transport.shutdown()
-        }
-    }
-
-    @Test("Room reaction toggles on and off")
-    @MainActor
-    func roomToggleReaction() async throws {
-        try await withHarness { harness in
-            let client = await client(harness)
-            let room = try await client.createRoom(CreateRoomRequest())
-            try await client.syncOnce()
-            let target = try await client.messages.sendText(room.roomId, "react me")
-            try await client.syncOnce()
-            await room.toggleReaction(target: target, key: "👍")
-            let annotations = try await client.messages.relations(
-                room.roomId, eventId: target, relType: "m.annotation")
-            #expect(annotations.chunk.count == 1)
-            // Toggling the staged echo drops it without a server call.
-            await room.toggleReaction(target: target, key: "👍")
-            // Sync the confirmed reaction, then toggle off: stamps a
-            // redaction and removes the badge via the server.
-            try await client.syncOnce()
-            await room.toggleReaction(target: target, key: "👍")
-            try? await client.transport.shutdown()
-        }
-    }
-
-    @Test("Read markers outside the window resolve via event fetch")
-    @MainActor
-    func resolveMarkers() async throws {
-        try await withHarness { harness in
-            let world = await harness.world
-            let client = await client(harness)
-            let marker = await world.stageMessage(roomId: "!r:test", body: "old")
-            let room = await client.store.room(RoomId(unchecked: "!r:test"))
-            // Marker known to the server but outside the actor window.
-            await room.applyJoined(JoinedRoomDelta(
-                timeline: [snapshotMessage("new", id: "$new:test")],
-                accountData: [BasicEvent(
-                    type: "m.fully_read",
-                    content: ["event_id": .string(marker.eventId.value)])]))
-            #expect(await room.needsMarkerResolution)
-            await client.resolveReadMarkers()
-            #expect(await room.needsMarkerResolution == false)
-            #expect(await room.effectiveUnreadCount == 0)
             try? await client.transport.shutdown()
         }
     }
@@ -517,20 +398,21 @@ struct FacadeComplianceTests {
         }
     }
 
-    @Test("Room HTML, redact, marker ID, and retry flows")
+    @Test("HTML send, redact, fully-read, and retry flows")
     @MainActor
     func roomMiscFlows() async throws {
         try await withHarness { harness in
             let client = await client(harness)
-            let room = try await client.createRoom(CreateRoomRequest())
-            try await room.sendHTML(body: "hi", formattedBody: "<b>hi</b>")
-            let sent = try await client.messages.sendText(room.roomId, "doomed")
-            try await room.redact(sent, reason: "spam")
-            let pruned = try await client.messages.event(room.roomId, sent)
+            let roomId = try await client.createRoom(CreateRoomRequest())
+            try await client.messages.sendHTML(
+                roomId, body: "hi", formattedBody: "<b>hi</b>")
+            let sent = try await client.messages.sendText(roomId, "doomed")
+            try await client.messages.redact(roomId, eventId: sent, reason: "spam")
+            let pruned = try await client.messages.event(roomId, sent)
             #expect(pruned.content.isEmpty)
-            #expect(await room.fullyReadEventId() == nil)
-            try await room.sendFullyRead(sent)
-            #expect(await room.fullyReadEventId() == sent)
+            #expect(try await client.accountData.fullyRead(roomId) == nil)
+            try await client.accountData.setFullyRead(roomId, eventId: sent)
+            #expect(try await client.accountData.fullyRead(roomId) == sent)
             #expect(await client.retryTimelineDecryption() == 0)
             try? await client.transport.shutdown()
         }
@@ -543,7 +425,7 @@ struct FacadeComplianceTests {
             let world = await harness.world
             let client = await client(harness)
             await client.configureEncryption()
-            let room = try await client.createRoom(CreateRoomRequest())
+            let roomId = try await client.createRoom(CreateRoomRequest())
             // Bob joins with his own session; both sides configure Olm
             // and publish keys through the world routes.
             let bobUser = UserId(unchecked: "@bob:test")
@@ -554,7 +436,7 @@ struct FacadeComplianceTests {
             let bobSession = Session(
                 homeserver: await harness.baseURL, userId: bobUser,
                 deviceId: DeviceId("BOB"), accessToken: bobAccess)
-            try await RoomClient(transport: bobTransport, session: bobSession).join(room.roomId)
+            try await RoomClient(transport: bobTransport, session: bobSession).join(roomId)
             let bobOlm = OlmConnector(
                 keys: KeyClient(transport: bobTransport, session: bobSession),
                 sender: ToDeviceClient(transport: bobTransport, session: bobSession))
@@ -570,12 +452,12 @@ struct FacadeComplianceTests {
             // Alice shares; Bob's key request (Olm-encrypted, as peers
             // send it) is served with the requested session — not just
             // whatever outbound happens to be current.
-            try await client.shareRoomKey(room.roomId)
+            try await client.shareRoomKey(roomId)
             let sessionId = try #require(
-                await client.roomCrypto.outboundSessionId(for: room.roomId))
+                await client.roomCrypto.outboundSessionId(for: roomId))
             let request = RoomCrypto.keyRequestContent(
                 requestId: "req-1", deviceId: DeviceId("BOB"),
-                roomId: room.roomId, sessionId: sessionId)
+                roomId: roomId, sessionId: sessionId)
             try await bobOlm.sendEncrypted(
                 eventType: "m.room_key_request", content: request,
                 to: UserId(unchecked: "@alice:test"), devices: [DeviceId("ALICEDEVICE")])
@@ -611,7 +493,7 @@ struct FacadeComplianceTests {
             // current outbound session.
             let unknownRequest = RoomCrypto.keyRequestContent(
                 requestId: "req-2", deviceId: DeviceId("BOB"),
-                roomId: room.roomId, sessionId: "unknown-session")
+                roomId: roomId, sessionId: "unknown-session")
             try await bobOlm.sendEncrypted(
                 eventType: "m.room_key_request", content: unknownRequest,
                 to: UserId(unchecked: "@alice:test"), devices: [DeviceId("ALICEDEVICE")])
@@ -762,21 +644,20 @@ struct FacadeComplianceTests {
         }
     }
 
-    @Test("Failed markers still adopt locally")
+    @Test("Failed fully-read writes surface the server error")
     @MainActor
     func markersFailureAdopts() async throws {
         try await withHarness { harness in
             let client = await client(harness)
-            let room = try await client.createRoom(CreateRoomRequest())
-            let sent = try await client.messages.sendText(room.roomId, "hi")
+            let roomId = try await client.createRoom(CreateRoomRequest())
+            let sent = try await client.messages.sendText(roomId, "hi")
             await harness.setOverride(
                 method: "POST",
-                path: "/_matrix/client/v3/rooms/\(room.roomId.value.pathSegmentEncoded)/read_markers",
+                path: "/_matrix/client/v3/rooms/\(roomId.value.pathSegmentEncoded)/read_markers",
                 response: .matrixError(code: "M_UNKNOWN", message: "boom", status: 500))
             await #expect(throws: MatrixError.self) {
-                try await room.sendFullyRead(sent)
+                try await client.accountData.setFullyRead(roomId, eventId: sent)
             }
-            #expect(await room.fullyReadEventId() == sent)
             try? await client.transport.shutdown()
         }
     }
@@ -871,9 +752,9 @@ struct FacadeComplianceTests {
     func loopMarkerResolution() async throws {
         try await withHarness { harness in
             let client = await client(harness)
-            let room = try await client.createRoom(CreateRoomRequest())
-            let sent = try await client.messages.sendText(room.roomId, "hi")
-            try await client.accountData.setFullyRead(room.roomId, eventId: sent)
+            let roomId = try await client.createRoom(CreateRoomRequest())
+            let sent = try await client.messages.sendText(roomId, "hi")
+            try await client.accountData.setFullyRead(roomId, eventId: sent)
             try await client.startSync()
             await client.stopSync()
             try? await client.transport.shutdown()
@@ -891,7 +772,7 @@ struct FacadeComplianceTests {
                 userId: UserId(unchecked: "@alice:test"),
                 deviceId: DeviceId("ALICEDEVICE"))
             try await client.olm.ensureKeys()
-            let room = try await client.createRoom(CreateRoomRequest())
+            let roomId = try await client.createRoom(CreateRoomRequest())
             // Bob joins with published keys so the share has a target.
             let bobUser = UserId(unchecked: "@bob:test")
             let (bobAccess, _) = await world.mintTokens(
@@ -901,7 +782,7 @@ struct FacadeComplianceTests {
             let bobSession = Session(
                 homeserver: await harness.baseURL, userId: bobUser,
                 deviceId: DeviceId("BOB"), accessToken: bobAccess)
-            try await RoomClient(transport: bobTransport, session: bobSession).join(room.roomId)
+            try await RoomClient(transport: bobTransport, session: bobSession).join(roomId)
             let bobOlm = OlmConnector(
                 keys: KeyClient(transport: bobTransport, session: bobSession),
                 sender: FakeSender())
@@ -910,7 +791,7 @@ struct FacadeComplianceTests {
                 userId: bobUser, deviceId: DeviceId("BOB"))
             try await bobOlm.ensureKeys()
             let sent = try await client.sendEncryptedContent(
-                room.roomId, MessageContent.text("secret"))
+                roomId, MessageContent.text("secret"))
             #expect(sent.value.hasPrefix("$w"))
             // The wire carries an Olm-encrypted event for Bob.
             let shares = await world.recordedToDeviceSends()
@@ -926,7 +807,7 @@ struct FacadeComplianceTests {
             let world = await harness.world
             let client = await client(harness)
             await client.configureEncryption()
-            let room = try await client.createRoom(CreateRoomRequest())
+            let roomId = try await client.createRoom(CreateRoomRequest())
             try await client.syncOnce()
             // A well-formed room key imports and resolves the room.
             var sender = MegolmSession.create()
@@ -939,7 +820,7 @@ struct FacadeComplianceTests {
                 sender: UserId(unchecked: "@bob:test"),
                 content: [
                     "algorithm": .string("m.megolm.v1.aes-sha2"),
-                    "room_id": .string(room.roomId.value),
+                    "room_id": .string(roomId.value),
                     "session_id": .string(sessionId),
                     "session_key": .string(Primitives.base64UnpaddedEncode(blob)),
                 ]))
@@ -947,7 +828,7 @@ struct FacadeComplianceTests {
             // An undecryptable timeline event fires the unknown-session
             // handler; Bob has no published keys, so no request goes out.
             let cipher = try await client.messages.sendEvent(
-                room.roomId, eventType: "m.room.encrypted",
+                roomId, eventType: "m.room.encrypted",
                 content: [
                     "algorithm": AnyCodable.string("m.megolm.v1.aes-sha2"),
                     "sender_key": AnyCodable.string("bobcurve"),
@@ -966,9 +847,9 @@ struct FacadeComplianceTests {
     func loopAccountData() async throws {
         try await withHarness { harness in
             let client = await client(harness)
-            let room = try await client.createRoom(CreateRoomRequest())
-            let sent = try await client.messages.sendText(room.roomId, "hi")
-            try await client.accountData.setFullyRead(room.roomId, eventId: sent)
+            let roomId = try await client.createRoom(CreateRoomRequest())
+            let sent = try await client.messages.sendText(roomId, "hi")
+            try await client.accountData.setFullyRead(roomId, eventId: sent)
             let deltas = client.deltas()
             try await client.startSync()
             var sawAccountData = false
@@ -984,59 +865,5 @@ struct FacadeComplianceTests {
         }
     }
 
-    @Test("Encrypted rooms without a sender fail sends locally", arguments: [
-        "text", "html", "reply", "thread", "edit", "react", "attach",
-    ])
-    @MainActor
-    func encryptedNoSender(_ variant: String) async throws {
-        try await withHarness { harness in
-            let client = await client(harness)
-            let actor = await client.store.room(RoomId(unchecked: "!enc:test"))
-            await actor.applyJoined(JoinedRoomDelta(state: [MessageEvent(
-                type: "m.room.encryption",
-                eventId: EventId(unchecked: "$enc:test"),
-                sender: UserId(unchecked: "@alice:test"),
-                stateKey: "",
-                originServerTs: 1,
-                content: ["algorithm": .string("m.megolm.v1.aes-sha2")])]))
-            #expect(await actor.isEncrypted)
-            // Built directly: no encryptSender installed (client.room
-            // always installs one).
-            let room = await ObservableRoom(
-                room: actor, messages: client.messages, rooms: client.rooms,
-                roomState: client.roomState, accountData: client.accountData,
-                media: client.media, localUser: client.userId)
-            let target = EventId(unchecked: "$t:test")
-            switch variant {
-            case "text":
-                let echo = await room.send(text: "hi")
-                #expect(echo?.value.hasPrefix("local:") == true)
-            case "html":
-                await #expect(throws: MatrixError.notAuthenticated) {
-                    try await room.sendHTML(body: "hi", formattedBody: "<b>hi</b>")
-                }
-            case "reply":
-                await #expect(throws: MatrixError.notAuthenticated) {
-                    try await room.reply(to: target, text: "hi")
-                }
-            case "thread":
-                await #expect(throws: MatrixError.notAuthenticated) {
-                    try await room.threadReply(rootEventId: target, text: "hi")
-                }
-            case "edit":
-                await #expect(throws: MatrixError.notAuthenticated) {
-                    try await room.edit(target, newText: "hi")
-                }
-            case "react":
-                // Reactions always go out plaintext (no encrypted path).
-                try await room.react(to: target, key: "👍")
-            default:
-                let echo = await room.sendAttachment(
-                    data: Data("bytes".utf8), filename: "f.png",
-                    mimeType: "image/png")
-                #expect(echo?.value.hasPrefix("local:") == true)
-            }
-            try? await client.transport.shutdown()
-        }
-    }
+
 }

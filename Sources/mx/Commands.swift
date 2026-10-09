@@ -17,6 +17,7 @@ enum Command: Sendable {
     case react(ref: String, key: String)
     case members
     case topic(newTopic: String?)
+    case more
     case leave
     case verify(user: String, device: String?)
     case crosssign
@@ -106,6 +107,8 @@ func parseCommand(_ line: String) -> Command? {
         return .members
     case "topic":
         return .topic(newTopic: rest.isEmpty ? nil : rest)
+    case "more":
+        return .more
     case "leave":
         return .leave
     case "verify":

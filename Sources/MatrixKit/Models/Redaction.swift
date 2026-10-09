@@ -6,11 +6,11 @@ import Foundation
 /// identical to v11's).
 ///
 /// Servers strip a redacted event's content and re-attach the redaction
-/// under `unsigned.redacted_because` when serving it. `RoomActor` applies
+/// under `unsigned.redacted_because` when serving it. The store applies
 /// this to locally stored redaction targets so bodies, media references,
-/// and display names don't linger in memory or the on-disk snapshot while
-/// waiting for a server re-delivery. Unsigned metadata (notably the
-/// `redacted_because` stamp) is owned by the caller and left untouched.
+/// and display names don't linger on disk while waiting for a server
+/// re-delivery. Unsigned metadata (notably the `redacted_because`
+/// stamp) is owned by the caller and left untouched.
 public enum EventRedactor {
     /// Prune `content` to the keys the redaction algorithm preserves for
     /// `type`. Message-like, encrypted, and unknown types keep nothing.

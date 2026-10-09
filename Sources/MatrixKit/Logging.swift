@@ -37,6 +37,4 @@ enum MatrixKitLog {
     /// SAS verification flows (`VerificationMonitor`).
     static let verification = Logger(
         subsystem: matrixKitSubsystem, category: "Verification")
-    /// Room-list fetch confirmations (`MatrixClient`).
-    static let roomList = Logger(subsystem: matrixKitSubsystem, category: "RoomList")
 }

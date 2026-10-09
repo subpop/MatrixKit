@@ -2,12 +2,12 @@ import Foundation
 import os
 
 /// Sliding sync engine (MSC4186 simplified sliding sync): runs the
-/// `POST` long-poll loop, parses responses, applies deltas to the store,
-/// and yields them to subscribers.
+/// `POST` long-poll loop, parses responses, applies deltas to its
+/// sinks, and yields them to subscribers.
 ///
-/// Runs alongside `SyncClient`, not instead of it: it feeds rooms through
-/// `StateStore.applySliding(_:)`, which routes per-room state without
-/// touching the v2 `syncToken`. The `pos` cursor lives here (in memory).
+/// Runs alongside `SyncClient`, not instead of it: rooms route through
+/// `applySliding` (not `apply`), which leaves the v2 `syncToken`
+/// untouched. The `pos` cursor lives here (in memory).
 /// Accepts the same `SyncCryptoHooks` as `SyncClient` so one
 /// `MatrixClient.configureEncryption()` call arms both engines.
 public actor SlidingSyncClient {
@@ -35,9 +35,11 @@ public actor SlidingSyncClient {
 
     private let transport: MatrixTransport
     private let session: Session
-    private let store: StateStore
     private let endpointPath: String
     private var cryptoHooks: SyncCryptoHooks?
+    /// Delta consumers. Failures are logged, never thrown: the next
+    /// batch replays from the first sink's cursor.
+    private var sinks: [any SyncDeltaSink] = []
     private var currentTask: Task<Void, Never>?
     private var connId = ""
     private var currentPos: String?
@@ -50,12 +52,12 @@ public actor SlidingSyncClient {
     public init(
         transport: MatrixTransport,
         session: Session,
-        store: StateStore,
+        sinks: [any SyncDeltaSink] = [],
         endpointPath: String = defaultEndpointPath
     ) {
         self.transport = transport
         self.session = session
-        self.store = store
+        self.sinks = sinks
         self.endpointPath = endpointPath
     }
 
@@ -63,6 +65,16 @@ public actor SlidingSyncClient {
     /// `SyncCryptoHooks`). Replaces any previous hooks.
     public func setCryptoHooks(_ hooks: SyncCryptoHooks?) {
         cryptoHooks = hooks
+    }
+
+    /// Register an extra delta consumer.
+    public func addDeltaSink(_ sink: any SyncDeltaSink) {
+        sinks.append(sink)
+    }
+
+    /// Drop all delta consumers.
+    public func clearDeltaSinks() {
+        sinks.removeAll()
     }
 
     /// Current `pos` cursor. Nil before the first successful response;
@@ -221,7 +233,14 @@ public actor SlidingSyncClient {
         }
         var delta = SlidingSyncResponseParser.parse(response)
         delta = await applySyncCryptoHooks(cryptoHooks, to: delta)
-        await store.applySliding(delta)
+        for sink in sinks {
+            do {
+                try await sink.applySliding(delta)
+            } catch {
+                MatrixKitLog.slidingSync.error(
+                    "Delta sink failed: \(error, privacy: .public)")
+            }
+        }
         return delta
     }
 }

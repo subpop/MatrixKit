@@ -14,7 +14,7 @@ struct SlidingSyncE2EETests {
             deviceId: DeviceId("D"),
             accessToken: "t")
         let client = SlidingSyncClient(
-            transport: transport, session: session, store: StateStore())
+            transport: transport, session: session)
         return (client, transport)
     }
 

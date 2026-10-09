@@ -3,13 +3,22 @@ public actor SpacesClient {
     private let transport: MatrixTransport
     private let session: Session
     private let roomState: RoomStateClient
-    private let store: StateStore
+    private var provider: (any RoomStateProvider)?
 
-    public init(transport: MatrixTransport, session: Session, store: StateStore) {
+    public init(
+        transport: MatrixTransport, session: Session,
+        provider: (any RoomStateProvider)? = nil
+    ) {
         self.transport = transport
         self.session = session
         self.roomState = RoomStateClient(transport: transport, session: session)
-        self.store = store
+        self.provider = provider
+    }
+
+    /// Set the local-state provider for hierarchy caching and join-state
+    /// enrichment. Nil (the default) serves everything from the network.
+    public func setProvider(_ provider: (any RoomStateProvider)?) {
+        self.provider = provider
     }
 
     private func token() async throws(MatrixError) -> String {
@@ -56,33 +65,29 @@ public actor SpacesClient {
             children.append(await makeChild(from: dto))
         }
         let nextBatch = response.nextBatch.map { BatchToken($0) }
-        // Cache the page on the space's actor so the detail view's next
-        // open renders from the on-disk snapshot. Fresh loads overwrite;
-        // follow-up pages append to the stored rows. Edges update whenever
-        // a page carries the space's own entry.
+        // Cache the page on the space's entry so the detail view's next
+        // open renders from disk. Fresh loads overwrite; follow-up pages
+        // append to the stored rows. Edges update whenever a page carries
+        // the space's own entry. Best-effort: the network result stands
+        // on its own when the cache write fails.
         if from == nil {
-            await store.setHierarchy(
+            try? await provider?.setHierarchy(
                 children, directChildren: directChildren,
                 nextBatch: nextBatch, for: spaceId)
-        } else if let space = await store.existingRoom(spaceId) {
-            await space.setHierarchy(
-                children: space.hierarchyChildren + children,
+        } else if let current = await provider?.roomState(spaceId) ?? nil {
+            try? await provider?.setHierarchy(
+                current.hierarchyChildren + children,
                 directChildren: directChildren.isEmpty
-                    ? space.hierarchyDirectChildren : directChildren,
-                nextBatch: nextBatch)
+                    ? current.hierarchyDirectChildren : directChildren,
+                nextBatch: nextBatch, for: spaceId)
         }
         return (children, directChildIds, directChildren, nextBatch)
     }
 
-    /// Map a hierarchy row, resolving local join state from the store.
+    /// Map a hierarchy row, resolving local join state from the cache.
     func makeChild(from dto: HierarchyRoom) async -> SpaceChild {
-        let joined: Bool
-        if let actor = await store.existingRoom(dto.roomId) {
-            joined = await actor.membership == .join
-        } else {
-            joined = false
-        }
-        return Self.mapChild(from: dto, isJoined: joined)
+        let membership = await provider?.roomState(dto.roomId)?.membership ?? nil
+        return Self.mapChild(from: dto, isJoined: membership == .join)
     }
 
     /// Map a hierarchy row (pure; join state supplied by the caller).
@@ -233,9 +238,9 @@ public actor SpacesClient {
             var childIds = Set<RoomId>()
             var isSpace = false
             var powerLevels: [String: AnyCodable]?
-            if let known = await store.existingRoom(parent) {
-                childIds = await known.spaceChildren
-                isSpace = await known.isSpace
+            if let known = await provider?.roomState(parent) ?? nil {
+                childIds = known.spaceChildren
+                isSpace = known.isSpace
             }
             if !isSpace || !childIds.contains(roomId) {
                 do {
@@ -291,14 +296,14 @@ public actor SpacesClient {
     public func editableSpaces() async throws(MatrixError) -> [EditableSpace] {
         let userId = await session.userId
         var result: [EditableSpace] = []
-        for spaceId in await store.spaceRoomIds() {
-            let actor = await store.room(spaceId)
-            // Prefer the persisted power levels (disk-backed snapshot) —
-            // `canManageChildren` then needs no per-space `getState` network
-            // fan-out. Fall back to the network only when power levels have
-            // never been captured (e.g. a freshly-joined space pre-sync).
+        for spaceId in await provider?.spaceRoomIds() ?? [] {
+            let cached = await provider?.roomState(spaceId) ?? nil
+            // Prefer the persisted power levels — `canManageChildren`
+            // then needs no per-space `getState` network fan-out. Fall
+            // back to the network only when power levels were never
+            // captured (e.g. a freshly-joined space pre-sync).
             let content: [String: AnyCodable]?
-            if let persisted = await actor.powerLevelsContent {
+            if let persisted = cached?.powerLevels {
                 content = persisted
             } else {
                 let state = try await roomState.getState(spaceId)
@@ -310,8 +315,8 @@ public actor SpacesClient {
             else { continue }
             result.append(EditableSpace(
                 roomId: spaceId,
-                name: await actor.name,
-                avatarURL: await actor.avatarURL))
+                name: cached?.name,
+                avatarURL: cached?.avatarURL.flatMap { try? MXCURI($0) }))
         }
         return result
     }

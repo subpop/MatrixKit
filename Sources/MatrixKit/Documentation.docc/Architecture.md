@@ -9,11 +9,11 @@ ones below it:
 
 ```
 ┌─────────────────────────────────────────────┐
-│ Observable   MatrixClient, ObservableRoom…  │  SwiftUI view models
+│ Observable   MatrixClient + view models      │  SwiftUI state
 ├─────────────────────────────────────────────┤
 │ Namespaces   Auth/Sync/Room/Message/Media…  │  One actor per API area
 ├─────────────────────────────────────────────┤
-│ Store        StateStore, RoomActor           │  Client-side state machine
+│ Store        MatrixStoreWriter/Reader        │  Normalized SwiftData rows
 ├─────────────────────────────────────────────┤
 │ Models       Sync, Room, Message, Auth…      │  Codable DTOs
 ├─────────────────────────────────────────────┤
@@ -40,22 +40,22 @@ and never re-encodes.
 ## Store and sync
 
 `SyncClient` parses each response into a `SyncDelta` (`SyncResponseParser`)
-and applies it to the `StateStore`, which routes per-room changes to
-`RoomActor` instances. `RoomActor` owns the timeline window (capped at 500
-events), member list, and metadata, and notifies observers via
-`AsyncStream<RoomUpdate>`.
-
-`StateStore.snapshot()` / `restore(_:)` convert the whole store to and
-from a `StoreSnapshot` — the interchange format for ``SnapshotCache``
-backends (`MatrixKitSQLite`, `MatrixKitSwiftData`).
+and fans it out to its sinks (`SyncDeltaSink`) — typically the
+`MatrixStoreWriter`, which folds every delta into normalized `@Model`
+rows (one per room, event, member, and space edge, keeping full event
+history). `MatrixStoreReader` (or `@Query` in SwiftUI) reads them back;
+`FocusedTimeline` / `ThreadTimeline` page explicit windows (permalinks,
+threads) through any `TimelinePaging` backend. Schema changes wipe and
+rebuild the store; live sync restores it.
 
 ## Observable layer
 
-`@Observable @MainActor` classes (`ObservableRoom`, `ObservableTimeline`,
-`ObservableRoomList`, …) subscribe to the actor layer and expose bindable
-state for SwiftUI. `MatrixClient` is the facade: it owns every namespace
-actor plus the store and session, and caches `ObservableRoom` instances
-per room ID.
+`@Observable @MainActor` view models (`ObservableTimelineEvent`,
+`ObservableUserProfile`, `ObservablePushRules`, …) resolve display-ready
+state from stored rows for SwiftUI. `MatrixClient` is the facade: it owns
+every namespace actor plus the session, and wires stores in
+(`addDeltaSink`, `setMarkerHealer`, `setCiphertextStore`,
+`setRoomStateProvider`).
 
 ## Concurrency model
 

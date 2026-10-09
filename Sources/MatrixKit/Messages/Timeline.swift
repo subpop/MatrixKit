@@ -1,7 +1,9 @@
-/// Per-room timeline facade: snapshots plus backwards pagination.
+/// Per-room timeline windows: pagers over explicit event ranges.
 ///
-/// Live events arrive via sync into the `RoomActor`; `paginateBack()` fetches
-/// older history through `/messages` and prepends it.
+/// Live timelines now come from the normalized store (`SDRoomEvent`
+/// rows via `MatrixStoreReader` or `@Query`); these detached windows
+/// serve event permalinks (`FocusedTimeline`) and thread roots
+/// (`ThreadTimeline`) through any `TimelinePaging` backend.
 import Foundation
 
 extension Array where Element == MessageEvent {
@@ -16,83 +18,13 @@ extension Array where Element == MessageEvent {
     }
 }
 
-public actor Timeline {
-    /// The room this timeline belongs to.
-    public let roomId: RoomId
-    private let messages: any TimelinePaging
-    private let room: RoomActor
-    private var isPaginating = false
-    /// Optional Megolm decryptor applied to paginated history
-    /// (same contract as `SyncCryptoHooks.decryptRoomEvent`).
-    private var decryptor:
-        (@Sendable (MessageEvent, RoomId) async -> MessageEvent?)?
-
-    public init(roomId: RoomId, messages: any TimelinePaging, room: RoomActor) {
-        self.roomId = roomId
-        self.messages = messages
-        self.room = room
-    }
-
-    /// Set the decryptor applied to events loaded by `paginateBack`.
-    public func setDecryptor(
-        _ decryptor:
-            (@Sendable (MessageEvent, RoomId) async -> MessageEvent?)?
-    ) {
-        self.decryptor = decryptor
-    }
-
-    /// Current in-memory events, oldest first.
-    public func events() async -> [MessageEvent] {
-        await room.timeline
-    }
-
-    /// Whether older history may exist (`prev_batch` cursor known).
-    public func canPaginateBack() async -> Bool {
-        await room.prevBatch != nil
-    }
-
-    /// Whether a `paginateBack` request is currently in flight.
-    public func paginationInProgress() -> Bool {
-        isPaginating
-    }
-
-    /// Load one page of older history. Returns the number of events loaded.
-    @discardableResult
-    public func paginateBack(limit: Int = 50) async throws(MatrixError) -> Int {
-        guard !isPaginating else { return 0 }
-        guard let from = await room.prevBatch else { return 0 }
-        isPaginating = true
-        defer { isPaginating = false }
-        let page = try await messages.paginate(roomId, from: from, limit: limit)
-        // `/messages dir=b` returns newest-first; the timeline reads oldest-first.
-        var chunk = Array(page.chunk.reversed())
-        if let decryptor {
-            var decrypted: [MessageEvent] = []
-            decrypted.reserveCapacity(chunk.count)
-            for event in chunk {
-                decrypted.append(await decryptor(event, roomId) ?? event)
-            }
-            chunk = decrypted
-        }
-        // `/messages` pages can overlap the live window; drop repeats.
-        let known = Set(await room.timeline.map(\.eventId))
-        chunk.removeAll { known.contains($0.eventId) }
-        await room.prependHistory(
-            chunk, prevBatch: page.end.map { BatchToken($0) })
-        return chunk.count
-    }
-
-    /// Room updates (new events, state, typing, ...) for live UI.
-    public func updates() async -> AsyncStream<RoomUpdate> {
-        await room.updates()
-    }
-
+extension Array where Element == MessageEvent {
     /// Find a reaction event by target, key, and sender (for toggling
     /// reactions off, which needs the reaction's event ID).
-    public func reactionEvent(
+    func reactionEvent(
         target: EventId, key: String, sender: UserId
-    ) async -> EventId? {
-        for event in await room.timeline {
+    ) -> EventId? {
+        for event in self {
             guard EventType(rawValue: event.type) == .reaction,
                 !event.isRedacted,
                 event.sender == sender,
@@ -109,8 +41,8 @@ public actor Timeline {
 }
 
 /// Event-context window: a stable snapshot around one event, pageable
-/// in both directions. Unlike `Timeline` this is detached from the live
-/// `RoomActor` window — used for event permalinks and thread roots.
+/// in both directions. Detached from live sync — used for event
+/// permalinks and thread roots.
 /// Forward pages assume `/messages` `dir=f` returns oldest-first.
 public actor FocusedTimeline {
     /// The room this window belongs to.
@@ -212,8 +144,7 @@ public actor FocusedTimeline {
 }
 
 /// Thread view: the root event plus its `m.thread` replies, oldest
-/// first. Detached from the live `RoomActor` window like
-/// `FocusedTimeline`.
+/// first. Detached from live sync like `FocusedTimeline`.
 public actor ThreadTimeline {
     /// The room the thread belongs to.
     public let roomId: RoomId

@@ -14,16 +14,13 @@ sync decrypt timelines and process device updates identically.
 ```swift
 try await client.configureEncryption()
 
-// Encrypted send (falls back to plaintext in unencrypted rooms):
-try await room.send(text: "Secret hello")
-
-// Or explicitly:
+// Encrypted send to an encrypted room:
 try await client.sendEncryptedContent(
     roomId, MessageContent.markdown("Secret hello"))
 ```
 
-`ObservableRoom.isEncrypted` reports whether a room encrypts; undecryptable
-timeline events surface with their session details so the UI can offer
+Stored room rows carry `isEncrypted`; undecryptable timeline events
+surface with their session details so the UI can offer
 `retryTimelineDecryption()` after keys arrive.
 
 ### Olm device messaging

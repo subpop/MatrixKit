@@ -17,10 +17,6 @@ let package = Package(
             targets: ["MatrixKitCrypto"]
         ),
         .library(
-            name: "MatrixKitSQLite",
-            targets: ["MatrixKitSQLite"]
-        ),
-        .library(
             name: "MatrixKitSwiftData",
             targets: ["MatrixKitSwiftData"]
         ),
@@ -57,18 +53,6 @@ let package = Package(
                 .product(name: "Crypto", package: "swift-crypto")
             ]
         ),
-        .systemLibrary(
-            name: "CSQLite",
-            pkgConfig: "sqlite3",
-            providers: [
-                .brew(["sqlite"]),
-                .apt(["libsqlite3-dev"]),
-            ]
-        ),
-        .target(
-            name: "MatrixKitSQLite",
-            dependencies: ["MatrixKit", "CSQLite"]
-        ),
         .target(
             name: "MatrixKitSwiftData",
             dependencies: ["MatrixKit"]
@@ -95,7 +79,7 @@ let package = Package(
         .testTarget(
             name: "MatrixKitTests",
             dependencies: [
-                "MatrixKit", "MatrixKitCrypto", "MatrixKitSQLite", "MatrixKitSwiftData",
+                "MatrixKit", "MatrixKitCrypto", "MatrixKitSwiftData",
                 "MatrixKitTesting",
             ]
         ),
@@ -106,7 +90,6 @@ let package = Package(
             dependencies: [
                 "MatrixKit",
                 "MatrixKitCrypto",
-                "MatrixKitSQLite",
                 "MatrixKitSwiftData",
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
@@ -119,7 +102,6 @@ let package = Package(
             dependencies: [
                 "MatrixKit",
                 "MatrixKitCrypto",
-                "MatrixKitSQLite",
                 "MatrixKitSwiftData",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ]

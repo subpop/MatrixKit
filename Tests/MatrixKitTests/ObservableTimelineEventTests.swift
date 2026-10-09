@@ -366,18 +366,13 @@ struct ObservableTimelineEventTests {
 @Suite("ObservableTimeline highlights and reactions")
 @MainActor
 struct ObservableTimelineHighlightTests {
-    private func timeline(
-        events: [MessageEvent], localUser: UserId? = UserId(unchecked: "@alice:x")
-    ) async -> ObservableTimeline {
-        let room = RoomActor(roomId: RoomId(unchecked: "!r:x"))
-        for event in events {
-            await room.appendLocalEcho(event)
-        }
-        return await ObservableTimeline(
-            timeline: Timeline(roomId: RoomId(unchecked: "!r:x"), messages: FakePager(), room: room),
-            room: room,
-            messages: FakePager(),
-            localUser: localUser)
+    private func rendered(
+        events: [MessageEvent], localUser: UserId? = UserId(unchecked: "@alice:x"),
+        highlightKeywords: [String] = []
+    ) -> [ObservableTimelineEvent] {
+        ObservableTimelineEvent.render(
+            events, localUser: localUser,
+            highlightKeywords: highlightKeywords)
     }
 
     @Test("Self-mention highlights with the local user flagged")
@@ -387,27 +382,25 @@ struct ObservableTimelineHighlightTests {
             "body": .string("hi alice"),
             "m.mentions": .object(["user_ids": .array([.string("@alice:x")])]),
         ])
-        let timeline = await timeline(events: [event])
-        #expect(timeline.events.count == 1)
-        #expect(timeline.events[0].isHighlighted)
-        #expect(timeline.events[0].highlightedMentionUserId == UserId(unchecked: "@alice:x"))
+        let events = rendered(events: [event])
+        #expect(events.count == 1)
+        #expect(events[0].isHighlighted)
+        #expect(events[0].highlightedMentionUserId == UserId(unchecked: "@alice:x"))
     }
 
     @Test("Keyword match highlights and records the keyword")
     func keyword() async {
         let event = messageEvent(content: textContent("deploy the thing"))
-        let timeline = await timeline(events: [event])
-        timeline.highlightKeywords = ["deploy"]
-        await timeline.refresh()
-        #expect(timeline.events[0].isHighlighted)
-        #expect(timeline.events[0].highlightKeywords == ["deploy"])
+        let events = rendered(events: [event], highlightKeywords: ["deploy"])
+        #expect(events[0].isHighlighted)
+        #expect(events[0].highlightKeywords == ["deploy"])
     }
 
     @Test("Plain message is not highlighted")
     func plain() async {
         let event = messageEvent(content: textContent("just chatting"))
-        let timeline = await timeline(events: [event])
-        #expect(!timeline.events[0].isHighlighted)
+        let events = rendered(events: [event])
+        #expect(!events[0].isHighlighted)
     }
 
     @Test("Own reactions are flagged on the target")
@@ -427,10 +420,10 @@ struct ObservableTimelineHighlightTests {
                 "rel_type": .string("m.annotation"),
                 "key": .string("👍"),
             ])])
-        let timeline = await timeline(events: [message, reaction])
-        #expect(timeline.events.count == 1)
-        #expect(timeline.events[0].reactions["👍"] == [UserId(unchecked: "@alice:x")])
-        #expect(timeline.events[0].ownReactions == ["👍"])
+        let events = rendered(events: [message, reaction])
+        #expect(events.count == 1)
+        #expect(events[0].reactions["👍"] == [UserId(unchecked: "@alice:x")])
+        #expect(events[0].ownReactions == ["👍"])
     }
 
     @Test("Staged echo reactions aggregate immediately")
@@ -453,10 +446,10 @@ struct ObservableTimelineHighlightTests {
                 "key": .string("🎉"),
             ])],
             unsigned: ["transaction_id": .string("t1")])
-        let timeline = await timeline(events: [message, echo])
-        #expect(timeline.events.count == 1)
-        #expect(timeline.events[0].reactions["🎉"] == [UserId(unchecked: "@alice:x")])
-        #expect(timeline.events[0].ownReactions == ["🎉"])
+        let events = rendered(events: [message, echo])
+        #expect(events.count == 1)
+        #expect(events[0].reactions["🎉"] == [UserId(unchecked: "@alice:x")])
+        #expect(events[0].ownReactions == ["🎉"])
     }
 
     @Test("Redacted reactions are excluded from aggregation")
@@ -481,10 +474,10 @@ struct ObservableTimelineHighlightTests {
             unsigned: ["redacted_because": .object([
                 "event_id": .string("$redaction:x"),
             ])])
-        let timeline = await timeline(events: [message, reaction])
-        #expect(timeline.events.count == 1)
-        #expect(timeline.events[0].reactions.isEmpty)
-        #expect(timeline.events[0].ownReactions.isEmpty)
+        let events = rendered(events: [message, reaction])
+        #expect(events.count == 1)
+        #expect(events[0].reactions.isEmpty)
+        #expect(events[0].ownReactions.isEmpty)
     }
 
     @Test("Redaction events do not render as deleted bubbles")
@@ -505,11 +498,11 @@ struct ObservableTimelineHighlightTests {
             unsigned: ["transaction_id": .string("txn1")])
         var redactionWithTarget = redaction
         redactionWithTarget.redacts = EventId(unchecked: "$reaction:x")
-        let timeline = await timeline(events: [message, redactionWithTarget])
-        #expect(timeline.events.count == 1)
-        if case .text = timeline.events[0].kind {
+        let timeline = ObservableTimelineEvent.render([message, redactionWithTarget])
+        #expect(timeline.count == 1)
+        if case .text = timeline[0].kind {
         } else {
-            Issue.record("Expected the plain message, got \(timeline.events[0].kind)")
+            Issue.record("Expected the plain message, got \(timeline[0].kind)")
         }
     }
 
@@ -524,12 +517,12 @@ struct ObservableTimelineHighlightTests {
             unsigned: ["redacted_because": .object([
                 "event_id": .string("$redaction:x"),
             ])])
-        let timeline = await timeline(events: [message])
-        #expect(timeline.events.count == 1)
-        #expect(timeline.events[0].isRedacted)
-        if case .redacted = timeline.events[0].kind {
+        let timeline = ObservableTimelineEvent.render([message])
+        #expect(timeline.count == 1)
+        #expect(timeline[0].isRedacted)
+        if case .redacted = timeline[0].kind {
         } else {
-            Issue.record("Expected .redacted, got \(timeline.events[0].kind)")
+            Issue.record("Expected .redacted, got \(timeline[0].kind)")
         }
     }
 
@@ -557,14 +550,14 @@ struct ObservableTimelineHighlightTests {
                     "event_id": .string("$target:x"),
                 ]),
             ])
-        let timeline = await timeline(events: [message, edit])
-        #expect(timeline.events.count == 1)
-        if case .text(let body) = timeline.events[0].kind {
+        let timeline = ObservableTimelineEvent.render([message, edit])
+        #expect(timeline.count == 1)
+        if case .text(let body) = timeline[0].kind {
             #expect(body == "hello world")
         } else {
-            Issue.record("Expected folded .text, got \(timeline.events[0].kind)")
+            Issue.record("Expected folded .text, got \(timeline[0].kind)")
         }
-        #expect(timeline.events[0].isEdited)
+        #expect(timeline[0].isEdited)
     }
 
     @Test("Reply resolves its parent with sender name")
@@ -582,16 +575,9 @@ struct ObservableTimelineHighlightTests {
             "m.relates_to": .object([
                 "m.in_reply_to": .object(["event_id": .string("$parent:x")])]),
         ])
-        let room = RoomActor(roomId: RoomId(unchecked: "!r:x"))
-        await room.appendLocalEcho(parent)
-        await room.appendLocalEcho(reply)
-        let timeline = await ObservableTimeline(
-            timeline: Timeline(
-                roomId: RoomId(unchecked: "!r:x"), messages: FakePager(), room: room),
-            room: room,
-            messages: FakePager(),
-            localUser: UserId(unchecked: "@alice:x"))
-        let rendered = timeline.events.first { $0.reply != nil }
+        let timeline = ObservableTimelineEvent.render(
+            [parent, reply], localUser: UserId(unchecked: "@alice:x"))
+        let rendered = timeline.first { $0.reply != nil }
         #expect(rendered?.reply?.body == "parent body")
         #expect(rendered?.reply?.eventID == parentId)
         #expect(rendered?.reply?.displayName == "@bob:x")
@@ -605,9 +591,9 @@ struct ObservableTimelineHighlightTests {
             "m.relates_to": .object([
                 "m.in_reply_to": .object(["event_id": .string("$missing:x")])]),
         ])
-        let timeline = await timeline(events: [reply])
-        #expect(timeline.events.count == 1)
-        #expect(timeline.events[0].reply == nil)
+        let events = ObservableTimelineEvent.render([reply])
+        #expect(events.count == 1)
+        #expect(events[0].reply == nil)
     }
 }
 
@@ -660,16 +646,8 @@ struct JoinCoalescingTests {
             ])
     }
 
-    private func timeline(events: [MessageEvent]) async -> ObservableTimeline {
-        let room = RoomActor(roomId: RoomId(unchecked: "!r:x"))
-        for event in events {
-            await room.appendLocalEcho(event)
-        }
-        return await ObservableTimeline(
-            timeline: Timeline(roomId: RoomId(unchecked: "!r:x"), messages: FakePager(), room: room),
-            room: room,
-            messages: FakePager(),
-            localUser: nil)
+    private func rendered(events: [MessageEvent]) -> [ObservableTimelineEvent] {
+        ObservableTimelineEvent.render(events)
     }
 
     @Test("Initial join carrying a profile renders as a join, not a profile change")
@@ -752,9 +730,9 @@ struct JoinCoalescingTests {
         let profile = harness.memberEvent(
             user: "@cresh:x", membership: "join", displayName: "Cresh",
             prevMembership: "join")
-        let timeline = await harness.timeline(events: [join, profile])
-        #expect(timeline.events.count == 1)
-        #expect(timeline.events[0].kind == .state(
+        let timeline = await harness.rendered(events: [join, profile])
+        #expect(timeline.count == 1)
+        #expect(timeline[0].kind == .state(
             type: "m.room.member", description: "@cresh:x joined"))
     }
 
@@ -766,9 +744,9 @@ struct JoinCoalescingTests {
         let profile = harness.memberEvent(
             user: "@cresh:x", membership: "join", displayName: "Cresh",
             prevMembership: "join")
-        let timeline = await harness.timeline(events: [join, chat, profile])
-        #expect(timeline.events.count == 2)
-        #expect(timeline.events[0].kind == .state(
+        let timeline = await harness.rendered(events: [join, chat, profile])
+        #expect(timeline.count == 2)
+        #expect(timeline[0].kind == .state(
             type: "m.room.member", description: "@cresh:x joined"))
     }
 
@@ -780,11 +758,11 @@ struct JoinCoalescingTests {
         let rename = harness.memberEvent(
             user: "@alice:x", membership: "join", displayName: "Alicia",
             prevMembership: "join", prevDisplayName: "Alice")
-        let timeline = await harness.timeline(events: [join, chat, rename])
-        #expect(timeline.events.count == 3)
-        if case .profileChange = timeline.events[2].kind {
+        let timeline = await harness.rendered(events: [join, chat, rename])
+        #expect(timeline.count == 3)
+        if case .profileChange = timeline[2].kind {
         } else {
-            Issue.record("Expected .profileChange, got \(timeline.events[2].kind)")
+            Issue.record("Expected .profileChange, got \(timeline[2].kind)")
         }
     }
 
@@ -795,8 +773,8 @@ struct JoinCoalescingTests {
         let rename = harness.memberEvent(
             user: "@alice:x", membership: "join", displayName: "Alicia",
             prevMembership: "join", prevDisplayName: "Alice")
-        let timeline = await harness.timeline(events: [join, rename])
-        #expect(timeline.events.count == 2)
+        let timeline = await harness.rendered(events: [join, rename])
+        #expect(timeline.count == 2)
     }
 
     @Test("Leave ends the fresh-join window")
@@ -805,8 +783,8 @@ struct JoinCoalescingTests {
         let join = harness.memberEvent(user: "@cresh:x", membership: "join")
         let leave = harness.memberEvent(
             user: "@cresh:x", membership: "leave", prevMembership: "join")
-        let timeline = await harness.timeline(events: [join, leave])
-        #expect(timeline.events.count == 2)
+        let timeline = await harness.rendered(events: [join, leave])
+        #expect(timeline.count == 2)
     }
 
     @Test("Profile-less leave resolves the name from pre-transition content")
@@ -824,13 +802,10 @@ struct JoinCoalescingTests {
     @Test("Profile-less leave keeps the stored display name after sync state")
     func leaveKeepsStoredProfile() async {
         var harness = self
-        let join = harness.memberEvent(
-            user: "@cresh:x", membership: "join", displayName: "Cresh")
         let leave = harness.memberEvent(user: "@cresh:x", membership: "leave")
-        let room = RoomActor(roomId: RoomId(unchecked: "!r:x"))
-        await room.applyJoined(JoinedRoomDelta(timeline: [join, leave]))
-        let members = await room.members
-        #expect(members[UserId(unchecked: "@cresh:x")]?.displayname == "Cresh")
+        // Sync state kept the profile despite the bare leave event.
+        let members = [UserId(unchecked: "@cresh:x"): MemberContent(
+            membership: .leave, displayname: "Cresh")]
         let wrapper = ObservableTimelineEvent.make(
             from: leave, localUser: nil, members: members)
         #expect(wrapper.kind == .state(

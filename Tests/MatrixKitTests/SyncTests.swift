@@ -134,122 +134,25 @@ struct SyncResponseParserTests {
         #expect(json.contains("event_fields"))
         #expect(json.contains("\"limit\":10"))
     }
-}
 
-@Suite("StateStore")
-struct StateStoreTests {
-    private func message(
-        _ body: String, sender: String = "@alice:example.com", id: String = "$e"
-    ) -> MessageEvent {
-        MessageEvent(
-            type: "m.room.message",
-            eventId: EventId(unchecked: id),
-            sender: UserId(unchecked: sender),
-            originServerTs: 1_700_000_000_000,
-            content: ["msgtype": .string("m.text"), "body": .string(body)]
-        )
-    }
-
-    private func stateEvent(type: String, stateKey: String, content: [String: AnyCodable]) -> MessageEvent {
-        MessageEvent(
-            type: type,
-            eventId: EventId(unchecked: "$s"),
-            sender: UserId(unchecked: "@alice:example.com"),
-            stateKey: stateKey,
-            originServerTs: 1_700_000_000_000,
-            content: content
-        )
-    }
-
-    @Test("Applies joined deltas: name, members, timeline, unreads")
-    func applyJoined() async {
-        let store = StateStore()
-        let roomId = RoomId(unchecked: "!r:example.com")
-        let delta = SyncDelta(
-            nextBatch: BatchToken("s2"),
-            joined: [roomId: JoinedRoomDelta(
-                timeline: [message("hi")],
-                state: [
-                    stateEvent(
-                        type: "m.room.name", stateKey: "",
-                        content: ["name": .string("General")]),
-                    stateEvent(
-                        type: "m.room.member", stateKey: "@alice:example.com",
-                        content: [
-                            "membership": .string("join"),
-                            "displayname": .string("Alice"),
-                        ]),
-                ],
-                unreadCount: 2,
-                highlightCount: 1
-            )]
-        )
-        await store.apply(delta)
-        #expect(await store.syncToken?.value == "s2")
-        let room = await store.room(roomId)
-        #expect(await room.name == "General")
-        #expect(await room.timeline.count == 1)
-        #expect(await room.unreadCount == 2)
-        #expect(await room.highlightCount == 1)
-        let members = await room.members
-        #expect(members[UserId(unchecked: "@alice:example.com")]?.displayname == "Alice")
-        let info = await room.info()
-        #expect(info.name == "General")
-    }
-
-    @Test("Limited timeline replaces the window instead of appending")
-    func limitedReset() async {
-        let store = StateStore()
-        let roomId = RoomId(unchecked: "!r:example.com")
-        await store.apply(
-            SyncDelta(
-                nextBatch: BatchToken("s1"),
-                joined: [roomId: JoinedRoomDelta(timeline: [message("old", id: "$old")])]))
-        await store.apply(
-            SyncDelta(
-                nextBatch: BatchToken("s2"),
-                joined: [roomId: JoinedRoomDelta(
-                    timeline: [message("new", id: "$new")], timelineLimited: true)]))
-        let room = await store.room(roomId)
-        let timeline = await room.timeline
-        #expect(timeline.count == 1)
-        #expect(timeline.first?.eventId == EventId(unchecked: "$new"))
-    }
-
-    @Test("Invite deltas set membership to invite")
-    func applyInvite() async {
-        let store = StateStore()
-        let roomId = RoomId(unchecked: "!r:example.com")
-        await store.apply(
-            SyncDelta(
-                nextBatch: BatchToken("s1"),
-                invited: [roomId: InvitedRoomDelta(events: [
-                    StrippedStateEvent(
-                        type: "m.room.member", stateKey: "@me:example.com",
-                        sender: UserId(unchecked: "@carol:example.com"),
-                        content: ["membership": .string("invite")])
-                ])]))
-        let room = await store.room(roomId)
-        #expect(await room.membership == .invite)
-        #expect(await store.invitedRoomIds() == [roomId])
-    }
-
-    @Test("Typing ephemeral updates typing users")
-    func typing() async {
-        let store = StateStore()
-        let roomId = RoomId(unchecked: "!r:example.com")
-        // The server echoes our own typing notification (m.typing with our
-        // user ID) back via sync; it must not show up as typing.
-        await store.room(roomId).setLocalUser(UserId(unchecked: "@me:example.com"))
-        let typingEvent = BasicEvent(
-            type: "m.typing",
-            content: ["user_ids": .array([.string("@bob:example.com"), .string("@me:example.com")])]
-        )
-        await store.apply(
-            SyncDelta(
-                nextBatch: BatchToken("s1"),
-                joined: [roomId: JoinedRoomDelta(ephemeral: [typingEvent])]))
-        let room = await store.room(roomId)
-        #expect(await room.typingUsers == [UserId(unchecked: "@bob:example.com")])
+    @Test("Parser captures room account data for joined and left rooms")
+    func parserAccountData() throws {
+        let json = """
+        {
+          "next_batch": "s1",
+          "rooms": {
+            "join": {"!r:x": {"account_data": {"events": [
+                {"type": "m.tag", "content": {"tags": {"m.favourite": {}}}}
+            ]}}},
+            "leave": {"!l:x": {"account_data": {"events": [
+                {"type": "m.tag", "content": {"tags": {}}}
+            ]}}}
+          }
+        }
+        """.data(using: .utf8)!
+        let response = try JSONDecoder().decode(SyncResponse.self, from: json)
+        let delta = SyncResponseParser.parse(response)
+        #expect(delta.joined[RoomId(unchecked: "!r:x")]?.accountData.map(\.type) == ["m.tag"])
+        #expect(delta.left[RoomId(unchecked: "!l:x")]?.accountData.map(\.type) == ["m.tag"])
     }
 }

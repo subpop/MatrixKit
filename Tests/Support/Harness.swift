@@ -145,11 +145,11 @@ public actor Harness {
         return (AuthClient(transport: transport, session: session), session, transport)
     }
 
-    /// A `SyncClient` wired to this harness, with its own store.
+    /// A `SyncClient` wired to this harness, with no sinks.
     /// The transport is owned by the harness (`shutdownClients`).
     public func syncClient(
         token: String? = "harness-token-alice"
-    ) -> (sync: SyncClient, connection: SyncConnection, store: StateStore, session: Session, transport: MatrixTransport) {
+    ) -> (sync: SyncClient, connection: SyncConnection, session: Session, transport: MatrixTransport) {
         let transport = MatrixTransport(homeserver: baseURL)
         clients.append(transport)
         let session = Session(
@@ -158,10 +158,9 @@ public actor Harness {
             deviceId: DeviceId("ALICEDEVICE"),
             accessToken: token ?? ""
         )
-        let store = StateStore()
         let connection = SyncConnection(transport: transport, session: session)
-        let sync = SyncClient(connection: connection, store: store, session: session)
-        return (sync, connection, store, session, transport)
+        let sync = SyncClient(connection: connection, session: session)
+        return (sync, connection, session, transport)
     }
 
     /// A `RoomClient` wired to this harness.
@@ -298,11 +297,11 @@ public actor Harness {
         return (MediaClient(transport: transport, session: session), session, transport)
     }
 
-    /// A `SearchClient` wired to this harness, with its own store.
+    /// A `SearchClient` wired to this harness, with no state provider.
     /// The transport is owned by the harness (`shutdownClients`).
     public func searchClient(
         token: String? = "harness-token-alice"
-    ) -> (search: SearchClient, store: StateStore, session: Session, transport: MatrixTransport) {
+    ) -> (search: SearchClient, session: Session, transport: MatrixTransport) {
         let transport = MatrixTransport(homeserver: baseURL)
         clients.append(transport)
         let session = Session(
@@ -311,8 +310,7 @@ public actor Harness {
             deviceId: DeviceId("ALICEDEVICE"),
             accessToken: token ?? ""
         )
-        let store = StateStore()
-        return (SearchClient(transport: transport, session: session, store: store), store, session, transport)
+        return (SearchClient(transport: transport, session: session), session, transport)
     }
 
     /// A `KeyBackup` wired to this harness.
@@ -371,11 +369,11 @@ public actor Harness {
         return (OIDCClient(transport: transport), transport)
     }
 
-    /// A `SpacesClient` wired to this harness, with its own store.
+    /// A `SpacesClient` wired to this harness, with no state provider.
     /// The transport is owned by the harness (`shutdownClients`).
     public func spacesClient(
         token: String? = "harness-token-alice"
-    ) -> (spaces: SpacesClient, store: StateStore, session: Session, transport: MatrixTransport) {
+    ) -> (spaces: SpacesClient, session: Session, transport: MatrixTransport) {
         let transport = MatrixTransport(homeserver: baseURL)
         clients.append(transport)
         let session = Session(
@@ -384,15 +382,14 @@ public actor Harness {
             deviceId: DeviceId("ALICEDEVICE"),
             accessToken: token ?? ""
         )
-        let store = StateStore()
-        return (SpacesClient(transport: transport, session: session, store: store), store, session, transport)
+        return (SpacesClient(transport: transport, session: session), session, transport)
     }
 
-    /// A `SlidingSyncClient` wired to this harness, with its own store.
+    /// A `SlidingSyncClient` wired to this harness, with no sinks.
     /// The transport is owned by the harness (`shutdownClients`).
     public func slidingSyncClient(
         token: String? = "harness-token-alice"
-    ) -> (sliding: SlidingSyncClient, store: StateStore, session: Session, transport: MatrixTransport) {
+    ) -> (sliding: SlidingSyncClient, session: Session, transport: MatrixTransport) {
         let transport = MatrixTransport(homeserver: baseURL)
         clients.append(transport)
         let session = Session(
@@ -401,8 +398,7 @@ public actor Harness {
             deviceId: DeviceId("ALICEDEVICE"),
             accessToken: token ?? ""
         )
-        let store = StateStore()
-        return (SlidingSyncClient(transport: transport, session: session, store: store), store, session, transport)
+        return (SlidingSyncClient(transport: transport, session: session), session, transport)
     }
 
     /// A client with no credentials — SDK calls must throw

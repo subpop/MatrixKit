@@ -4,10 +4,9 @@
 #   Tools/coverage.sh [--min N]
 #
 # Runs the full suite with coverage, then reports line coverage per
-# library target (MatrixKit, MatrixKitCrypto, MatrixKitSQLite,
-# MatrixKitSwiftData, MatrixRTC). Test support (Tests/Support),
-# the test suites themselves, and the mx CLI are excluded — the gate
-# measures shipped SDK surface only.
+# library target (MatrixKit, MatrixKitCrypto, MatrixKitSwiftData,
+# MatrixRTC). Test support (Tests/Support), the test suites themselves,
+# and the mx CLI are excluded — the gate measures shipped SDK surface only.
 #
 # --min N fails when any library target drops below N percent.
 # --no-run reuses the last profdata/test binaries instead of re-running
@@ -57,7 +56,7 @@ from collections import defaultdict
 data = json.load(open(sys.argv[1]))
 floor = float(sys.argv[2])
 targets = ["Sources/MatrixKit/", "Sources/MatrixKitCrypto/",
-           "Sources/MatrixKitSQLite/", "Sources/MatrixKitSwiftData/",
+           "Sources/MatrixKitSwiftData/",
            "Sources/MatrixRTC/"]
 agg = {t: [0, 0] for t in targets}  # covered, total
 

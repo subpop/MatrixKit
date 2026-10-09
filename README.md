@@ -15,7 +15,6 @@ Megolm room encryption (see [Scope](#scope)).
 |---|---|
 | Swift | 6.3+ (language mode `.v6`) |
 | Platforms | macOS 26+, iOS 26+ |
-| SQLite cache | system `sqlite3` (`brew install sqlite` / `libsqlite3-dev`) |
 
 ## Installation
 
@@ -27,9 +26,8 @@ Add the package and depend on the products you need:
 
 | Product | Contents | When to use it |
 |---|---|---|
-| `MatrixKit` | Core SDK: transport, auth, sync engine, rooms, messages, media, profile, push, store, `@Observable` layer | Always |
-| `MatrixKitSQLite` | `SQLiteCache`: Linux-portable snapshot cache over the system `sqlite3` | Caching on any platform, including Linux |
-| `MatrixKitSwiftData` | `SwiftDataCache`: snapshot cache backed by SwiftData | Apple-only apps that already use SwiftData |
+| `MatrixKit` | Core SDK: transport, auth, sync engine, rooms, messages, media, profile, push, `@Observable` layer | Always |
+| `MatrixKitSwiftData` | Normalized persistent store: `SDRoom`/`SDRoomEvent`/`SDRoomMember` `@Model` schema, `MatrixStoreWriter` (sync fold), `MatrixStoreReader` (fetch reads) | Persisting rooms and timelines on Apple platforms |
 
 ```swift
 .target(name: "MyApp", dependencies: [
@@ -56,19 +54,36 @@ let client = try await MatrixClient.login(
     deviceDisplayName: "MyApp"
 )
 
-// 2. Initial sync, then live sync (room list refreshes per delta).
+// 2. Attach the normalized store, then initial sync + live sync
+// (deltas stream to subscribers/sinks).
+import MatrixKitSwiftData
+guard let userId = client.userId else {
+    fatalError("Login must set userId")
+}
+let container = try MatrixStore.makeContainer(
+    at: MatrixStore.databaseURL(for: userId, in: directory))
+let writer = MatrixStoreWriter(modelContainer: container)
+try await writer.setLocalUser(userId) // receipts + own-message detection
+await client.addDeltaSink(writer)      // every sync delta persists
+client.setMarkerHealer(writer)         // read-marker healing covers it too
+client.setCiphertextStore(writer)       // late-key decryption refresh
+await client.setRoomStateProvider(      // space/search enrichment
+    NormalizedRoomStateProvider(modelContainer: container, writer: writer))
 try await client.syncOnce()
 try await client.startSync()
 
-// 3. Rooms.
-for room in client.roomList.joined {
-    print(room.name, room.unreadCount)
+// 3. Rooms (see below for the reader).
+let reader = MatrixStoreReader(modelContainer: container)
+let (joined, _) = try reader.roomEntries()
+for room in joined {
+    print(room.displayName, room.unread)
 }
 
 // 4. Open a room and send.
-let room = await client.room(RoomId(unchecked: "!abc:matrix.org"))
-try await room.send(text: "Hello, Matrix!")
-try await room.react(to: eventId, key: "👍")
+let roomId = RoomId(unchecked: "!abc:matrix.org")
+let window = try reader.timeline(roomId, limit: 50)
+try await client.messages.sendText(roomId, "Hello, Matrix!")
+try await client.messages.react(roomId, to: eventId, key: "👍")
 ```
 
 Restore a session from stored tokens (e.g. Keychain) instead of logging in:
@@ -132,8 +147,8 @@ try await client.startSync(filter: .leanInitial)
 
 For large accounts, the opt-in sliding sync engine (MSC4186 simplified
 sliding sync) fetches a window of rooms instead of full state. It shares
-`store` with v3 sync but keeps its own `pos` cursor, so the two loops can
-run side by side without thrashing the v2 sync token:
+the delta sinks with v3 sync but keeps its own `pos` cursor, so the two
+loops can run side by side without thrashing the v2 sync token:
 
 ```swift
 try await client.slidingSyncOnce()  // one round-trip, default 20-room window
@@ -150,42 +165,66 @@ timelines and processes device updates the same way the v3 loop does
 
 ## SwiftUI layer
 
-`@Observable`, MainActor-bound view models backed by the actor store:
+`@Observable`, MainActor-bound view models resolved from stored rows:
 
-- `MatrixClient.roomList` (`ObservableRoomList`) — `joined` / `invited`,
-  `totalUnread`, `totalHighlights`, `refresh()`
-- `client.room(_:)` → `ObservableRoom` — metadata, `members`, `timeline`,
-  typing, and actions (`send(text:)`, `reply(to:text:)`, `edit`,
-  `redact`, `react`, `invite`, `leave`, `loadMembers`, `markRead`,
-  `setTyping`, `setName`, `setTopic`)
-- `ObservableTimeline` / `ObservableTimelineEvent` — rendered timeline
-  with `loadMore()` pagination
+- `ObservableTimelineEvent` — rendered timeline event (classification,
+  reactions, edits, replies, mentions); build lists with
+  `ObservableTimelineEvent.render(_:members:localUser:highlightKeywords:sendStates:)`
+  over `@Query` rows
 - `ObservableUserProfile`, `ObservablePushRules` — profiles and push rules
+- `FocusedTimeline` / `ThreadTimeline` — explicit event windows
+  (permalinks, threads) with bidirectional pagination
 
-Rooms subscribe to `RoomActor.updates()` (`AsyncStream<RoomUpdate>`) so
-views converge as sync deltas land.
+Live sync deltas stream through `client.deltas()`; views converge as
+sinks persist them and `@Query` refreshes.
 
-## Snapshot caching
+## Normalized persistence
 
-`SnapshotCache` (`Store/SnapshotCache.swift`) is the persistence boundary:
-`save(_ snapshot:)`, `load() -> StoreSnapshot?`, `clear()`. The store
-serializes to `StoreSnapshot` and restores from it, so any backend plugs
-in — including your own.
+Sync deltas persist incrementally into a normalized SwiftData store
+(`MatrixKitSwiftData`) — one row per room, event, member, and space
+edge — so the next launch renders rooms from disk before sync
+completes, with the stored cursor turning the first sync incremental:
 
-- `SQLiteCache` (`MatrixKitSQLite`) — raw `sqlite3`, WAL mode, atomic
-  whole-snapshot replace. More portable.
-- `SwiftDataCache` (`MatrixKitSwiftData`) — `@Model` rows, same replace
-  semantics. Apple platforms only.
+```swift
+import MatrixKitSwiftData
 
-Cache files live per user under the caches directory:
+// Per-user file (or pass your own directory for app-group isolation).
+let container = try MatrixStore.makeContainer(
+    at: MatrixStore.databaseURL(for: userId, in: directory))
+let writer = MatrixStoreWriter(modelContainer: container)
+try await writer.setLocalUser(userId)
+await client.addDeltaSink(writer)   // every sync delta persists
+client.setMarkerHealer(writer)      // read-marker healing covers it too
+client.setCiphertextStore(writer)    // late-key decryption refresh
+await client.setRoomStateProvider(   // space/search enrichment
+    NormalizedRoomStateProvider(modelContainer: container, writer: writer))
+
+let reader = MatrixStoreReader(modelContainer: container)
+let (joined, invited) = try reader.roomEntries()
+let window = try reader.timeline(roomId, limit: 50)
+```
+
+The writer precomputes badge-driving state onto each room row
+(effective unread, first-unread event, read-marker timestamp), folds
+redactions into their targets, and tracks staged local echoes until
+sync confirms them — so reads stay simple fetches. Full event history
+is kept; no window trimming.
+
+SwiftUI views can also `@Query` the `@Model` types directly
+(`SDRoom.joinedDescriptor()`, `SDRoomEvent.timelineDescriptor(roomId:)`)
+and render with `ObservableTimelineEvent.render(...)`.
+
+The store file lives per user, per instance, under the caches directory:
 
 ```
-~/Library/Caches/MatrixKit/<sanitized-user-id>/{store.sqlite,store.swiftdata}
+~/Library/Caches/MatrixKit/[Debug/]<instance>/<sanitized-user-id>/matrix-store.swiftdata
 ```
 
-Migrations are clean-reset, not incremental: `SnapshotVersion.current`
-is checked on load and a mismatch wipes the file. That's safe because the
-snapshot is a transient cache — live sync rebuilds it.
+`Debug/` appears in debug builds so dev runs never touch release data;
+non-alphanumerics in instance names and user IDs become `_`
+(`@alice:matrix.org` → `_alice_matrix_org`). Schema changes are
+clean-reset, never migrated: a version mismatch wipes the file, and
+live sync rebuilds it.
 
 ## Debugging
 
@@ -200,9 +239,6 @@ MATRIXKIT_DEBUG=1        // → .debug
 MATRIXKIT_LOG_LEVEL=trace
 ```
 
-The `mx` CLI takes flags instead (`--log-level trace|debug|…`);
-`debug on` toggles it at runtime.
-
 Decode failures include the JSON path and a body snippet
 (`missing key 'device_id' at $.device_id | body: …`), so most wire-shape
 issues are self-diagnosing.
@@ -213,15 +249,20 @@ issues are self-diagnosing.
 testing against a real server:
 
 ```
-swift run mx --cache sqlite --log-level debug
+swift run mx --instance demo
 login https://matrix.org @alex:matrix.org secret
 rooms → open 0 → send hello → back → quit
 ```
 
-Flags: `--cache sqlite|swiftdata|auto` selects the snapshot backend
-(auto prefers SwiftData where available); `--log-file <path>` captures
-logs to a file; `debug on` toggles HTTP logging at runtime. The prompt
-shows a timestamp, and ↑/↓ recalls command history.
+`--instance <name>` persists the session (account, device identity,
+Olm sessions, and the normalized room store) under one directory so
+relaunches resume where you left off; without it, each run uses a
+fresh ephemeral instance that is deleted on exit. Relaunching with the
+same instance renders the room list instantly from
+`matrix-store.swiftdata` and prints `Resumed from stored sync cursor.`
+Room persistence needs SwiftData (Apple platforms); elsewhere `mx`
+syncs memory-only. The prompt shows a timestamp, and ↑/↓ recalls
+command history.
 
 ## Architecture
 
@@ -230,7 +271,7 @@ Transport (MatrixTransport, SyncConnection — SwiftNIO via AsyncHTTPClient)
 Models    (Codable DTOs: Auth, Sync, Room, Message, Common)
 Types     (UserId/RoomId/…, enums, MatrixError)
 Clients   (Auth, Sync, Room, RoomState, Message, Media, Profile, Push actors)
-Store     (StateStore + per-room RoomActor state machines, SnapshotCache)
+Store     (MatrixKitSwiftData: normalized @Model rows, writer fold, reader/@Query reads)
 Observable(MatrixClient facade + @Observable view models)
 ```
 

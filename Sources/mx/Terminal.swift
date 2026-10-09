@@ -99,6 +99,7 @@ func printHelp() {
           rooms                                 List joined rooms and invites
           join <room-id-or-alias>               Join a room
           open <number-or-room-id>              Open a room (shows recent timeline)
+          more                                  Load older history into the open room
           back                                  Leave the current room view
           send <text>                           Send a message to the open room
           esend <text>                          Send end-to-end encrypted to the open room
@@ -125,7 +126,5 @@ func printHelp() {
         "app.subpop.MatrixKit"): run
           log stream --predicate 'subsystem == "app.subpop.MatrixKit"' --level debug
         in a second terminal, or browse Console.app.
-
-        Launch options: --cache <backend>    sqlite, swiftdata, or auto (default)
         """)
 }

@@ -1,28 +1,21 @@
 /// mx: interactive REPL over the MatrixKit actor layer.
 ///
-/// In-memory only. Sync runs in a background task; new messages in the
-/// open room print live. Input runs off the MainActor (global queue)
-/// so the sync loop never starves while waiting for input.
+/// Room state persists in the normalized SwiftData store (incremental
+/// sync writes, instant room list at launch); sync runs in a background
+/// task and new messages in the open room print live. Input runs off
+/// the MainActor (global queue) so the sync loop never starves while
+/// waiting for input.
 import ArgumentParser
 import Foundation
 import MatrixKit
 import MatrixKitCrypto
-import MatrixKitSQLite
 
 #if canImport(SwiftData)
     import MatrixKitSwiftData
 #endif
 
-/// Snapshot cache backend preference (`--cache`).
-enum CachePreference: String, Sendable, ExpressibleByArgument {
-    case auto
-    case sqlite
-    case swiftdata
-}
-
 /// Launch configuration, parsed from flags and handed to the REPL.
 struct REPLConfig: Sendable {
-    var cache: CachePreference = .auto
     /// Named persistent instance (`--instance`). Nil selects an
     /// ephemeral instance: fresh isolated state per run, cleaned up
     /// (server-side logout + directory removal) on exit.
@@ -36,14 +29,11 @@ struct Mx: AsyncParsableCommand {
         abstract: "Interactive REPL over the MatrixKit SDK."
     )
 
-    @Option(name: .long, help: "Snapshot cache backend: sqlite, swiftdata, or auto.")
-    var cache: CachePreference = .auto
-
     @Option(name: .long, help: "Named persistent instance (state directory). Without it, each run uses a fresh ephemeral instance that is deleted on exit.")
     var instance: String?
 
     mutating func run() async throws {
-        await REPL(config: REPLConfig(cache: cache, instance: instance)).run()
+        await REPL(config: REPLConfig(instance: instance)).run()
     }
 }
 
@@ -68,11 +58,9 @@ final class REPL {
     private var unlockedStorageKey: (key: Data, keyId: String)?
     /// Backup private key from `recover`, kept for `backup-restore`.
     private var recoveredBackupKey: Data?
-    /// Snapshot cache backend, from `--cache`.
-    private let cachePreference: CachePreference
     /// Instance name: `--instance` value, or a fresh ephemeral ID per
     /// run. All on-disk state (account, device identity, Olm sessions,
-    /// snapshot cache) lives under this instance's directory, so
+    /// normalized room store) lives under this instance's directory, so
     /// concurrent runs never share state through the filesystem.
     private let instanceName: String
     /// Ephemeral instances are cleaned up on exit (server-side logout
@@ -80,7 +68,6 @@ final class REPL {
     private let isEphemeral: Bool
 
     init(config: REPLConfig = REPLConfig()) {
-        self.cachePreference = config.cache
         self.isEphemeral = config.instance == nil
         self.instanceName =
             config.instance ?? "ephemeral-\(UUID().uuidString)"
@@ -100,15 +87,13 @@ final class REPL {
     /// each drops the other's events.
     private var verifyInFlight = false
 
-    /// On-disk state cache (per user, backend-selectable). Loaded after
-    /// login for an instant room list; saved debounced on deltas and on quit.
-    /// Backend: `--cache sqlite|swiftdata|auto` (default auto: swiftdata
-    /// where available, else sqlite).
-    private var cache: (any SnapshotCache)?
-    private var lastCacheSave = Date.distantPast
-
-    /// Minimum seconds between cache writes during live sync.
-    private let cacheSaveInterval: TimeInterval = 30
+    /// Normalized room store writer (sync deltas persist incrementally;
+    /// no save step) and reader (instant room list at launch). Nil when
+    /// SwiftData is unavailable — sync then runs memory-only.
+    #if canImport(SwiftData)
+        private var storeWriter: MatrixStoreWriter?
+        private var storeReader: MatrixStoreReader?
+    #endif
 
     // MARK: - Main loop
 
@@ -125,7 +110,6 @@ final class REPL {
             await execute(command)
         }
         await stopSyncLoop()
-        await saveCache(force: true)
         if let client {
             try? await client.transport.shutdown()
         }
@@ -176,9 +160,18 @@ final class REPL {
     /// Timestamped prompt: `[1:58 PM] mx [room] > `.
     private func currentPrompt() async -> String {
         let label: String
-        if let client, let roomId = currentRoom {
-            let room = await client.store.room(roomId)
-            label = "mx [\(await room.displayName())]"
+        if let roomId = currentRoom {
+            #if canImport(SwiftData)
+                if let reader = storeReader {
+                    let name = (try? reader.roomDetail(roomId)?.displayName)
+                        ?? roomId.value
+                    label = "mx [\(name)]"
+                } else {
+                    label = "mx"
+                }
+            #else
+                label = "mx"
+            #endif
         } else {
             label = "mx"
         }
@@ -203,6 +196,8 @@ final class REPL {
             await doJoin(target: target)
         case .open(let target):
             await doOpen(target: target)
+        case .more:
+            await doMore()
         case .back:
             currentRoom = nil
             seenEventIds = []
@@ -370,26 +365,16 @@ final class REPL {
         }
     }
 
-    /// Shared post-login path: hydrate cache, incremental sync, live loop.
+    /// Shared post-login path: attach the normalized store, incremental
+    /// sync, live loop.
     private func completeLogin(_ client: MatrixClient, label: String) async {
         self.client = client
-        // Hydrate from disk first: instant room list, and the cached
-        // sync token turns the sync below into a small incremental one.
-        if let userId = client.userId,
-            let cache = await makeCache(for: userId)
-        {
-            self.cache = cache
-            do {
-                if let snapshot = try await cache.load() {
-                    await client.store.restore(snapshot)
-                    printInfo(
-                        "Loaded cached state (\(snapshot.rooms.count) rooms). Syncing…"
-                    )
-                    await listRooms()
-                }
-            } catch {
-                printError("Cache unavailable: \(error)")
-            }
+        // Attach the on-disk store first: the room list below renders
+        // instantly from disk, and the stored sync cursor turns the sync
+        // below into a small incremental one.
+        if let userId = client.userId {
+            await attachNormalizedStore(userId: userId, client: client)
+            await listRooms()
         }
         do {
             // Lean initial sync: matrix.org ships tens of MiB of full
@@ -410,7 +395,6 @@ final class REPL {
             printError("Could not start live sync: \(error)")
             return
         }
-        await saveCache(force: true)
         if await ensureDeviceIdentity(client: client) {
             printInfo("Device keys published for \(label).")
         }
@@ -430,14 +414,13 @@ final class REPL {
             return
         }
         await stopSyncLoop()
-        await saveCache(force: true)
         do {
             try await client.logout()
         } catch {
             printError("Logout failed: \(error)")
         }
         self.client = nil
-        self.cache = nil
+        await detachNormalizedStore()
         currentRoom = nil
         roomOrder = []
         seenEventIds = []
@@ -448,32 +431,41 @@ final class REPL {
     // MARK: - Rooms
 
     private func listRooms() async {
-        guard let client else {
+        guard client != nil else {
             printError("Not logged in. Use: login <homeserver> <user> <password>")
             return
         }
-        let infos = await client.store.roomInfos()
-        let joined = infos.filter { $0.membership == .join }
-            .sorted { ($0.name ?? $0.roomId.value) < ($1.name ?? $1.roomId.value) }
-        let invited = infos.filter { $0.membership == .invite }
-            .sorted { ($0.name ?? $0.roomId.value) < ($1.name ?? $1.roomId.value) }
-        roomOrder = joined.map(\.roomId)
-        if joined.isEmpty && invited.isEmpty {
-            printInfo("No rooms yet. Join one with: join <room-id-or-alias>")
-            return
-        }
-        for (index, info) in joined.enumerated() {
-            let room = await client.store.room(info.roomId)
-            let unread = await room.unreadCount
-            let badge = unread > 0 ? styled(" [\(unread) unread]", ANSI.bold + ANSI.red) : ""
-            let name = styled(info.name ?? info.roomId.value, ANSI.bold + ANSI.cyan)
-            emit("[\(index)] \(name)\(badge)")
-            emit("    \(ANSI.dim)\(info.roomId.value)\(ANSI.reset)")
-        }
-        for info in invited {
-            let name = styled(info.name ?? info.roomId.value, ANSI.bold + ANSI.yellow)
-            emit("📩 Invite: \(name)  \(ANSI.dim)\(info.roomId.value)\(ANSI.reset)")
-        }
+        #if canImport(SwiftData)
+            guard let reader = storeReader else {
+                printError("Room store unavailable on this platform.")
+                return
+            }
+            do {
+                let (joined, invited) = try reader.roomEntries()
+                roomOrder = joined.map(\.roomId)
+                if joined.isEmpty && invited.isEmpty {
+                    printInfo("No rooms yet. Join one with: join <room-id-or-alias>")
+                    return
+                }
+                for (index, info) in joined.enumerated() {
+                    let badge = info.unread > 0
+                        ? styled(" [\(info.unread) unread]", ANSI.bold + ANSI.red) : ""
+                    let name = styled(info.displayName, ANSI.bold + ANSI.cyan)
+                    emit("[\(index)] \(name)\(badge)")
+                    emit("    \(ANSI.dim)\(info.roomId.value)\(ANSI.reset)")
+                }
+                for info in invited {
+                    let name = styled(info.displayName, ANSI.bold + ANSI.yellow)
+                    emit("📩 Invite: \(name)  \(ANSI.dim)\(info.roomId.value)\(ANSI.reset)")
+                }
+                return
+            } catch {
+                printError("Room list unavailable: \(error)")
+                return
+            }
+        #else
+            printError("Room store unavailable on this platform.")
+        #endif
     }
 
     private func doJoin(target: String) async {
@@ -516,30 +508,99 @@ final class REPL {
         currentRoom = roomId
         seenEventIds = []
         visibleEvents = []
-        let room = await client.store.room(roomId)
-        let name = await room.displayName()
-        let topic = await room.topic
-        emit(styled("── \(name) ──", ANSI.bold + ANSI.cyan))
-        if let topic, !topic.isEmpty { printInfo("Topic: \(topic)") }
-        let localUser = client.userId
-        for event in await room.timeline.suffix(openLimit) {
-            printTimelineEvent(event, localUser: localUser)
-        }
+        #if canImport(SwiftData)
+            guard let reader = storeReader else {
+                printError("Room store unavailable on this platform.")
+                return
+            }
+            do {
+                guard let detail = try reader.roomDetail(roomId) else {
+                    printError("Unknown room. Use 'rooms' to list, then 'open <number>'.")
+                    return
+                }
+                emit(styled("── \(detail.displayName) ──", ANSI.bold + ANSI.cyan))
+                if let topic = detail.topic, !topic.isEmpty {
+                    printInfo("Topic: \(topic)")
+                }
+                for event in try reader.timeline(roomId, limit: openLimit) {
+                    printTimelineEvent(event, localUser: client.userId)
+                }
+            } catch {
+                printError("Could not open room: \(error)")
+            }
+        #else
+            printError("Room store unavailable on this platform.")
+        #endif
     }
 
-    private func showMembers() async {
+    private func doMore() async {
         guard let client, let roomId = currentRoom else {
             printError("No room open. Use 'open <number>' first.")
             return
         }
-        let room = await client.store.room(roomId)
-        let members = await room.members
-        for userId in members.keys.sorted(by: { $0.value < $1.value }) {
-            let content = members[userId]
-            let display = content?.displayname ?? userId.localpart ?? userId.value
-            let membership = content?.membership.rawValue ?? "?"
-            emit("\(display)  \(styled(userId.value, ANSI.dim))  (\(membership))")
+        #if canImport(SwiftData)
+            guard let reader = storeReader, let writer = storeWriter else {
+                printError("Room store unavailable on this platform.")
+                return
+            }
+            do {
+                guard let prevBatch = try reader.roomDetail(roomId)?.prevBatch else {
+                    printInfo("No older history available.")
+                    return
+                }
+                let page = try await client.messages.paginate(
+                    roomId, from: BatchToken(prevBatch), limit: openLimit)
+                // `/messages dir=b` returns newest-first; the store reads
+                // oldest-first.
+                let chunk = Array(page.chunk.reversed())
+                try await writer.prependHistory(
+                    chunk, roomId: roomId,
+                    prevBatch: page.end.map { BatchToken($0) })
+                _ = await client.retryTimelineDecryption()
+                let fresh = chunk.filter { !seenEventIds.contains($0.eventId) }
+                for event in fresh {
+                    seenEventIds.insert(event.eventId)
+                }
+                visibleEvents = fresh + visibleEvents
+                for event in fresh {
+                    guard let line = formatEvent(event, localUser: client.userId)
+                    else { continue }
+                    let number = (visibleEvents.firstIndex(of: event) ?? 0) + 1
+                    emit("[\(number)] \(line)")
+                }
+                if fresh.isEmpty {
+                    printInfo("No new events.")
+                }
+            } catch {
+                printError("Could not load history: \(error)")
+            }
+        #else
+            printError("Room store unavailable on this platform.")
+        #endif
+    }
+
+    private func showMembers() async {
+        guard let roomId = currentRoom else {
+            printError("No room open. Use 'open <number>' first.")
+            return
         }
+        #if canImport(SwiftData)
+            guard let reader = storeReader else {
+                printError("Room store unavailable on this platform.")
+                return
+            }
+            do {
+                for member in try reader.members(roomId) {
+                    let display = member.displayname
+                        ?? member.userId.localpart ?? member.userId.value
+                    emit("\(display)  \(styled(member.userId.value, ANSI.dim))  (\(member.membership.rawValue))")
+                }
+            } catch {
+                printError("Could not load members: \(error)")
+            }
+        #else
+            printError("Room store unavailable on this platform.")
+        #endif
     }
 
     private func doTopic(newTopic: String?) async {
@@ -555,8 +616,16 @@ final class REPL {
                 printError("Failed to set topic: \(error)")
             }
         } else {
-            let room = await client.store.room(roomId)
-            printInfo("Topic: \(await room.topic ?? "(none)")")
+            #if canImport(SwiftData)
+                guard let reader = storeReader else {
+                    printError("Room store unavailable on this platform.")
+                    return
+                }
+                let topic = try? reader.roomDetail(roomId)?.topic
+                printInfo("Topic: \(topic ?? "(none)")")
+            #else
+                printError("Room store unavailable on this platform.")
+            #endif
         }
     }
 
@@ -1268,7 +1337,6 @@ final class REPL {
                 }
             }
         }
-        await saveCache()
     }
 
     /// File-backed key store for Olm session persistence, or nil when no
@@ -1332,46 +1400,54 @@ final class REPL {
         }
     }
 
-    /// Build the snapshot cache for a user. Backend from `--cache`
-    /// (`sqlite`, `swiftdata`, or `auto`); auto picks SwiftData where
-    /// available, else SQLite. Nil when no directory is available or
-    /// the store won't open.
-    private func makeCache(for userId: UserId) async -> (any SnapshotCache)? {
-        let preference = cachePreference
-        guard let dir = instanceDirectory else { return nil }
+    /// Open the normalized store for a user and fan sync deltas into
+    /// it: every delta persists incrementally, so there is no save step.
+    /// The engine reads the stored sync cursor from the writer, turning
+    /// the next sync into a small incremental one. No-op without
+    /// SwiftData or without an instance directory.
+    private func attachNormalizedStore(userId: UserId, client: MatrixClient) async {
         #if canImport(SwiftData)
-            if preference != .sqlite,
-                let cache = try? SwiftDataCache(database: SwiftDataCache.databaseURL(
-                    for: userId, in: dir.root))
-            {
-                printInfo("Cache backend: SwiftData.")
-                return cache
+            guard let dir = instanceDirectory else { return }
+            do {
+                let container = try MatrixStore.makeContainer(
+                    at: MatrixStore.databaseURL(for: userId, in: dir.root))
+                let writer = MatrixStoreWriter(modelContainer: container)
+                try await writer.setLocalUser(userId)
+                await client.addDeltaSink(writer)
+                client.setMarkerHealer(writer)
+                client.setCiphertextStore(writer)
+                await client.setRoomStateProvider(
+                    NormalizedRoomStateProvider(
+                        modelContainer: container, writer: writer,
+                        localUser: userId))
+                let reader = MatrixStoreReader(
+                    modelContainer: container, localUser: userId)
+                if (try reader.syncCursors()).syncToken != nil {
+                    printInfo("Resumed from stored sync cursor.")
+                }
+                self.storeWriter = writer
+                self.storeReader = reader
+            } catch {
+                printError("Store unavailable: \(error)")
             }
+        #else
+            _ = userId
+            _ = client
         #endif
-        if preference != .swiftdata,
-            let cache = try? SQLiteCache(database: SQLiteCache.databaseURL(
-                for: userId, in: dir.root))
-        {
-            printInfo("Cache backend: SQLite.")
-            return cache
-        }
-        return nil
     }
 
-    /// Persist the store snapshot, debounced during live sync so a large
-    /// cache (matrix.org: hundreds of rooms) isn't rewritten per delta.
-    private func saveCache(force: Bool = false) async {
-        guard let cache, let client else { return }
-        let now = Date()
-        guard force || now.timeIntervalSince(lastCacheSave) >= cacheSaveInterval else {
-            return
-        }
-        lastCacheSave = now
-        do {
-            try await cache.save(await client.store.snapshot())
-        } catch {
-            printError("Cache save failed: \(error)")
-        }
+    /// Drop the normalized store wiring (logout/teardown).
+    private func detachNormalizedStore() async {
+        #if canImport(SwiftData)
+            if let client {
+                await client.clearDeltaSinks()
+                client.setMarkerHealer(nil)
+                client.setCiphertextStore(nil)
+                await client.setRoomStateProvider(nil)
+            }
+            storeWriter = nil
+            storeReader = nil
+        #endif
     }
 
     // MARK: - Helpers

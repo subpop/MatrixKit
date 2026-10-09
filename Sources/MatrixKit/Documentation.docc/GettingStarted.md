@@ -32,8 +32,8 @@ in a second terminal, or browse it after the fact in Console.app.
 
 ## Sync
 
-Run an initial sync, then start the background loop. Room lists refresh on
-every delta automatically:
+Run an initial sync, then start the background loop. Deltas stream to
+subscribers (`deltas()`) and attached stores on every round:
 
 ```swift
 try await client.syncOnce(filter: .leanInitial)
@@ -48,16 +48,17 @@ Stop with `await client.stopSync()`, log out with `try await client.logout()`.
 
 ## Rooms and timelines
 
+Read rooms from the normalized store (`@Query`, or
+`MatrixStoreReader` outside SwiftUI), and act through the namespace
+clients:
+
 ```swift
-// Cached per ID — same instance on repeat calls.
-let room = await client.room(RoomId(unchecked: "!abc:matrix.org"))
+let roomId = RoomId(unchecked: "!abc:matrix.org")
+let (joined, _) = try reader.roomEntries()
+let window = try reader.timeline(roomId, limit: 50)
 
-room.name          // Observable metadata
-room.timeline      // ObservableTimeline of ObservableTimelineEvent
-
-try await room.send(text: "Hello, Matrix!")
-try await room.reply(to: eventId, text: "…")
-try await room.react(to: eventId, key: "👍")
+try await client.messages.sendText(roomId, "Hello, Matrix!")
+try await client.messages.react(roomId, to: eventId, key: "👍")
 ```
 
 Join and create through the facade:
@@ -67,18 +68,29 @@ try await client.joinRoom(RoomId(unchecked: "!abc:matrix.org"))
 let created = try await client.createRoom(CreateRoomRequest(name: "New room"))
 ```
 
-## Instant launch with a snapshot cache
+## Instant launch with the normalized store
 
-Persist the store so the next launch renders rooms before sync completes:
+Persist sync output incrementally so the next launch renders rooms
+before sync completes, with the stored cursor turning the first sync
+incremental:
 
 ```swift
-import MatrixKitSQLite
+import MatrixKitSwiftData
 
-let cache = try SQLiteCache(database: url)
-await client.store.restore(await cache.load() ?? StoreSnapshot())
+let container = try MatrixStore.makeContainer(
+    at: MatrixStore.databaseURL(for: userId, in: directory))
+let writer = MatrixStoreWriter(modelContainer: container)
+try await writer.setLocalUser(userId) // receipts + own-message detection
+await client.addDeltaSink(writer)      // every sync delta persists
+client.setMarkerHealer(writer)         // read-marker healing covers it too
+client.setCiphertextStore(writer)       // late-key decryption refresh
+await client.setRoomStateProvider(      // space/search enrichment
+    NormalizedRoomStateProvider(modelContainer: container, writer: writer))
 // … sync …
-try await cache.save(await client.store.snapshot())
+let reader = MatrixStoreReader(modelContainer: container)
+let (joined, _) = try reader.roomEntries()
 ```
 
-`SQLiteCache` (portable) and `SwiftDataCache` (Apple-only) both implement
-``SnapshotCache`` and are interchangeable.
+SwiftUI views can `@Query` the `@Model` schema directly instead of
+going through the reader (see `SDRoom.joinedDescriptor()`). Schema
+changes wipe and rebuild: the store is a cache, live sync restores it.

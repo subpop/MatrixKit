@@ -1,6 +1,14 @@
 import Foundation
 import Observation
 
+/// Delivery state of a locally-echoed event.
+public enum SendState: Hashable, Sendable {
+    /// Staged locally; not yet confirmed by sync.
+    case pending
+    /// The send failed with a human-readable reason.
+    case failed(String)
+}
+
 /// Display-ready message kinds for timeline rendering.
 public enum MessageKind: Hashable, Sendable {
     /// Plain `m.text` message.
@@ -237,6 +245,93 @@ public final class ObservableTimelineEvent {
         )
     }
 
+    /// Render a snapshot into display-ready events: aggregate reactions
+    /// (redacted ones excluded), fold edits into their targets (last
+    /// edit wins), hide reactions/redactions/edits, resolve replies and
+    /// highlights, and coalesce fresh-join profile noise. Pure —
+    /// `@Query` apps call this over stored rows.
+    public static func render(
+        _ snapshot: [MessageEvent],
+        members: [UserId: MemberContent] = [:],
+        localUser: UserId? = nil,
+        highlightKeywords: [String] = [],
+        sendStates: [EventId: SendState] = [:]
+    ) -> [ObservableTimelineEvent] {
+        // Aggregate reactions: target event -> key -> senders.
+        // Redacted reactions (toggle-off) must not feed the badges.
+        var reactionMap: [EventId: [String: [UserId]]] = [:]
+        for event in snapshot
+        where EventType(rawValue: event.type) == .reaction && !event.isRedacted {
+            guard
+                let data = try? JSONEncoder().encode(event.content),
+                let content = try? JSONDecoder().decode(ReactionContent.self, from: data)
+            else { continue }
+            reactionMap[content.relatesTo.eventId, default: [:]][content.relatesTo.key, default: []]
+                .append(event.sender)
+        }
+        // Fold edits: target event -> replacement content (last edit wins).
+        var editMap: [EventId: MessageContent] = [:]
+        for event in snapshot {
+            guard
+                let target = event.messageContent?.relatesTo?.eventId,
+                event.messageContent?.relatesTo?.relType == .replacement,
+                let replacement = editReplacement(in: event)
+            else { continue }
+            editMap[target] = replacement
+        }
+        // Rendered sources: edit targets with folded content.
+        let folded: [MessageEvent] = snapshot.map { event in
+            guard
+                let replacement = editMap[event.eventId],
+                let data = try? JSONEncoder().encode(replacement),
+                let content = try? JSONDecoder().decode(
+                    [String: AnyCodable].self, from: data)
+            else { return event }
+            var copy = event
+            copy.content = content
+            return copy
+        }
+        let byId: [EventId: MessageEvent] = Dictionary(
+            folded.map { ($0.eventId, $0) }, uniquingKeysWith: { first, _ in first })
+        // Redaction events are hidden: the redacted target carries the
+        // tombstone via `redacted_because`, so rendering the redaction
+        // itself would print a stray "deleted" bubble (e.g. toggling a
+        // reaction off).
+        let visible = folded.filter {
+            EventType(rawValue: $0.type) != .reaction
+                && EventType(rawValue: $0.type) != .redaction
+                && !isEdit($0)
+        }
+        let rendered: [ObservableTimelineEvent] = visible.map { event in
+            let wrapper = make(
+                from: event, localUser: localUser, members: members)
+            let reactions = reactionMap[event.eventId] ?? [:]
+            wrapper.reactions = reactions
+            if editMap[event.eventId] != nil {
+                wrapper.isEdited = true
+            }
+            wrapper.reply = resolveReply(
+                for: event, in: byId, members: members)
+            wrapper.sendState = sendStates[event.eventId]
+            if let localUser {
+                wrapper.ownReactions = Set(reactions.keys.filter {
+                    reactions[$0]?.contains(localUser) ?? false
+                })
+                let selfMentioned = wrapper.mentionedUserIds.contains(localUser)
+                wrapper.highlightedMentionUserId = selfMentioned ? localUser : nil
+                let matched = highlightKeywords.filter {
+                    event.messageContent?.body.localizedCaseInsensitiveContains($0) ?? false
+                }
+                wrapper.highlightKeywords = matched
+                wrapper.isHighlighted = selfMentioned
+                    || mentionsRoom(in: event)
+                    || !matched.isEmpty
+            }
+            return wrapper
+        }
+        return coalesceJoinProfileChanges(events: visible, rendered: rendered)
+    }
+
     /// User IDs listed in the event's `m.mentions`.
     static func mentions(in event: MessageEvent) -> [UserId] {
         guard
@@ -329,6 +424,47 @@ public final class ObservableTimelineEvent {
             body: content.body,
             formattedBody: content.formattedBody,
             imageURL: content.msgtype == .image ? content.url : nil)
+    }
+
+    /// Fold profile noise from fresh joins into a single "joined" row.
+    ///
+    /// A self `m.room.member` join followed by profile-carrying join
+    /// events from the same user (the client setting its name/avatar at
+    /// join time) renders as one join row: the later `.profileChange`
+    /// rows are dropped. The fresh-join window for a user ends when they
+    /// send anything else or their membership changes again, so genuine
+    /// later renames still show.
+    static func coalesceJoinProfileChanges(
+        events: [MessageEvent], rendered: [ObservableTimelineEvent]
+    ) -> [ObservableTimelineEvent] {
+        var freshJoins = Set<UserId>()
+        var kept: [ObservableTimelineEvent] = []
+        kept.reserveCapacity(rendered.count)
+        for (event, wrapper) in zip(events, rendered) {
+            if EventType(rawValue: event.type) == .roomMember,
+               let key = event.stateKey, !key.isEmpty
+            {
+                let target = UserId(unchecked: key)
+                let membership = Membership(
+                    rawValue: event.content["membership"]?.stringValue ?? "")
+                if event.sender == target, membership == .join {
+                    if case .profileChange = wrapper.kind {
+                        if freshJoins.contains(target) { continue }
+                        kept.append(wrapper)
+                        continue
+                    }
+                    freshJoins.insert(target)
+                    kept.append(wrapper)
+                    continue
+                }
+                freshJoins.remove(target)
+                kept.append(wrapper)
+                continue
+            }
+            freshJoins.remove(event.sender)
+            kept.append(wrapper)
+        }
+        return kept
     }
 
     private static func classify(

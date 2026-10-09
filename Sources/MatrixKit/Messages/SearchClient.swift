@@ -2,12 +2,21 @@
 public actor SearchClient {
     private let transport: MatrixTransport
     private let session: Session
-    private let store: StateStore
+    private var provider: (any RoomStateProvider)?
 
-    public init(transport: MatrixTransport, session: Session, store: StateStore) {
+    public init(
+        transport: MatrixTransport, session: Session,
+        provider: (any RoomStateProvider)? = nil
+    ) {
         self.transport = transport
         self.session = session
-        self.store = store
+        self.provider = provider
+    }
+
+    /// Set the local-state provider for result enrichment. Nil (the
+    /// default) resolves names purely from server profile info.
+    public func setProvider(_ provider: (any RoomStateProvider)?) {
+        self.provider = provider
     }
 
     private func token() async throws(MatrixError) -> String {
@@ -75,12 +84,12 @@ public actor SearchClient {
         var roomName: String?
         var memberDisplayName: String?
         var memberAvatar: MXCURI?
-        if let actor = await store.existingRoom(roomId) {
-            roomName = await actor.name
-            if let member = await actor.members[event.sender] {
-                memberDisplayName = member.displayname
-                memberAvatar = member.avatarUrl.flatMap { try? MXCURI($0) }
-            }
+        if let cached = await provider?.roomState(roomId) ?? nil {
+            roomName = cached.name
+        }
+        if let member = await provider?.member(roomId, userId: event.sender) ?? nil {
+            memberDisplayName = member.displayname
+            memberAvatar = member.avatarUrl.flatMap { try? MXCURI($0) }
         }
         return MessageSearchResult(
             eventId: event.eventId,

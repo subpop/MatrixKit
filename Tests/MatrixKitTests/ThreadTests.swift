@@ -140,35 +140,6 @@ struct ThreadTests {
         #expect(wrapper.threadParticipated)
     }
 
-    @Test("ObservableTimeline loads a thread and returns to live")
-    func threadFlow() async throws {
-
-        let roomId = RoomId(unchecked: "!r:x")
-        let rootId = EventId(unchecked: "$root:x")
-        let room = RoomActor(roomId: roomId)
-        await room.appendLocalEcho(threadMessage(id: "$live:x", body: "live"))
-        let pager = FakePager()
-        await pager.setEvents([rootId: threadMessage(id: "$root:x", body: "root")])
-        await pager.setRelations(
-            chunk: [threadMessage(id: "$r1:x", body: "reply", root: "$root:x")],
-            nextBatch: nil)
-        let timeline = await ObservableTimeline(
-            timeline: Timeline(roomId: roomId, messages: pager, room: room),
-            room: room,
-            messages: pager,
-            localUser: UserId(unchecked: "@alice:x"))
-        #expect(timeline.timelineFocus == .live)
-
-        try await timeline.loadThread(rootEventId: rootId)
-        #expect(timeline.timelineFocus == .thread(rootId))
-        #expect(timeline.events.map(\.eventId.value) == ["$root:x", "$r1:x"])
-        #expect(timeline.events[1].threadRootEventId == rootId)
-
-        await timeline.returnToLive()
-        #expect(timeline.timelineFocus == .live)
-        #expect(timeline.events.map(\.eventId.value) == ["$live:x"])
-    }
-
     @Test("Root falls back to context without single-event fetch")
     func rootFallback() async throws {
         let pager = FakePager()
@@ -223,22 +194,17 @@ struct ThreadTests {
     func threadLoadMoreNoop() async throws {
         let roomId = RoomId(unchecked: "!r:x")
         let rootId = EventId(unchecked: "$root:x")
-        let room = RoomActor(roomId: roomId)
-        await room.appendLocalEcho(threadMessage(id: "$live:x", body: "live"))
         let pager = FakePager()
         await pager.setEvents([rootId: threadMessage(id: "$root:x", body: "root")])
         await pager.setRelations(
             chunk: [threadMessage(id: "$r1:x", body: "reply", root: "$root:x")],
             nextBatch: nil)
-        let timeline = await ObservableTimeline(
-            timeline: Timeline(roomId: roomId, messages: pager, room: room),
-            room: room,
-            messages: pager,
-            localUser: UserId(unchecked: "@alice:x"))
-        try await timeline.loadThread(rootEventId: rootId)
-        #expect(!timeline.hasMore)
-        try await timeline.loadMore()
-        #expect(timeline.events.map(\.eventId.value) == ["$root:x", "$r1:x"])
+        let thread = ThreadTimeline(
+            roomId: roomId, rootEventId: rootId, messages: pager)
+        try await thread.load()
+        #expect(!(await thread.canPaginateBack()))
+        #expect(try await thread.loadMore() == 0)
+        #expect(await thread.events().map(\.eventId.value) == ["$root:x", "$r1:x"])
     }
 
     @Test("Decryptor transforms thread windows, flags stay quiet")
