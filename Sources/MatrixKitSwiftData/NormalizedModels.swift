@@ -1,5 +1,6 @@
 #if canImport(SwiftData)
 import Foundation
+import MatrixKit
 import SwiftData
 
 /// Schema version for the normalized store. Mismatches wipe the store
@@ -292,6 +293,120 @@ public final class SDRoomAccountData {
         self.roomId = roomId
         self.type = type
         self.content = content
+    }
+}
+
+// MARK: - Typed reads
+
+/// Decoded accessors over the JSON-blob columns, so consumers never
+/// hand-decode row payloads. Lenient: corrupt blobs read as empty.
+public extension SDRoomEvent {
+    /// Decode this row to a `MessageEvent`, or nil when the stored
+    /// payload no longer decodes.
+    func messageEvent(decoder: JSONDecoder = JSONDecoder()) -> MessageEvent? {
+        guard
+            let content = try? decoder.decode(
+                [String: AnyCodable].self, from: content)
+        else { return nil }
+        let unsigned = try? unsigned.map {
+            try decoder.decode([String: AnyCodable].self, from: $0)
+        }
+        return MessageEvent(
+            type: type,
+            eventId: EventId(unchecked: eventId),
+            sender: UserId(unchecked: sender),
+            roomId: RoomId(unchecked: roomId),
+            stateKey: stateKey,
+            redacts: redacts.map(EventId.init(unchecked:)),
+            originServerTs: ts,
+            content: content,
+            unsigned: unsigned)
+    }
+}
+
+/// Space-graph direction helpers over edge rows. `m.space.child` lives
+/// in the parent's state (owner = parent, peer = child);
+/// `m.space.parent` lives in the child's state (owner = child,
+/// peer = parent). IDs stay strings (storage-faithful, no invented
+/// validation); callers wrap in `RoomId` as needed.
+public extension SDRoomEdge {
+    /// Parent space IDs of a room: `.child` owners plus `.parent` peers.
+    static func parents(of roomId: String, in edges: [SDRoomEdge]) -> Set<String> {
+        var out = Set<String>()
+        for edge in edges {
+            if edge.kind == SDEdgeKind.child.rawValue, edge.peerRoomId == roomId {
+                out.insert(edge.ownerRoomId)
+            } else if edge.kind == SDEdgeKind.parent.rawValue
+                || edge.kind == SDEdgeKind.canonicalParent.rawValue,
+                edge.ownerRoomId == roomId
+            {
+                out.insert(edge.peerRoomId)
+            }
+        }
+        return out
+    }
+
+    /// Direct child IDs of an owner: `.child` peers plus `.parent`
+    /// owners. Inverse of `parents(of:in:)`.
+    static func children(of ownerId: String, in edges: [SDRoomEdge]) -> Set<String> {
+        var out = Set<String>()
+        for edge in edges {
+            if edge.kind == SDEdgeKind.child.rawValue, edge.ownerRoomId == ownerId {
+                out.insert(edge.peerRoomId)
+            } else if edge.kind == SDEdgeKind.parent.rawValue
+                || edge.kind == SDEdgeKind.canonicalParent.rawValue,
+                edge.peerRoomId == ownerId
+            {
+                out.insert(edge.ownerRoomId)
+            }
+        }
+        return out
+    }
+
+    /// Every ID contained in a space, transitively. Cycle-safe BFS over
+    /// `children(of:in:)`; the space itself is excluded.
+    static func descendants(of spaceId: String, in edges: [SDRoomEdge]) -> Set<String> {
+        var seen: Set<String> = [spaceId]
+        var queue = [spaceId]
+        var out = Set<String>()
+        while let current = queue.popLast() {
+            for child in children(of: current, in: edges)
+            where seen.insert(child).inserted {
+                out.insert(child)
+                queue.append(child)
+            }
+        }
+        return out
+    }
+}
+
+/// Decoded accessors over the room row's JSON-blob columns.
+public extension SDRoom {
+    /// Fetched space-hierarchy rows, or empty when never opened (or the
+    /// blob no longer decodes).
+    func decodedHierarchyChildren(decoder: JSONDecoder = JSONDecoder()) -> [SpaceChild] {
+        guard let data = hierarchyChildren else { return [] }
+        return (try? decoder.decode([SpaceChild].self, from: data)) ?? []
+    }
+
+    /// Direct-child edges of the fetched hierarchy level, or empty.
+    func decodedHierarchyDirectChildren(
+        decoder: JSONDecoder = JSONDecoder()
+    ) -> [SpaceChildEdge] {
+        guard let data = hierarchyDirectChildren else { return [] }
+        return (try? decoder.decode([SpaceChildEdge].self, from: data)) ?? []
+    }
+
+    /// Pinned event IDs, or empty.
+    func decodedPinnedEventIds(decoder: JSONDecoder = JSONDecoder()) -> [String] {
+        guard let data = pinnedEventIds else { return [] }
+        return (try? decoder.decode([String].self, from: data)) ?? []
+    }
+
+    /// Alternative aliases, or empty.
+    func decodedAltAliases(decoder: JSONDecoder = JSONDecoder()) -> [String] {
+        guard let data = altAliases else { return [] }
+        return (try? decoder.decode([String].self, from: data)) ?? []
     }
 }
 #endif

@@ -59,6 +59,8 @@ public struct StoredRoomDetail: Hashable, Sendable {
     public var isEncrypted: Bool
     public var canonicalAlias: String?
     public var successorRoomId: String?
+    /// Pinned event IDs from `m.room.pinned_events` state.
+    public var pinnedEventIds: [String]
 }
 
 /// One membership row.
@@ -176,7 +178,8 @@ public struct MatrixStoreReader: Sendable {
             isFavourite: room.isFavourite,
             isEncrypted: room.isEncrypted,
             canonicalAlias: room.canonicalAlias,
-            successorRoomId: room.successorRoomId)
+            successorRoomId: room.successorRoomId,
+            pinnedEventIds: room.decodedPinnedEventIds())
     }
 
     /// Room timeline, oldest first. With `limit`, the newest window
