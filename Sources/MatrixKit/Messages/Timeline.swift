@@ -21,7 +21,7 @@ extension Array where Element == MessageEvent {
 extension Array where Element == MessageEvent {
     /// Find a reaction event by target, key, and sender (for toggling
     /// reactions off, which needs the reaction's event ID).
-    func reactionEvent(
+    public func reactionEvent(
         target: EventId, key: String, sender: UserId
     ) -> EventId? {
         for event in self {
