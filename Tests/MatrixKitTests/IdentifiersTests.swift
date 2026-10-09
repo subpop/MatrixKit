@@ -112,4 +112,65 @@ struct IdentifiersTests {
         let token: BatchToken = "s123_456"
         #expect(token.value == "s123_456")
     }
+
+    struct PartsCase: Sendable {
+        var id: String
+        var input: String
+        var localpart: String?
+        var serverName: String?
+    }
+
+    @Test("UserId parts tolerate malformed input", arguments: [
+        PartsCase(id: "no sigil", input: "alice:x", localpart: nil, serverName: "x"),
+        PartsCase(id: "no colon", input: "@alice", localpart: nil, serverName: nil),
+        PartsCase(id: "port", input: "@a:x.org:8448", localpart: "a", serverName: "x.org:8448"),
+    ])
+    func userIdParts(_ c: PartsCase) {
+        let user = UserId(unchecked: c.input)
+        #expect(user.localpart == c.localpart)
+        #expect(user.serverName == c.serverName)
+        #expect(user.description == c.input)
+    }
+
+    @Test("Codable identifiers round-trip through JSON")
+    func codableRoundTrip() throws {
+        struct Bag: Codable, Equatable {
+            var user: UserId
+            var room: RoomId
+            var alias: RoomAlias
+            var event: EventId
+            var device: DeviceId
+            var token: AccessToken
+            var mxc: MXCURI
+            var batch: BatchToken
+        }
+        let bag = Bag(
+            user: UserId(unchecked: "@a:x"), room: RoomId(unchecked: "!r:x"),
+            alias: RoomAlias(unchecked: "#a:x"), event: EventId(unchecked: "$e"),
+            device: "D", token: AccessToken("t"),
+            mxc: MXCURI(unchecked: "mxc://x/y"), batch: "s1")
+        let data = try JSONEncoder().encode(bag)
+        #expect(try JSONDecoder().decode(Bag.self, from: data) == bag)
+    }
+
+    @Test("RoomAlias validates and describes itself")
+    func roomAlias() throws {
+        let alias = try RoomAlias("#general:example.com")
+        #expect(alias.description == "#general:example.com")
+        #expect(RoomAlias(unchecked: "x").value == "x")
+        #expect(throws: MatrixError.self) { try RoomAlias("general:example.com") }
+    }
+
+    @Test("MXCURI components reject empty parts", arguments: [
+        "mxc://server", "mxc:///media", "mxc://server/",
+    ])
+    func mxcComponents(_ input: String) {
+        #expect(MXCURI(unchecked: input).components == nil)
+    }
+
+    @Test("Descriptions echo the raw value")
+    func descriptions() {
+        #expect(MXCURI(unchecked: "mxc://x/y").description == "mxc://x/y")
+        #expect(TransactionId("t").description == "t")
+    }
 }

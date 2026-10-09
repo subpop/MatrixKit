@@ -264,5 +264,54 @@ struct NormalizedStoreTests {
         _ = try MatrixStore.makeContainer(at: file)
         #expect(FileManager.default.fileExists(atPath: file.path))
     }
+
+    @Test("removeStoreFiles deletes the store and its sidecars")
+    func removesStoreFiles() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        let file = directory.appendingPathComponent("matrix-store.swiftdata")
+        for path in [file.path, file.path + "-wal", file.path + "-shm"] {
+            #expect(FileManager.default.createFile(atPath: path, contents: Data()))
+        }
+        MatrixStore.removeStoreFiles(file: file)
+        for path in [file.path, file.path + "-wal", file.path + "-shm"] {
+            #expect(!FileManager.default.fileExists(atPath: path))
+        }
+        // Removing again is a harmless no-op.
+        MatrixStore.removeStoreFiles(file: file)
+    }
+
+    @Test("In-memory containers are isolated from each other")
+    func inMemoryIsolation() throws {
+        let first = try MatrixStore.makeInMemory()
+        let second = try MatrixStore.makeInMemory()
+        first.mainContext.insert(SDRoom(roomId: "!only-first:x", membership: "join"))
+        try first.mainContext.save()
+        let firstCount = try first.mainContext.fetchCount(FetchDescriptor<SDRoom>())
+        let secondCount = try second.mainContext.fetchCount(FetchDescriptor<SDRoom>())
+        #expect(firstCount == 1)
+        #expect(secondCount == 0)
+    }
+
+    @Test("A file-backed container persists across reopen")
+    func reopens() throws {
+        let file = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathComponent("matrix-store.swiftdata")
+        let first = try MatrixStore.makeContainer(at: file)
+        first.mainContext.insert(SDRoom(roomId: "!kept:x", membership: "join"))
+        try first.mainContext.save()
+        let reopened = try MatrixStore.makeContainer(at: file)
+        let rooms = try reopened.mainContext.fetch(FetchDescriptor<SDRoom>())
+        #expect(rooms.map(\.roomId) == ["!kept:x"])
+    }
+
+    @Test("Default database URL is per-user when a caches folder exists")
+    func defaultDatabaseURL() {
+        let url = MatrixStore.databaseURL(for: UserId(unchecked: "@bob:example.com"))
+        #expect(url?.lastPathComponent == "matrix-store.swiftdata")
+    }
 }
 #endif

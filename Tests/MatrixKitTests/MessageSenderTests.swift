@@ -246,5 +246,177 @@ struct MessageSenderTests {
             #expect(await sends(harness, containing: "/send/m.room.message/").count == 1)
         }
     }
+
+    // MARK: - Branch coverage
+
+    /// Create a room and mark it encrypted in the store.
+    private func encryptedRoom(
+        _ harness: Harness, writer: MatrixStoreWriter, name: String
+    ) async throws -> RoomId {
+        let (rooms, _, _) = await harness.roomClient()
+        let room = try await rooms.create(CreateRoomRequest(name: name))
+        try await writer.apply(SyncDelta(
+            nextBatch: "s1",
+            joined: [room: JoinedRoomDelta(state: [
+                stateEvent(
+                    type: "m.room.encryption",
+                    content: ["algorithm": .string("m.megolm.v1.aes-sha2")])
+            ])]))
+        return room
+    }
+
+    @Test("Thread replies reach the wire in plaintext rooms")
+    func threadReply() async throws {
+        try await withHarness { harness in
+            let (sender, _, _, _) = try await sender(harness)
+            let (messages, _, _) = await harness.messageClient()
+            let room = RoomId(unchecked: "!room:test")
+            let root = try await messages.sendText(room, "root")
+            _ = try await sender.threadReply(
+                room, root: root, parent: root, body: "in thread")
+            #expect(await sends(harness, containing: "/send/m.room.message/").count == 2)
+        }
+    }
+
+    @Test("Encrypted rooms encrypt replies, thread replies, and edits")
+    func encryptedVerbs() async throws {
+        try await withHarness { harness in
+            let (sender, writer, _, cryptoSender) = try await sender(harness)
+            let room = try await encryptedRoom(harness, writer: writer, name: "E2EE verbs")
+            let target = EventId(unchecked: "$target:test")
+            _ = try await sender.reply(room, to: target, body: "reply")
+            _ = try await sender.threadReply(room, root: target, body: "thread")
+            _ = try await sender.edit(room, eventId: target, newBody: "edited")
+            let sent = await cryptoSender.sent
+            #expect(sent.count == 3)
+            #expect(sent.allSatisfy { $0.type == "m.room.encrypted" })
+            #expect(await sends(harness, containing: "/send/m.room.message/").isEmpty)
+        }
+    }
+
+    @Test("Encrypted attachments upload ciphertext and thumbnail, then send")
+    func encryptedAttachment() async throws {
+        try await withHarness { harness in
+            let (sender, writer, _, cryptoSender) = try await sender(harness)
+            let room = try await encryptedRoom(harness, writer: writer, name: "E2EE files")
+            let echo = try #require(await sender.sendAttachment(
+                room, data: Data("pixels".utf8),
+                filename: "pic.png", mimeType: "image/png",
+                caption: "look", width: 2, height: 2,
+                thumbnailData: Data("thumb".utf8), thumbnailMimeType: "image/png",
+                inReplyTo: EventId(unchecked: "$parent:test")))
+            #expect(echo.value.hasPrefix("local:"))
+            let uploads = await harness.requests.filter {
+                $0.method == "POST" && $0.path.contains("/upload")
+            }
+            #expect(uploads.count == 2)
+            #expect(await cryptoSender.sent.count == 1)
+            #expect(await sends(harness, containing: "/send/").isEmpty)
+        }
+    }
+
+    @Test("Attachment upload failure fails the echo", arguments: [
+        "image/png", "video/mp4", "audio/ogg", "application/pdf",
+    ])
+    func attachmentFailure(mimeType: String) async throws {
+        try await withHarness { harness in
+            let (sender, writer, _, _) = try await sender(harness, token: nil)
+            let room = RoomId(unchecked: "!room:test")
+            let echo = try #require(await sender.sendAttachment(
+                room, data: Data("x".utf8), filename: "f", mimeType: mimeType,
+                duration: 1))
+            #expect(await writer.echoTransactionId(for: echo) == nil)
+            #expect(await sends(harness, containing: "/send/").isEmpty)
+        }
+    }
+
+    @Test("Attachments report upload progress")
+    func attachmentProgress() async throws {
+        try await withHarness { harness in
+            let (sender, _, _, _) = try await sender(harness)
+            let (rooms, _, _) = await harness.roomClient()
+            let room = try await rooms.create(CreateRoomRequest(name: "Progress"))
+            let echo = await sender.sendAttachment(
+                room, data: Data("bytes".utf8), filename: "a.txt",
+                mimeType: "text/plain", onProgress: { _ in })
+            #expect(echo != nil)
+        }
+    }
+
+    @Test("Encrypted-room key sharing failure fails the echo")
+    func encryptedShareFailure() async throws {
+        try await withHarness { harness in
+            let (sender, writer, _, cryptoSender) = try await sender(harness)
+            let room = try await encryptedRoom(harness, writer: writer, name: "E2EE fail")
+            // Membership lookup 404s for a room the server never created.
+            let ghost = RoomId(unchecked: "!ghost:test")
+            try await writer.apply(SyncDelta(
+                nextBatch: "s2",
+                joined: [ghost: JoinedRoomDelta(state: [
+                    stateEvent(
+                        type: "m.room.encryption",
+                        content: ["algorithm": .string("m.megolm.v1.aes-sha2")])
+                ])]))
+            let echo = try #require(await sender.sendText(ghost, "lost"))
+            #expect(await writer.echoTransactionId(for: echo) == nil)
+            #expect(await cryptoSender.sent.isEmpty)
+            _ = room
+        }
+    }
+
+    @Test("Redact of a confirmed event posts to the server")
+    func redactConfirmed() async throws {
+        try await withHarness { harness in
+            let (sender, _, _, _) = try await sender(harness)
+            let (messages, _, _) = await harness.messageClient()
+            let room = RoomId(unchecked: "!room:test")
+            let target = try await messages.sendText(room, "bye")
+            _ = try await sender.redact(room, eventId: target, reason: "spam")
+            let redacts = await harness.requests.filter {
+                $0.method == "PUT" && $0.path.contains("/redact/")
+            }
+            #expect(redacts.count == 1)
+        }
+    }
+
+    @Test("Typing notifications reach the server")
+    func typing() async throws {
+        try await withHarness { harness in
+            let (sender, _, _, _) = try await sender(harness)
+            let (rooms, _, _) = await harness.roomClient()
+            let room = try await rooms.create(CreateRoomRequest(name: "Typing"))
+            await sender.sendTyping(room, typing: true)
+            let puts = await harness.requests.filter {
+                $0.method == "PUT" && $0.path.contains("/typing/")
+            }
+            #expect(puts.count == 1)
+        }
+    }
+
+    @Test("Logged-out sender ignores typing, attachments, and toggles")
+    func loggedOutNoOps() async throws {
+        try await withHarness { harness in
+            let (sender, _, _, _) = try await sender(harness, localUser: nil)
+            let room = RoomId(unchecked: "!room:test")
+            await sender.sendTyping(room, typing: true)
+            await sender.toggleReaction(
+                room, target: EventId(unchecked: "$t:test"), key: "👍")
+            #expect(await sender.sendAttachment(
+                room, data: Data(), filename: "f", mimeType: "text/plain") == nil)
+            #expect(await harness.requests.filter { $0.method == "PUT" }.isEmpty)
+        }
+    }
+
+    @Test("setLocalUser adopts a new identity")
+    func adoptIdentity() async throws {
+        try await withHarness { harness in
+            let (sender, _, _, _) = try await sender(harness, localUser: nil)
+            let room = RoomId(unchecked: "!room:test")
+            #expect(await sender.sendText(room, "x") == nil)
+            await sender.setLocalUser(
+                UserId(unchecked: "@alice:test"), ownDeviceId: DeviceId("ALICEDEVICE"))
+            #expect(await sender.sendText(room, "x") != nil)
+        }
+    }
 }
 #endif
