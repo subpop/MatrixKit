@@ -178,6 +178,12 @@ public actor MessageSender {
     /// When `onProgress` is set, it receives the overall upload fraction
     /// (0 to 1): one phase for plaintext rooms, file + thumbnail phases
     /// weighted by byte size for encrypted rooms.
+    ///
+    /// `onEchoStaged` fires once the local echo is persisted, before the
+    /// upload begins. Callers with no sync-driven refresh for local-only
+    /// store mutations (e.g. a revision counter keyed off sync deltas)
+    /// need this to make the pending bubble appear immediately rather
+    /// than only once the real event arrives after the upload finishes.
     @discardableResult
     public func sendAttachment(
         _ roomId: RoomId,
@@ -186,6 +192,7 @@ public actor MessageSender {
         width: Int? = nil, height: Int? = nil, duration: Int? = nil,
         thumbnailData: Data? = nil, thumbnailMimeType: String? = nil,
         inReplyTo: EventId? = nil,
+        onEchoStaged: (@Sendable () -> Void)? = nil,
         onProgress: (@Sendable (Double) -> Void)? = nil
     ) async -> EventId? {
         guard let localUser else { return nil }
@@ -205,6 +212,7 @@ public actor MessageSender {
                 msgtype: msgtype, body: caption ?? filename, info: info),
             transactionId: transactionId)
         try? await writer.stageEcho(echo, roomId: roomId, transactionId: transactionId)
+        onEchoStaged?()
         do {
             if isEncrypted(roomId) {
                 let total = data.count + (thumbnailData?.count ?? 0)
