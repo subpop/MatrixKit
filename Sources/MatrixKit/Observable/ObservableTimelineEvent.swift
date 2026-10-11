@@ -228,7 +228,7 @@ public final class ObservableTimelineEvent {
             eventId: event.eventId,
             sender: event.sender,
             timestamp: event.timestamp,
-            kind: redacted ? .redacted : kind,
+            kind: redacted && !survivesRedaction(event) ? .redacted : kind,
             isRedacted: redacted,
             isEditable: event.sender == localUser && !redacted,
             formattedBody: content?.formattedBody,
@@ -243,6 +243,18 @@ public final class ObservableTimelineEvent {
             threadReplyCount: threadSummary?["count"]?.intValue,
             threadParticipated: threadSummary?["current_user_participated"]?.boolValue ?? false
         )
+    }
+
+    /// Redacted events whose preserved content (spec redaction algorithm)
+    /// still renders meaningfully. Membership keeps `membership`, so a
+    /// join/leave/ban/invite/knock transition stays readable; join→join
+    /// profile changes lose the profile fields and stay tombstoned.
+    private static func survivesRedaction(_ event: MessageEvent) -> Bool {
+        guard EventType(rawValue: event.type) == .roomMember,
+              let membership = event.content["membership"]?.stringValue
+        else { return false }
+        let previous = event.unsigned?["prev_content"]?.objectValue?["membership"]?.stringValue
+        return !(membership == "join" && previous == "join")
     }
 
     /// Render a snapshot into display-ready events: aggregate reactions

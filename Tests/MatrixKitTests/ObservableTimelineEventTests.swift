@@ -526,6 +526,70 @@ struct ObservableTimelineHighlightTests {
         }
     }
 
+    @Test("Redacted join still renders as a join")
+    func redactedJoinRenders() async {
+        let event = MessageEvent(
+            type: "m.room.member",
+            eventId: EventId(unchecked: "$target:x"),
+            sender: UserId(unchecked: "@bob:x"),
+            stateKey: "@bob:x",
+            originServerTs: 1_700_000_000_000,
+            content: ["membership": .string("join")],
+            unsigned: ["redacted_because": .object([
+                "event_id": .string("$redaction:x"),
+            ])])
+        let timeline = ObservableTimelineEvent.render([event], members: membersFixture())
+        #expect(timeline.count == 1)
+        #expect(timeline[0].isRedacted)
+        #expect(timeline[0].kind == .state(
+            type: "m.room.member", description: "Bob joined"))
+    }
+
+    @Test("Redacted ban still renders, resolving the target")
+    func redactedBanRenders() async {
+        let event = MessageEvent(
+            type: "m.room.member",
+            eventId: EventId(unchecked: "$target:x"),
+            sender: UserId(unchecked: "@alice:x"),
+            stateKey: "@bob:x",
+            originServerTs: 1_700_000_000_000,
+            content: ["membership": .string("ban")],
+            unsigned: ["redacted_because": .object([
+                "event_id": .string("$redaction:x"),
+            ])])
+        let timeline = ObservableTimelineEvent.render([event], members: membersFixture())
+        #expect(timeline.count == 1)
+        #expect(timeline[0].isRedacted)
+        #expect(timeline[0].targetUserId == UserId(unchecked: "@bob:x"))
+        #expect(timeline[0].kind == .state(
+            type: "m.room.member", description: "Alice banned Bob"))
+    }
+
+    @Test("Redacted join→join profile change stays a tombstone")
+    func redactedProfileChangeStaysTombstone() async {
+        let event = MessageEvent(
+            type: "m.room.member",
+            eventId: EventId(unchecked: "$target:x"),
+            sender: UserId(unchecked: "@bob:x"),
+            stateKey: "@bob:x",
+            originServerTs: 1_700_000_000_000,
+            content: ["membership": .string("join")],
+            unsigned: [
+                "redacted_because": .object(["event_id": .string("$redaction:x")]),
+                "prev_content": .object([
+                    "membership": .string("join"),
+                    "avatar_url": .string("mxc://x/old-avatar"),
+                ]),
+            ])
+        let timeline = ObservableTimelineEvent.render([event], members: membersFixture())
+        #expect(timeline.count == 1)
+        #expect(timeline[0].isRedacted)
+        if case .redacted = timeline[0].kind {
+        } else {
+            Issue.record("Expected .redacted, got \(timeline[0].kind)")
+        }
+    }
+
     @Test("Edit folds into its target and marks it edited")
     func editFolding() async {
         let target = EventId(unchecked: "$target:x")
