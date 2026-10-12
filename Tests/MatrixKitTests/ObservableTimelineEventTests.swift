@@ -279,6 +279,93 @@ struct ObservableTimelineEventTests {
         #expect(wrapper.kind == .unableToDecrypt)
     }
 
+    @Test("Failed-decryption placeholders classify as unable to decrypt")
+    func badEncryptedMsgtype() {
+        let event = messageEvent(content: [
+            "msgtype": .string("m.bad.encrypted"),
+            "body": .string("** Unable to decrypt: unknown session **"),
+        ])
+        let wrapper = ObservableTimelineEvent.make(from: event, localUser: nil)
+        #expect(wrapper.kind == .unableToDecrypt)
+    }
+
+    @Test("Unknown msgtypes render their body as text")
+    func unknownMsgtype() {
+        let event = messageEvent(content: [
+            "msgtype": .string("com.example.custom"),
+            "body": .string("hello"),
+        ])
+        let wrapper = ObservableTimelineEvent.make(from: event, localUser: nil)
+        #expect(wrapper.kind == .text(body: "hello"))
+    }
+
+    @Test("In-room verification requests classify with the sender name")
+    func verificationRequest() {
+        let event = messageEvent(content: [
+            "msgtype": .string("m.key.verification.request"),
+            "body": .string("wants to verify"),
+        ])
+        let wrapper = ObservableTimelineEvent.make(
+            from: event, localUser: nil, members: membersFixture())
+        #expect(wrapper.kind == .verificationRequest(
+            description: "Alice requested verification"))
+    }
+
+    struct VoIPCase: Sendable {
+        var type: String
+        var expectedDescription: String?
+    }
+
+    nonisolated static let voipCases: [VoIPCase] = [
+        VoIPCase(type: "m.call.invite", expectedDescription: "Alice started a call"),
+        VoIPCase(type: "m.call.answer", expectedDescription: "Alice answered the call"),
+        VoIPCase(type: "m.call.hangup", expectedDescription: "Alice ended the call"),
+        VoIPCase(type: "m.call.reject", expectedDescription: "Alice ended the call"),
+        VoIPCase(type: "m.call.candidates", expectedDescription: nil),
+        VoIPCase(type: "m.call.negotiate", expectedDescription: nil),
+        VoIPCase(type: "m.call.select_answer", expectedDescription: nil),
+        VoIPCase(
+            type: "m.call.sdp_stream_metadata_changed", expectedDescription: nil),
+    ]
+
+    @Test("VoIP signalling classifies; negotiation noise does not", arguments: voipCases)
+    func voipSignalling(row: VoIPCase) {
+        let event = messageEvent(type: row.type, content: [:])
+        let wrapper = ObservableTimelineEvent.make(
+            from: event, localUser: nil, members: membersFixture())
+        if let expected = row.expectedDescription {
+            if case .callEvent(let type, let description) = wrapper.kind {
+                #expect(type == row.type)
+                #expect(description == expected)
+            } else {
+                Issue.record("Expected .callEvent, got \(wrapper.kind)")
+            }
+        } else {
+            #expect(wrapper.kind == .unknown(type: row.type))
+        }
+    }
+
+    struct PollEndCase: Sendable {
+        var type: String
+    }
+
+    nonisolated static let pollEndCases: [PollEndCase] = [
+        PollEndCase(type: "m.poll.end"),
+        PollEndCase(type: "org.matrix.msc3381.poll.end"),
+    ]
+
+    @Test("Poll end classifies under either prefix", arguments: pollEndCases)
+    func pollEnd(row: PollEndCase) {
+        let event = messageEvent(
+            type: row.type,
+            content: ["m.relates_to": .object([
+                "rel_type": .string("m.reference"),
+                "event_id": .string("$poll:x"),
+            ])])
+        let wrapper = ObservableTimelineEvent.make(from: event, localUser: nil)
+        #expect(wrapper.kind == .pollEnd)
+    }
+
     @Test("Call member state classifies")
     func callMember() {
         let event = messageEvent(
@@ -450,6 +537,39 @@ struct ObservableTimelineHighlightTests {
         #expect(events.count == 1)
         #expect(events[0].reactions["🎉"] == [UserId(unchecked: "@alice:x")])
         #expect(events[0].ownReactions == ["🎉"])
+    }
+
+    struct PollVoteCase: Sendable {
+        var type: String
+    }
+
+    nonisolated static let pollVoteCases: [PollVoteCase] = [
+        PollVoteCase(type: "m.poll.response"),
+        PollVoteCase(type: "org.matrix.msc3381.poll.response"),
+    ]
+
+    @Test("Poll votes do not render as timeline bubbles", arguments: pollVoteCases)
+    func pollVotesHidden(row: PollVoteCase) async {
+        let message = MessageEvent(
+            type: "m.poll.start",
+            eventId: EventId(unchecked: "$poll:x"),
+            sender: UserId(unchecked: "@bob:x"),
+            originServerTs: 1_700_000_000_000,
+            content: ["question": .object([
+                "org.matrix.msc1767.text": .string("Lunch?")])])
+        let vote = messageEvent(
+            type: row.type,
+            sender: UserId(unchecked: "@alice:x"),
+            content: [
+                "m.relates_to": .object([
+                    "rel_type": .string("m.reference"),
+                    "event_id": .string("$poll:x"),
+                ]),
+                row.type: .object(["answers": .array([.string("a1")])]),
+            ])
+        let events = rendered(events: [message, vote])
+        #expect(events.count == 1)
+        #expect(events[0].kind == .poll(question: "Lunch?"))
     }
 
     @Test("Redacted reactions are excluded from aggregation")

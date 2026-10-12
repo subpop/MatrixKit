@@ -500,6 +500,101 @@ public struct ReactionRelation: Hashable, Sendable, Codable {
     }
 }
 
+/// `m.room.encrypted` content: Megolm (`m.megolm.v1.aes-sha2`) or Olm
+/// (`m.olm.v1.curve25519-aes-sha2`) ciphertext. `ciphertext` is a base64
+/// string for Megolm and a device-key → payload map for Olm, so it stays
+/// type-erased; inspect `stringValue` / `objectValue`.
+public struct EncryptedEventContent: Hashable, Sendable, Codable {
+    /// Encryption algorithm (`m.megolm.v1.aes-sha2`, …).
+    public var algorithm: String
+    /// Curve25519 identity key of the sending device, when present.
+    public var senderKey: String?
+    /// Sending device ID (Olm events).
+    public var deviceId: String?
+    /// Megolm session ID the event was encrypted with.
+    public var sessionId: String?
+    /// Algorithm-dependent ciphertext payload.
+    public var ciphertext: AnyCodable?
+
+    public init(
+        algorithm: String,
+        senderKey: String? = nil,
+        deviceId: String? = nil,
+        sessionId: String? = nil,
+        ciphertext: AnyCodable? = nil
+    ) {
+        self.algorithm = algorithm
+        self.senderKey = senderKey
+        self.deviceId = deviceId
+        self.sessionId = sessionId
+        self.ciphertext = ciphertext
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case algorithm
+        case senderKey = "sender_key"
+        case deviceId = "device_id"
+        case sessionId = "session_id"
+        case ciphertext
+    }
+}
+
+/// `m.poll.response` content (stable and MSC3381 prefixes): a vote on the
+/// referenced poll. Selected answer IDs live under the namespaced
+/// `m.poll.response` / `org.matrix.msc3381.poll.response` block.
+public struct PollResponseContent: Hashable, Sendable, Codable {
+    /// `m.reference` relation pointing at the `m.poll.start` event.
+    public var relatesTo: RelatesTo
+    /// Selected answer IDs.
+    public var answers: [String]
+
+    public init(relatesTo: RelatesTo, answers: [String] = []) {
+        self.relatesTo = relatesTo
+        self.answers = answers
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        relatesTo = try container.decode(RelatesTo.self, forKey: .relatesTo)
+        let stable = try container.decodeIfPresent(
+            AnswersBlock.self, forKey: .response)
+        let unstable = try container.decodeIfPresent(
+            AnswersBlock.self, forKey: .unstableResponse)
+        answers = stable?.answers ?? unstable?.answers ?? []
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(relatesTo, forKey: .relatesTo)
+        try container.encode(AnswersBlock(answers: answers), forKey: .response)
+    }
+
+    private struct AnswersBlock: Hashable, Sendable, Codable {
+        var answers: [String]
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case relatesTo = "m.relates_to"
+        case response = "m.poll.response"
+        case unstableResponse = "org.matrix.msc3381.poll.response"
+    }
+}
+
+/// `m.poll.end` content (stable and MSC3381 prefixes): closes the
+/// referenced poll. Carries only the `m.reference` relation.
+public struct PollEndContent: Hashable, Sendable, Codable {
+    /// `m.reference` relation pointing at the `m.poll.start` event.
+    public var relatesTo: RelatesTo
+
+    public init(relatesTo: RelatesTo) {
+        self.relatesTo = relatesTo
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case relatesTo = "m.relates_to"
+    }
+}
+
 // MARK: - Markdown to Matrix HTML (formatted_body generation)
 
 /// Generates the Matrix HTML subset from markdown for `formatted_body`.

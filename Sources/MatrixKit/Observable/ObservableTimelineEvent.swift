@@ -33,6 +33,11 @@ public enum MessageKind: Hashable, Sendable {
     case sticker(body: String, url: String?, info: MediaInfo?)
     /// `m.poll.start` (stable and MSC3381 prefixes).
     case poll(question: String)
+    /// `m.poll.end` (stable and MSC3381 prefixes) — the poll closed.
+    case pollEnd
+    /// In-room `m.key.verification.request` message with a
+    /// human-readable description.
+    case verificationRequest(description: String)
     /// Room state change (member join/leave, rename, …) with a
     /// human-readable description.
     case state(type: String, description: String)
@@ -308,10 +313,12 @@ public final class ObservableTimelineEvent {
         // Redaction events are hidden: the redacted target carries the
         // tombstone via `redacted_because`, so rendering the redaction
         // itself would print a stray "deleted" bubble (e.g. toggling a
-        // reaction off).
+        // reaction off). Poll responses are votes, not messages: they
+        // aggregate server-side and would otherwise print stray bubbles.
         let visible = folded.filter {
             EventType(rawValue: $0.type) != .reaction
                 && EventType(rawValue: $0.type) != .redaction
+                && EventType(rawValue: $0.type) != .pollResponse
                 && !isEdit($0)
         }
         let rendered: [ObservableTimelineEvent] = visible.map { event in
@@ -485,13 +492,6 @@ public final class ObservableTimelineEvent {
         func displayName(for userId: UserId) -> String {
             members[userId]?.displayname ?? userId.value
         }
-        // Ciphertext that survived decryption untouched: the event could
-        // not be decrypted (missing session, bad crypto, malformed
-        // payload). Decryptable events are re-typed with the plaintext
-        // inner type before classification, so they never land here.
-        if event.type == RoomCrypto.roomEncryptedType {
-            return .unableToDecrypt
-        }
         switch EventType(rawValue: event.type) {
         case .roomMessage:
             guard let content = event.messageContent else {
@@ -512,6 +512,15 @@ public final class ObservableTimelineEvent {
                     return .liveLocation(body: body)
                 }
                 return .location(body: body)
+            case .keyVerificationRequest:
+                return .verificationRequest(
+                    description: "\(displayName(for: event.sender)) requested verification")
+            case .badEncrypted:
+                return .unableToDecrypt
+            case .unknown:
+                // Unrecognized msgtype with a plain body: render the body
+                // rather than dropping the event.
+                return .text(body: body)
             }
         case .sticker:
             return .sticker(
@@ -523,6 +532,15 @@ public final class ObservableTimelineEvent {
                 ?? event.content["question"]?.objectValue?["body"]?.stringValue
                 ?? "Poll"
             return .poll(question: question)
+        case .pollEnd:
+            return .pollEnd
+        case .roomEncrypted:
+            // Ciphertext that survived decryption untouched: the event
+            // could not be decrypted (missing session, bad crypto,
+            // malformed payload). Decryptable events are re-typed with
+            // the plaintext inner type before classification, so they
+            // never land here.
+            return .unableToDecrypt
         case .redaction:
             return .redacted
         case .roomMember:
@@ -557,12 +575,16 @@ public final class ObservableTimelineEvent {
             return .callEvent(
                 type: event.type,
                 description: "\(name) updated call participation")
-        case .reaction, .typing, .receipt, .presence, .fullyRead, .tag, .custom, .unknown:
-            if let verb = callVerb(for: event.type) {
+        case .callInvite, .callAnswer, .callHangup, .callReject:
+            if let verb = callVerb(for: EventType(rawValue: event.type)) {
                 return .callEvent(
                     type: event.type,
                     description: "\(displayName(for: event.sender)) \(verb)")
             }
+            return .unknown(type: event.type)
+        case .reaction, .pollResponse, .callCandidates, .callNegotiate,
+            .callSelectAnswer, .callSDPStreamMetadataChanged,
+            .typing, .receipt, .presence, .fullyRead, .tag, .custom, .unknown:
             return .unknown(type: event.type)
         }
     }
@@ -637,11 +659,11 @@ public final class ObservableTimelineEvent {
 
     /// User-meaningful call verb for signalling types; nil for
     /// negotiation noise (renders as `.unknown` instead).
-    private static func callVerb(for type: String) -> String? {
+    private static func callVerb(for type: EventType) -> String? {
         switch type {
-        case "m.call.invite": "started a call"
-        case "m.call.answer": "answered the call"
-        case "m.call.hangup", "m.call.reject": "ended the call"
+        case .callInvite: "started a call"
+        case .callAnswer: "answered the call"
+        case .callHangup, .callReject: "ended the call"
         default: nil
         }
     }

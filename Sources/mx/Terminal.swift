@@ -53,6 +53,12 @@ func formatEvent(_ event: MessageEvent, localUser: UserId?) -> String? {
             body = "[\(content.msgtype.rawValue): \(content.body)]"
         case .location:
             body = "[location: \(content.body)]"
+        case .keyVerificationRequest:
+            body = "[verification request]"
+        case .badEncrypted:
+            body = "[unable to decrypt]"
+        case .unknown:
+            body = content.body
         }
         if content.msgtype == .emote {
             return "\(time) * \(who) \(body)"
@@ -60,6 +66,8 @@ func formatEvent(_ event: MessageEvent, localUser: UserId?) -> String? {
         return "\(time) <\(who)> \(body)"
     case .redaction:
         return "\(time) \(who) redacted an event"
+    case .roomEncrypted:
+        return "\(time) \(styled("[unable to decrypt]", ANSI.dim))"
     case .sticker:
         let body = event.content["body"]?.stringValue ?? "sticker"
         return "\(time) \(who) sent a sticker: \(body)"
@@ -67,8 +75,16 @@ func formatEvent(_ event: MessageEvent, localUser: UserId?) -> String? {
         let question = event.content["question"]?.objectValue?["org.matrix.msc1767.text"]?.stringValue
             ?? "poll"
         return "\(time) \(who) started a poll: \(question)"
+    case .pollEnd:
+        return "\(time) \(styled("\(sender) ended the poll", ANSI.dim))"
     case .callMember:
         return "\(time) \(styled("\(sender) updated call participation", ANSI.dim))"
+    case .callInvite:
+        return "\(time) \(styled("\(sender) started a call", ANSI.dim))"
+    case .callAnswer:
+        return "\(time) \(styled("\(sender) answered the call", ANSI.dim))"
+    case .callHangup, .callReject:
+        return "\(time) \(styled("\(sender) ended the call", ANSI.dim))"
     case .roomMember:
         let membership = event.content["membership"]?.stringValue ?? "?"
         let target = event.stateKey ?? event.sender.value
@@ -82,7 +98,9 @@ func formatEvent(_ event: MessageEvent, localUser: UserId?) -> String? {
         .roomCanonicalAlias, .roomPinnedEvents, .roomJoinRules, .roomHistoryVisibility,
         .roomServerACL:
         return "\(time) \(styled("\(sender) updated \(event.type)", ANSI.dim))"
-    case .reaction, .typing, .receipt, .presence, .fullyRead, .tag, .custom, .unknown:
+    case .reaction, .pollResponse, .callCandidates, .callNegotiate,
+        .callSelectAnswer, .callSDPStreamMetadataChanged,
+        .typing, .receipt, .presence, .fullyRead, .tag, .custom, .unknown:
         return nil
     }
 }

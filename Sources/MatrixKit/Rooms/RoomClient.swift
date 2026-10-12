@@ -371,7 +371,10 @@ public actor RoomClient {
             case .roomEncryption:
                 isEncrypted = true
             case .roomMember, .roomMessage, .roomTombstone,
-                .roomServerACL, .sticker, .pollStart, .callMember, .redaction, .reaction,
+                .roomServerACL, .sticker, .pollStart, .pollResponse, .pollEnd,
+                .roomEncrypted, .callInvite, .callAnswer, .callHangup, .callReject,
+                .callCandidates, .callNegotiate, .callSelectAnswer,
+                .callSDPStreamMetadataChanged, .callMember, .redaction, .reaction,
                 .typing, .receipt, .presence, .fullyRead, .tag, .custom, .unknown:
                 break
             }
