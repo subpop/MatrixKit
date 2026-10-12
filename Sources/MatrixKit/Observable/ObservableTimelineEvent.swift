@@ -38,6 +38,9 @@ public enum MessageKind: Hashable, Sendable {
     /// In-room `m.key.verification.request` message with a
     /// human-readable description.
     case verificationRequest(description: String)
+    /// `m.server_notice` (homeserver system message) with a
+    /// human-readable description.
+    case serverNotice(description: String)
     /// Room state change (member join/leave, rename, …) with a
     /// human-readable description.
     case state(type: String, description: String)
@@ -517,6 +520,10 @@ public final class ObservableTimelineEvent {
                     description: "\(displayName(for: event.sender)) requested verification")
             case .badEncrypted:
                 return .unableToDecrypt
+            case .serverNotice:
+                return .serverNotice(
+                    description: Self.serverNoticeDescription(
+                        for: event.content, fallback: body))
             case .unknown:
                 // Unrecognized msgtype with a plain body: render the body
                 // rather than dropping the event.
@@ -657,10 +664,32 @@ public final class ObservableTimelineEvent {
         return "\(name) \(parts.joined(separator: " and "))"
     }
 
+    /// Human-readable server-notice description: usage-limit wording
+    /// when the notice type and limit are recognized, else the event's
+    /// body. Notice wording is entirely client-side per spec, so novel
+    /// notice types always fall back to the server-provided text.
+    private static func serverNoticeDescription(
+        for content: [String: AnyCodable], fallback: String
+    ) -> String {
+        guard
+            let data = try? JSONEncoder().encode(content),
+            let notice = try? JSONDecoder().decode(
+                ServerNoticeContent.self, from: data),
+            notice.serverNoticeType == "m.server_notice.usage_limit_reached"
+        else { return fallback }
+        switch notice.limitType {
+        case "monthly_active_user":
+            return "Your account has reached the monthly active user limit"
+        case "media_quota_size":
+            return "Your account has reached its media storage quota"
+        default:
+            return "Your account has reached its resource limit"
+        }
+    }
+
     /// User-meaningful call verb for signalling types; nil for
     /// negotiation noise (renders as `.unknown` instead).
-    private static func callVerb(for type: EventType) -> String? {
-        switch type {
+    private static func callVerb(for type: EventType) -> String? {        switch type {
         case .callInvite: "started a call"
         case .callAnswer: "answered the call"
         case .callHangup, .callReject: "ended the call"

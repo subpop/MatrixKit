@@ -595,6 +595,42 @@ public struct PollEndContent: Hashable, Sendable, Codable {
     }
 }
 
+/// `m.server_notice` content: a system message from the homeserver
+/// (always sent by the server notices user). All fields but `body`
+/// are optional — decode never fails on a novel or partial notice.
+public struct ServerNoticeContent: Hashable, Sendable, Codable {
+    /// Human-readable notice text. Always present; doubles as the
+    /// fallback when the notice type is unrecognized.
+    public var body: String
+    /// Notice kind, e.g. `m.server_notice.usage_limit_reached`.
+    public var serverNoticeType: String?
+    /// Contact URI for the server administrator, when the notice
+    /// carries one.
+    public var adminContact: String?
+    /// Resource that hit its limit (`monthly_active_user`,
+    /// `media_quota_size`), for usage-limit notices.
+    public var limitType: String?
+
+    public init(
+        body: String,
+        serverNoticeType: String? = nil,
+        adminContact: String? = nil,
+        limitType: String? = nil
+    ) {
+        self.body = body
+        self.serverNoticeType = serverNoticeType
+        self.adminContact = adminContact
+        self.limitType = limitType
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case body
+        case serverNoticeType = "server_notice_type"
+        case adminContact = "admin_contact"
+        case limitType = "limit_type"
+    }
+}
+
 // MARK: - Markdown to Matrix HTML (formatted_body generation)
 
 /// Generates the Matrix HTML subset from markdown for `formatted_body`.

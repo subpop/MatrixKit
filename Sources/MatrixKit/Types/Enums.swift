@@ -181,6 +181,7 @@ public enum MessageType: Hashable, Sendable {
     case location
     case keyVerificationRequest
     case badEncrypted
+    case serverNotice
     case unknown(String)
 
     public var rawValue: String {
@@ -195,6 +196,7 @@ public enum MessageType: Hashable, Sendable {
         case .location: return "m.location"
         case .keyVerificationRequest: return "m.key.verification.request"
         case .badEncrypted: return "m.bad.encrypted"
+        case .serverNotice: return "m.server_notice"
         case .unknown(let s): return s
         }
     }
@@ -211,6 +213,7 @@ public enum MessageType: Hashable, Sendable {
         case "m.location": self = .location
         case "m.key.verification.request": self = .keyVerificationRequest
         case "m.bad.encrypted": self = .badEncrypted
+        case "m.server_notice": self = .serverNotice
         default: self = .unknown(rawValue)
         }
     }

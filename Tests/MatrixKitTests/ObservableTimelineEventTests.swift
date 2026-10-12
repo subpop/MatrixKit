@@ -348,7 +348,6 @@ struct ObservableTimelineEventTests {
     struct PollEndCase: Sendable {
         var type: String
     }
-
     nonisolated static let pollEndCases: [PollEndCase] = [
         PollEndCase(type: "m.poll.end"),
         PollEndCase(type: "org.matrix.msc3381.poll.end"),
@@ -364,6 +363,61 @@ struct ObservableTimelineEventTests {
             ])])
         let wrapper = ObservableTimelineEvent.make(from: event, localUser: nil)
         #expect(wrapper.kind == .pollEnd)
+    }
+
+    struct ServerNoticeCase: Sendable {
+        var id: String
+        var noticeType: String?
+        var limitType: String?
+        var expectedDescription: String
+    }
+
+    nonisolated static let serverNoticeCases: [ServerNoticeCase] = [
+        ServerNoticeCase(
+            id: "monthly active user limit",
+            noticeType: "m.server_notice.usage_limit_reached",
+            limitType: "monthly_active_user",
+            expectedDescription:
+                "Your account has reached the monthly active user limit"),
+        ServerNoticeCase(
+            id: "media quota limit",
+            noticeType: "m.server_notice.usage_limit_reached",
+            limitType: "media_quota_size",
+            expectedDescription:
+                "Your account has reached its media storage quota"),
+        ServerNoticeCase(
+            id: "usage limit without a limit type",
+            noticeType: "m.server_notice.usage_limit_reached",
+            limitType: nil,
+            expectedDescription: "Your account has reached its resource limit"),
+        ServerNoticeCase(
+            id: "unknown notice type falls back to body",
+            noticeType: "com.example.future_notice",
+            limitType: nil,
+            expectedDescription: "Server says hi"),
+        ServerNoticeCase(
+            id: "body-only notice falls back to body",
+            noticeType: nil,
+            limitType: nil,
+            expectedDescription: "Server says hi"),
+    ]
+
+    @Test("Server notices classify with limit wording", arguments: serverNoticeCases)
+    func serverNotice(row: ServerNoticeCase) {
+        var content: [String: AnyCodable] = [
+            "msgtype": .string("m.server_notice"),
+            "body": .string("Server says hi"),
+        ]
+        if let noticeType = row.noticeType {
+            content["server_notice_type"] = .string(noticeType)
+        }
+        if let limitType = row.limitType {
+            content["limit_type"] = .string(limitType)
+        }
+        let event = messageEvent(content: content)
+        let wrapper = ObservableTimelineEvent.make(from: event, localUser: nil)
+        #expect(wrapper.kind == .serverNotice(
+            description: row.expectedDescription))
     }
 
     @Test("Call member state classifies")

@@ -57,6 +57,8 @@ func formatEvent(_ event: MessageEvent, localUser: UserId?) -> String? {
             body = "[verification request]"
         case .badEncrypted:
             body = "[unable to decrypt]"
+        case .serverNotice:
+            body = content.body
         case .unknown:
             body = content.body
         }

@@ -87,6 +87,7 @@ struct EventTypeTests {
             wire: "m.key.verification.request",
             expected: .keyVerificationRequest),
         MessageTypeCase(wire: "m.bad.encrypted", expected: .badEncrypted),
+        MessageTypeCase(wire: "m.server_notice", expected: .serverNotice),
         MessageTypeCase(
             wire: "com.example.custom",
             expected: .unknown("com.example.custom")),
@@ -167,5 +168,31 @@ struct EventTypeTests {
             """.data(using: .utf8)!
         let content = try JSONDecoder().decode(PollEndContent.self, from: data)
         #expect(content.relatesTo.eventId == EventId(unchecked: "$poll:x"))
+    }
+
+    @Test("Server notice decodes the full wire shape")
+    func serverNoticeContent() throws {
+        let data = """
+            {"body":"Limit reached","server_notice_type":"m.server_notice.usage_limit_reached",
+             "admin_contact":"mailto:admin@example.com","limit_type":"monthly_active_user"}
+            """.data(using: .utf8)!
+        let content = try JSONDecoder().decode(
+            ServerNoticeContent.self, from: data)
+        #expect(content.body == "Limit reached")
+        #expect(content.serverNoticeType == "m.server_notice.usage_limit_reached")
+        #expect(content.adminContact == "mailto:admin@example.com")
+        #expect(content.limitType == "monthly_active_user")
+    }
+
+    @Test("Server notice decodes a body-only payload")
+    func serverNoticeMinimal() throws {
+        let data = """
+            {"body":"Hello"}
+            """.data(using: .utf8)!
+        let content = try JSONDecoder().decode(
+            ServerNoticeContent.self, from: data)
+        #expect(content.body == "Hello")
+        #expect(content.serverNoticeType == nil)
+        #expect(content.limitType == nil)
     }
 }
