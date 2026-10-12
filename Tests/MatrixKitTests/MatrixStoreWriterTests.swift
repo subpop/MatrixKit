@@ -547,6 +547,44 @@ struct MatrixStoreWriterTests {
         #expect(stored.hierarchyDirectChildren != nil)
     }
 
+    @Test("Poll starts are message-like; votes and ends are not")
+    func pollMessageLikeFlags() async throws {
+        let (writer, container) = try writer()
+        let pollBlock: [String: AnyCodable] = [
+            "kind": .string("m.poll.disclosed"),
+            "max_selections": .int(1),
+            "answers": .array([]),
+            "question": .object(["org.matrix.msc1767.text": .string("Lunch?")]),
+        ]
+        try await writer.apply(joinedTimelineDelta([
+            MessageEvent(
+                type: "m.poll.start", eventId: EventId(unchecked: "$poll"),
+                sender: UserId(unchecked: "@alice:x"), originServerTs: 1_000,
+                content: ["m.poll.start": .object(pollBlock)]),
+            MessageEvent(
+                type: "org.matrix.msc3381.poll.start",
+                eventId: EventId(unchecked: "$poll-unstable"),
+                sender: UserId(unchecked: "@alice:x"), originServerTs: 2_000,
+                content: ["org.matrix.msc3381.poll.start": .object(pollBlock)]),
+            MessageEvent(
+                type: "m.poll.response", eventId: EventId(unchecked: "$vote"),
+                sender: UserId(unchecked: "@bob:x"), originServerTs: 3_000,
+                content: [:]),
+            MessageEvent(
+                type: "m.poll.end", eventId: EventId(unchecked: "$end"),
+                sender: UserId(unchecked: "@alice:x"), originServerTs: 4_000,
+                content: [:]),
+        ]))
+        let id = "!room:x"
+        let rows = try ModelContext(container).fetch(FetchDescriptor<SDRoomEvent>(
+            predicate: #Predicate { $0.roomId == id }))
+        let flags = Dictionary(uniqueKeysWithValues: rows.map { ($0.eventId, $0.isMessageLike) })
+        #expect(flags["$poll"] == true)
+        #expect(flags["$poll-unstable"] == true)
+        #expect(flags["$vote"] == false)
+        #expect(flags["$end"] == false)
+    }
+
     // MARK: - Ported fold behaviors
 
     @Test("Redaction never overwrites a server-supplied stamp")

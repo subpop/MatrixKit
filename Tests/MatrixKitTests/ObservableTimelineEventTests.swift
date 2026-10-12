@@ -109,7 +109,7 @@ struct ObservableTimelineEventTests {
             content: ["question": .object([
                 "org.matrix.msc1767.text": .string("Lunch?")])])
         let wrapper = ObservableTimelineEvent.make(from: event, localUser: nil)
-        #expect(wrapper.kind == .poll(question: "Lunch?"))
+        #expect(wrapper.kind == .poll(PollSummary(question: "Lunch?", answers: [])))
     }
 
     @Test("Poll start understands the unstable prefix")
@@ -119,7 +119,7 @@ struct ObservableTimelineEventTests {
             content: ["question": .object([
                 "org.matrix.msc1767.text": .string("Dinner?")])])
         let wrapper = ObservableTimelineEvent.make(from: event, localUser: nil)
-        #expect(wrapper.kind == .poll(question: "Dinner?"))
+        #expect(wrapper.kind == .poll(PollSummary(question: "Dinner?", answers: [])))
     }
 
     @Test("Location with a beacon reference is live")
@@ -504,6 +504,143 @@ struct ObservableTimelineEventTests {
     }
 }
 
+@Suite("ObservableTimeline polls")
+@MainActor
+struct ObservableTimelinePollTests {
+    private let alice = UserId(unchecked: "@alice:x")
+    private let bob = UserId(unchecked: "@bob:x")
+    private let carol = UserId(unchecked: "@carol:x")
+    private let pollId = EventId(unchecked: "$poll:x")
+
+    private func start(kind: String? = nil, maxSelections: Int? = nil) -> MessageEvent {
+        var block: [String: AnyCodable] = [
+            "answers": .array([
+                .object(["id": .string("a1"), "org.matrix.msc1767.text": .string("Pizza")]),
+                .object(["id": .string("a2"), "org.matrix.msc1767.text": .string("Tacos")]),
+            ])
+        ]
+        if let kind { block["kind"] = .string(kind) }
+        if let maxSelections { block["max_selections"] = .int(maxSelections) }
+        block["question"] = .object(["org.matrix.msc1767.text": .string("Lunch?")])
+        return MessageEvent(
+            type: "m.poll.start", eventId: pollId, sender: alice,
+            originServerTs: 1_000,
+            content: ["m.poll.start": .object(block)])
+    }
+
+    private func vote(
+        _ sender: UserId, _ answers: [String], at ts: Int, id: String? = nil
+    ) -> MessageEvent {
+        MessageEvent(
+            type: "m.poll.response",
+            eventId: EventId(unchecked: id ?? "$vote-\(sender.value)-\(ts)"),
+            sender: sender, originServerTs: ts,
+            content: [
+                "m.relates_to": .object([
+                    "rel_type": .string("m.reference"),
+                    "event_id": .string("$poll:x"),
+                ]),
+                "m.poll.response": .object([
+                    "answers": .array(answers.map { AnyCodable.string($0) })
+                ]),
+            ],
+            unsigned: id == nil ? nil : ["transaction_id": .string("t1")])
+    }
+
+    private func end(by sender: UserId, at ts: Int) -> MessageEvent {
+        MessageEvent(
+            type: "m.poll.end", eventId: EventId(unchecked: "$end-\(ts)"),
+            sender: sender, originServerTs: ts,
+            content: ["m.relates_to": .object([
+                "rel_type": .string("m.reference"),
+                "event_id": .string("$poll:x"),
+            ])])
+    }
+
+    private func summary(
+        _ events: [MessageEvent], localUser: UserId? = UserId(unchecked: "@alice:x")
+    ) -> PollSummary {
+        let rendered = ObservableTimelineEvent.render(events, localUser: localUser)
+        guard case .poll(let summary)? = rendered.first(where: { $0.eventId == EventId(unchecked: "$poll:x") })?.kind else {
+            Issue.record("Expected a rendered poll")
+            return PollSummary(question: "", answers: [])
+        }
+        return summary
+    }
+
+    @Test("Latest vote per sender wins and voters are counted once")
+    func latestVoteWins() {
+        let result = summary([
+            start(),
+            vote(bob, ["a1"], at: 2_000),
+            vote(bob, ["a2"], at: 3_000),
+            vote(carol, ["a1"], at: 2_500),
+        ])
+        #expect(result.answers.map(\.voteCount) == [1, 1])
+        #expect(result.totalVotes == 2)
+    }
+
+    @Test("Selections truncate to maxSelections")
+    func maxSelectionsTruncates() {
+        let result = summary([start(), vote(bob, ["a1", "a2"], at: 2_000)])
+        #expect(result.maxSelections == 1)
+        #expect(result.answers.map(\.voteCount) == [1, 0])
+    }
+
+    @Test("Unknown answers are ignored and an empty selection retracts")
+    func unknownAnswersAndRetraction() {
+        let kept = summary([start(maxSelections: 2), vote(bob, ["zzz", "a1"], at: 2_000)])
+        #expect(kept.answers.map(\.voteCount) == [1, 0])
+
+        let retracted = summary([
+            start(maxSelections: 2),
+            vote(bob, ["a1"], at: 2_000),
+            vote(bob, [], at: 2_100),
+        ])
+        #expect(retracted.totalVotes == 0)
+        #expect(retracted.answers.map(\.voteCount) == [0, 0])
+    }
+
+    @Test("Votes after the end are excluded and winners are highlighted")
+    func votesAfterEnd() {
+        let result = summary([
+            start(),
+            vote(bob, ["a1"], at: 2_000),
+            end(by: alice, at: 3_000),
+            vote(carol, ["a2"], at: 4_000),
+            vote(bob, ["a2"], at: 5_000),
+        ])
+        #expect(result.isEnded)
+        #expect(result.answers.map(\.voteCount) == [1, 0])
+        #expect(result.winningAnswerIds == ["a1"])
+    }
+
+    @Test("An end from someone other than the creator is ignored")
+    func foreignEndIgnored() {
+        let result = summary([start(), end(by: bob, at: 3_000)])
+        #expect(!result.isEnded)
+        #expect(result.winningAnswerIds.isEmpty)
+    }
+
+    @Test("Own selections include a staged echo")
+    func ownSelectionsIncludeEcho() {
+        let result = summary([
+            start(),
+            vote(alice, ["a2"], at: 2_000, id: "local:t1"),
+        ])
+        #expect(result.ownSelections == ["a2"])
+        #expect(result.totalVotes == 1)
+    }
+
+    @Test("Undisclosed kind carries through")
+    func undisclosedKind() {
+        let result = summary([
+            start(kind: "org.matrix.msc3381.poll.undisclosed"),
+        ])
+        #expect(result.kind == .undisclosed)
+    }
+}
+
 @Suite("ObservableTimeline highlights and reactions")
 @MainActor
 struct ObservableTimelineHighlightTests {
@@ -623,7 +760,7 @@ struct ObservableTimelineHighlightTests {
             ])
         let events = rendered(events: [message, vote])
         #expect(events.count == 1)
-        #expect(events[0].kind == .poll(question: "Lunch?"))
+        #expect(events[0].kind == .poll(PollSummary(question: "Lunch?", answers: [])))
     }
 
     @Test("Redacted reactions are excluded from aggregation")

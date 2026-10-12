@@ -414,6 +414,18 @@ public struct MessageEvent: Hashable, Sendable, Codable {
         return decoded
     }
 
+    /// Decode `content` as `m.poll.start` (stable and MSC3381 prefixes).
+    /// Never fails on novel shapes (all fields default), so gate use on
+    /// the event type — any event decodes, but only poll starts are one.
+    public var pollStartContent: PollStartContent? {
+        // Re-encode through JSON to decode the concrete content type.
+        guard
+            let data = try? JSONEncoder().encode(content),
+            let decoded = try? JSONDecoder().decode(PollStartContent.self, from: data)
+        else { return nil }
+        return decoded
+    }
+
     /// Decode just the `m.relates_to` relation straight from the wire shape.
     ///
     /// Unlike `messageContent`, this does not require `msgtype`, so it also
@@ -581,17 +593,209 @@ public struct PollResponseContent: Hashable, Sendable, Codable {
 }
 
 /// `m.poll.end` content (stable and MSC3381 prefixes): closes the
-/// referenced poll. Carries only the `m.reference` relation.
+/// referenced poll. Carries the `m.reference` relation and an `m.text`
+/// fallback for clients without poll support.
 public struct PollEndContent: Hashable, Sendable, Codable {
     /// `m.reference` relation pointing at the `m.poll.start` event.
     public var relatesTo: RelatesTo
+    /// Plain-text fallback (`m.text`).
+    public var fallbackText: String
 
-    public init(relatesTo: RelatesTo) {
+    public init(relatesTo: RelatesTo, fallbackText: String = "Poll ended") {
         self.relatesTo = relatesTo
+        self.fallbackText = fallbackText
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        relatesTo = try container.decode(RelatesTo.self, forKey: .relatesTo)
+        fallbackText = (try? container.decodeIfPresent(String.self, forKey: .fallbackText))
+            ?? "Poll ended"
     }
 
     private enum CodingKeys: String, CodingKey {
         case relatesTo = "m.relates_to"
+        case fallbackText = "m.text"
+    }
+}
+
+/// Whether a poll's counts are visible before it ends (MSC3381).
+public enum PollKind: Hashable, Sendable {
+    /// Counts update as votes arrive.
+    case disclosed
+    /// Counts stay hidden until the poll ends.
+    case undisclosed
+}
+
+/// `m.poll.start` content (stable and MSC3381 prefixes): a question, its
+/// answers, and the selection rules.
+public struct PollStartContent: Hashable, Sendable, Codable {
+    /// One selectable answer.
+    public struct Answer: Hashable, Sendable, Codable {
+        /// Answer ID referenced by `PollResponseContent.answers`.
+        public var id: String
+        /// Answer text.
+        public var text: String
+
+        public init(id: String, text: String) {
+            self.id = id
+            self.text = text
+        }
+
+        public init(from decoder: any Decoder) throws {
+            let object = try decoder.singleValueContainer().decode([String: AnyCodable].self)
+            guard let id = object["id"]?.stringValue else {
+                throw DecodingError.dataCorrupted(.init(
+                    codingPath: decoder.codingPath,
+                    debugDescription: "Poll answer has no id"))
+            }
+            self.id = id
+            text = PollStartContent.text(in: object) ?? ""
+        }
+
+        public func encode(to encoder: any Encoder) throws {
+            let object: [String: AnyCodable] = [
+                "id": .string(id),
+                "org.matrix.msc1767.text": .string(text),
+            ]
+            var container = encoder.singleValueContainer()
+            try container.encode(object)
+        }
+    }
+
+    /// Question text.
+    public var question: String
+    /// Disclosure mode.
+    public var kind: PollKind
+    /// Maximum answers a voter may select (at least 1).
+    public var maxSelections: Int
+    /// Answers in display order.
+    public var answers: [Answer]
+
+    public init(
+        question: String, kind: PollKind = .disclosed,
+        maxSelections: Int = 1, answers: [Answer] = []
+    ) {
+        self.question = question
+        self.kind = kind
+        self.maxSelections = max(1, maxSelections)
+        self.answers = answers
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let block = (try? container.decodeIfPresent(Block.self, forKey: .stable))
+            ?? (try? container.decodeIfPresent(Block.self, forKey: .unstable))
+        // The question lives in the namespaced block; a top-level `question`
+        // is accepted from earlier drafts.
+        let questionObject = block?.question ?? (try? container.decodeIfPresent(
+            [String: AnyCodable].self, forKey: .question))
+        question = questionObject.flatMap(Self.text(in:)) ?? ""
+        let wireKind = block?.kind
+        kind = wireKind == "m.poll.undisclosed"
+            || wireKind == "org.matrix.msc3381.poll.undisclosed" ? .undisclosed : .disclosed
+        maxSelections = max(1, block?.maxSelections ?? 1)
+        answers = block?.answers ?? []
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(question, forKey: .fallbackText)
+        try container.encode(
+            Block(
+                kind: kind == .undisclosed ? "m.poll.undisclosed" : "m.poll.disclosed",
+                maxSelections: maxSelections, answers: answers,
+                question: ["org.matrix.msc1767.text": .string(question)]),
+            forKey: .stable)
+    }
+
+    /// The first text representation present in a poll text object. Each
+    /// key holds either a plain string or an MSC1767 array of
+    /// `{body, mimetype}` representations; the first representation's
+    /// body is used.
+    private static func text(in object: [String: AnyCodable]) -> String? {
+        for key in ["m.text", "org.matrix.msc1767.text", "body"] {
+            if let text = object[key]?.stringValue { return text }
+            if let first = object[key]?.arrayValue?.first?.objectValue?["body"]?.stringValue {
+                return first
+            }
+        }
+        return nil
+    }
+
+    /// The namespaced selection-rules block (`m.poll.start` or its MSC3381 twin).
+    private struct Block: Codable {
+        var kind: String?
+        var maxSelections: Int?
+        var answers: [Answer]?
+        var question: [String: AnyCodable]?
+
+        private enum CodingKeys: String, CodingKey {
+            case kind
+            case maxSelections = "max_selections"
+            case answers
+            case question
+        }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case question
+        case fallbackText = "m.text"
+        case stable = "m.poll.start"
+        case unstable = "org.matrix.msc3381.poll.start"
+    }
+}
+
+/// Display-ready poll state: the question and answers with vote counts,
+/// the local user's selection, and whether the poll has ended.
+public struct PollSummary: Hashable, Sendable {
+    /// One answer with its current vote count.
+    public struct Answer: Hashable, Sendable {
+        /// Answer ID.
+        public var id: String
+        /// Answer text.
+        public var text: String
+        /// Distinct voters currently selecting this answer.
+        public var voteCount: Int
+
+        public init(id: String, text: String, voteCount: Int = 0) {
+            self.id = id
+            self.text = text
+            self.voteCount = voteCount
+        }
+    }
+
+    /// Question text.
+    public var question: String
+    /// Answers in display order.
+    public var answers: [Answer]
+    /// Disclosure mode.
+    public var kind: PollKind
+    /// Maximum answers a voter may select.
+    public var maxSelections: Int
+    /// Distinct voters with a non-empty selection.
+    public var totalVotes: Int
+    /// Answer IDs the local user currently selects.
+    public var ownSelections: Set<String>
+    /// Whether the poll's creator has ended it.
+    public var isEnded: Bool
+    /// Answers with the most votes once ended. Empty while open or when
+    /// nobody voted.
+    public var winningAnswerIds: Set<String>
+
+    public init(
+        question: String, answers: [Answer], kind: PollKind = .disclosed,
+        maxSelections: Int = 1, totalVotes: Int = 0, ownSelections: Set<String> = [],
+        isEnded: Bool = false, winningAnswerIds: Set<String> = []
+    ) {
+        self.question = question
+        self.answers = answers
+        self.kind = kind
+        self.maxSelections = maxSelections
+        self.totalVotes = totalVotes
+        self.ownSelections = ownSelections
+        self.isEnded = isEnded
+        self.winningAnswerIds = winningAnswerIds
     }
 }
 

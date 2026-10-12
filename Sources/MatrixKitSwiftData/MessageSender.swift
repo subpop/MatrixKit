@@ -331,6 +331,54 @@ public actor MessageSender {
             target: target, key: key, sender: sender)
     }
 
+    // MARK: - Polls
+
+    /// Cast, change, or retract (`answers: []`) a vote on a poll
+    /// (`m.poll.response`), with optimistic UI: the staged echo counts
+    /// immediately and sync confirms it. Encrypted rooms encrypt the
+    /// response. Transport failures cancel the echo; nothing throws.
+    public func vote(_ roomId: RoomId, poll: EventId, answers: [String]) async {
+        guard let localUser else { return }
+        let transactionId = TransactionId.random()
+        let content = PollResponseContent(
+            relatesTo: RelatesTo(eventId: poll, relType: .reference), answers: answers)
+        let echo = stagedEcho(
+            roomId: roomId, sender: localUser,
+            type: EventType.pollResponse.rawValue, content: content,
+            transactionId: transactionId)
+        try? await writer.stageEcho(echo, roomId: roomId, transactionId: transactionId)
+        do {
+            if isEncrypted(roomId) {
+                try await ensureShared(roomId)
+                try await roomCrypto.sendEncryptedContent(
+                    roomId, content, deviceId: ownDeviceId,
+                    transactionId: transactionId)
+            } else {
+                try await messages.sendEvent(
+                    roomId, eventType: EventType.pollResponse.rawValue,
+                    content: content, transactionId: transactionId)
+            }
+        } catch {
+            try? await writer.cancelEcho(transactionId: transactionId)
+        }
+    }
+
+    /// End a poll (`m.poll.end`). Only the poll creator's end takes effect.
+    public func endPoll(
+        _ roomId: RoomId, poll: EventId
+    ) async throws(MatrixError) {
+        let content = PollEndContent(
+            relatesTo: RelatesTo(eventId: poll, relType: .reference))
+        if isEncrypted(roomId) {
+            try await ensureShared(roomId)
+            try await roomCrypto.sendEncryptedContent(
+                roomId, content, deviceId: ownDeviceId)
+        } else {
+            try await messages.sendEvent(
+                roomId, eventType: EventType.pollEnd.rawValue, content: content)
+        }
+    }
+
     // MARK: - Redaction
 
     /// Redact an event. Local (unsent) echoes are cancelled instead of

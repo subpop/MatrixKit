@@ -183,6 +183,42 @@ struct MessageSenderTests {
         }
     }
 
+    @Test("Vote stages an echo and PUTs the response")
+    func voteEcho() async throws {
+        try await withHarness { harness in
+            let (sender, writer, _, _) = try await sender(harness)
+            let room = RoomId(unchecked: "!room:test")
+            await sender.vote(room, poll: EventId(unchecked: "$poll:test"), answers: ["a1"])
+            #expect(await sends(harness, containing: "/send/m.poll.response/").count == 1)
+            let stored = try await writer.storedEvents(roomId: room)
+            #expect(stored.contains {
+                $0.eventId.value.hasPrefix("local:") && $0.type == "m.poll.response"
+            })
+        }
+    }
+
+    @Test("Failed vote cancels its echo")
+    func voteFailure() async throws {
+        try await withHarness { harness in
+            let (sender, writer, _, _) = try await sender(harness, token: nil)
+            let room = RoomId(unchecked: "!room:test")
+            await sender.vote(room, poll: EventId(unchecked: "$poll:test"), answers: ["a1"])
+            let stored = try await writer.storedEvents(roomId: room)
+            #expect(!stored.contains { $0.eventId.value.hasPrefix("local:") })
+        }
+    }
+
+    @Test("End poll PUTs the end event")
+    func endPoll() async throws {
+        try await withHarness { harness in
+            let (sender, _, _, _) = try await sender(harness)
+            let (rooms, _, _) = await harness.roomClient()
+            let room = try await rooms.create(CreateRoomRequest(name: "Polls"))
+            try await sender.endPoll(room, poll: EventId(unchecked: "$poll:test"))
+            #expect(await sends(harness, containing: "/send/m.poll.end/").count == 1)
+        }
+    }
+
     @Test("Redact cancels unsent echoes instead of posting")
     func redactEcho() async throws {
         try await withHarness { harness in

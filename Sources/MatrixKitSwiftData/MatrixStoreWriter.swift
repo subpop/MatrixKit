@@ -653,6 +653,7 @@ public actor MatrixStoreWriter {
         let isMessageLike =
             event.type == EventType.roomMessage.rawValue
                 || event.type == EventType.sticker.rawValue
+                || EventType(rawValue: event.type) == .pollStart
         let relation = event.wireRelation
         return (
             isState, isMessageLike,

@@ -161,6 +161,59 @@ struct EventTypeTests {
         #expect(unstableContent.answers == ["a9"])
     }
 
+    @Test("Poll start decodes question, rules, and answers under either prefix")
+    func pollStartContent() throws {
+        let stable = """
+            {"question":{"org.matrix.msc1767.text":"Lunch?"},
+             "m.poll.start":{"kind":"m.poll.undisclosed","max_selections":0,
+               "answers":[{"id":"a1","org.matrix.msc1767.text":"Pizza"},
+                          {"id":"a2","org.matrix.msc1767.text":"Tacos"}]}}
+            """.data(using: .utf8)!
+        let stableContent = try JSONDecoder().decode(PollStartContent.self, from: stable)
+        #expect(stableContent.question == "Lunch?")
+        #expect(stableContent.kind == .undisclosed)
+        #expect(stableContent.maxSelections == 1)
+        #expect(stableContent.answers == [
+            PollStartContent.Answer(id: "a1", text: "Pizza"),
+            PollStartContent.Answer(id: "a2", text: "Tacos"),
+        ])
+
+        let unstable = """
+            {"question":{"body":"Dinner?"},
+             "org.matrix.msc3381.poll.start":{"kind":"org.matrix.msc3381.poll.disclosed",
+               "max_selections":2,"answers":[{"id":"b1","m.text":"Soup"}]}}
+            """.data(using: .utf8)!
+        let unstableContent = try JSONDecoder().decode(PollStartContent.self, from: unstable)
+        #expect(unstableContent.question == "Dinner?")
+        #expect(unstableContent.kind == .disclosed)
+        #expect(unstableContent.maxSelections == 2)
+        #expect(unstableContent.answers == [PollStartContent.Answer(id: "b1", text: "Soup")])
+
+        let mscArray = """
+            {"question":{"m.text":[{"body":"Open poll test","mimetype":"text/plain"}]},
+             "m.poll.start":{"kind":"m.poll.disclosed",
+               "answers":[{"id":"c1","m.text":[{"body":"Option 1"}]}]}}
+            """.data(using: .utf8)!
+        let mscContent = try JSONDecoder().decode(PollStartContent.self, from: mscArray)
+        #expect(mscContent.question == "Open poll test")
+        #expect(mscContent.answers == [PollStartContent.Answer(id: "c1", text: "Option 1")])
+
+        let element = """
+            {"org.matrix.msc1767.text":"Open poll test\\n1. Option 1",
+             "org.matrix.msc3381.poll.start":{
+               "answers":[{"id":"1UP2VbXvE2J1TBqy","org.matrix.msc1767.text":"Option 1"}],
+               "kind":"org.matrix.msc3381.poll.disclosed","max_selections":1,
+               "question":{"body":"Open poll test","msgtype":"m.text",
+                           "org.matrix.msc1767.text":"Open poll test"}}}
+            """.data(using: .utf8)!
+        let elementContent = try JSONDecoder().decode(PollStartContent.self, from: element)
+        #expect(elementContent.question == "Open poll test")
+        #expect(elementContent.kind == .disclosed)
+        #expect(elementContent.answers == [
+            PollStartContent.Answer(id: "1UP2VbXvE2J1TBqy", text: "Option 1"),
+        ])
+    }
+
     @Test("Poll end decodes the reference relation")
     func pollEndContent() throws {
         let data = """

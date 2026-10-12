@@ -31,8 +31,9 @@ public enum MessageKind: Hashable, Sendable {
     case liveLocation(body: String)
     /// `m.sticker` with MXC URL and file metadata.
     case sticker(body: String, url: String?, info: MediaInfo?)
-    /// `m.poll.start` (stable and MSC3381 prefixes).
-    case poll(question: String)
+    /// `m.poll.start` (stable and MSC3381 prefixes) with its answers and
+    /// vote state.
+    case poll(PollSummary)
     /// `m.poll.end` (stable and MSC3381 prefixes) — the poll closed.
     case pollEnd
     /// In-room `m.key.verification.request` message with a
@@ -104,8 +105,9 @@ public final class ObservableTimelineEvent {
     public let sender: UserId
     /// Send time, converted from the server's `origin_server_ts`.
     public let timestamp: Date
-    /// Classified content for `switch`-based rendering.
-    public let kind: MessageKind
+    /// Classified content for `switch`-based rendering. Poll counts are
+    /// folded in during ``render(_:members:localUser:highlightKeywords:sendStates:)``.
+    public private(set) var kind: MessageKind
     /// HTML body, when the event carries `org.matrix.custom.html`.
     /// Render in preference to the plain body inside `kind`.
     public let formattedBody: String?
@@ -266,8 +268,9 @@ public final class ObservableTimelineEvent {
     }
 
     /// Render a snapshot into display-ready events: aggregate reactions
-    /// (redacted ones excluded), fold edits into their targets (last
-    /// edit wins), hide reactions/redactions/edits, resolve replies and
+    /// (redacted ones excluded), fold poll votes into their polls, fold
+    /// edits into their targets (last edit wins), hide
+    /// reactions/redactions/edits/poll votes, resolve replies and
     /// highlights, and coalesce fresh-join profile noise. Pure —
     /// `@Query` apps call this over stored rows.
     public static func render(
@@ -289,6 +292,7 @@ public final class ObservableTimelineEvent {
             reactionMap[content.relatesTo.eventId, default: [:]][content.relatesTo.key, default: []]
                 .append(event.sender)
         }
+        let polls = pollSummaries(in: snapshot, localUser: localUser)
         // Fold edits: target event -> replacement content (last edit wins).
         var editMap: [EventId: MessageContent] = [:]
         for event in snapshot {
@@ -327,6 +331,9 @@ public final class ObservableTimelineEvent {
         let rendered: [ObservableTimelineEvent] = visible.map { event in
             let wrapper = make(
                 from: event, localUser: localUser, members: members)
+            if let summary = polls[event.eventId] {
+                wrapper.kind = .poll(summary)
+            }
             let reactions = reactionMap[event.eventId] ?? [:]
             wrapper.reactions = reactions
             if editMap[event.eventId] != nil {
@@ -489,6 +496,95 @@ public final class ObservableTimelineEvent {
         return kept
     }
 
+    /// Decode an event's content as `T` via a JSON round trip.
+    private static func decoded<T: Decodable>(_ type: T.Type, from event: MessageEvent) -> T? {
+        guard let data = try? JSONEncoder().encode(event.content) else { return nil }
+        return try? JSONDecoder().decode(T.self, from: data)
+    }
+
+    /// The poll start as a summary with zero votes. Content that won't
+    /// decode still renders as a poll, titled "Poll".
+    static func pollSummary(for event: MessageEvent) -> PollSummary {
+        guard let start = decoded(PollStartContent.self, from: event) else {
+            return PollSummary(question: "Poll", answers: [])
+        }
+        return PollSummary(
+            question: start.question.isEmpty ? "Poll" : start.question,
+            answers: start.answers.map { PollSummary.Answer(id: $0.id, text: $0.text) },
+            kind: start.kind,
+            maxSelections: start.maxSelections)
+    }
+
+    /// Poll summaries keyed by `m.poll.start` event ID, with votes and end
+    /// state folded in. A vote is each sender's latest response, after
+    /// dropping unknown answers, truncating to `maxSelections`, and
+    /// ignoring responses after the poll's end. An empty selection retracts
+    /// the vote. A poll ends at the creator's earliest `m.poll.end`.
+    static func pollSummaries(
+        in snapshot: [MessageEvent], localUser: UserId?
+    ) -> [EventId: PollSummary] {
+        var polls: [EventId: (creator: UserId, summary: PollSummary)] = [:]
+        for event in snapshot
+        where EventType(rawValue: event.type) == .pollStart && !event.isRedacted {
+            polls[event.eventId] = (event.sender, pollSummary(for: event))
+        }
+        guard !polls.isEmpty else { return [:] }
+
+        var endTimestamps: [EventId: Int] = [:]
+        for event in snapshot
+        where EventType(rawValue: event.type) == .pollEnd && !event.isRedacted {
+            guard
+                let target = decoded(PollEndContent.self, from: event)?.relatesTo.eventId,
+                let poll = polls[target], poll.creator == event.sender
+            else { continue }
+            endTimestamps[target] = min(
+                endTimestamps[target] ?? event.originServerTs, event.originServerTs)
+        }
+
+        var votes: [EventId: [UserId: (ts: Int, answers: [String])]] = [:]
+        for event in snapshot
+        where EventType(rawValue: event.type) == .pollResponse && !event.isRedacted {
+            guard
+                let content = decoded(PollResponseContent.self, from: event),
+                let target = content.relatesTo.eventId,
+                let poll = polls[target]
+            else { continue }
+            if let end = endTimestamps[target], event.originServerTs > end { continue }
+            let known = Set(poll.summary.answers.map(\.id))
+            var selection: [String] = []
+            for id in content.answers where known.contains(id) && !selection.contains(id) {
+                selection.append(id)
+            }
+            selection = Array(selection.prefix(poll.summary.maxSelections))
+            if let previous = votes[target]?[event.sender], previous.ts > event.originServerTs {
+                continue
+            }
+            votes[target, default: [:]][event.sender] = (event.originServerTs, selection)
+        }
+
+        var summaries: [EventId: PollSummary] = [:]
+        for (pollId, poll) in polls {
+            var summary = poll.summary
+            let selections = votes[pollId] ?? [:]
+            var counts: [String: Int] = [:]
+            for vote in selections.values {
+                for id in vote.answers { counts[id, default: 0] += 1 }
+            }
+            summary.answers = summary.answers.map {
+                PollSummary.Answer(id: $0.id, text: $0.text, voteCount: counts[$0.id] ?? 0)
+            }
+            summary.totalVotes = selections.values.filter { !$0.answers.isEmpty }.count
+            summary.ownSelections = Set(localUser.flatMap { selections[$0]?.answers } ?? [])
+            summary.isEnded = endTimestamps[pollId] != nil
+            let top = summary.answers.map(\.voteCount).max() ?? 0
+            summary.winningAnswerIds = summary.isEnded && top > 0
+                ? Set(summary.answers.filter { $0.voteCount == top }.map(\.id))
+                : []
+            summaries[pollId] = summary
+        }
+        return summaries
+    }
+
     private static func classify(
         _ event: MessageEvent, members: [UserId: MemberContent]
     ) -> MessageKind {
@@ -535,10 +631,7 @@ public final class ObservableTimelineEvent {
                 url: event.content["url"]?.stringValue,
                 info: mediaInfo(in: event.content))
         case .pollStart:
-            let question = event.content["question"]?.objectValue?["org.matrix.msc1767.text"]?.stringValue
-                ?? event.content["question"]?.objectValue?["body"]?.stringValue
-                ?? "Poll"
-            return .poll(question: question)
+            return .poll(pollSummary(for: event))
         case .pollEnd:
             return .pollEnd
         case .roomEncrypted:
