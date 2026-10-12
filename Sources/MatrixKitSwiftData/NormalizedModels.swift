@@ -54,6 +54,13 @@ public final class SDRoom {
     /// Oldest message-like event newer than the read marker, if any.
     public var firstUnreadEventId: String?
     public var prevBatch: String?
+    /// `originServerTs` of the oldest event `prevBatch` sits just before.
+    /// Nil when unknown (e.g. existing stores predating this field).
+    public var prevBatchTs: Int?
+    /// When set, `prevBatch` must not be used for back-pagination — a
+    /// local trim opened a gap directly before this event. The client
+    /// should resume history before it using `/context` instead.
+    public var historyGapEventId: String?
     public var fullyRead: String?
     /// Client-side read-marker timestamp (ms since epoch), if known.
     public var readMarkerTs: Int?

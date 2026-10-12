@@ -126,6 +126,10 @@ public actor MatrixStoreWriter {
         if let prevBatch = delta.prevBatch {
             if delta.timelineLimited || room.prevBatch == nil {
                 room.prevBatch = prevBatch.value
+                room.prevBatchTs = delta.timeline.map(\.originServerTs).min()
+                if delta.timelineLimited {
+                    room.historyGapEventId = nil
+                }
             }
         }
         if !delta.state.isEmpty {
@@ -265,8 +269,86 @@ public actor MatrixStoreWriter {
             try insertEvent(event, roomId: roomId.value, room: room)
         }
         room.prevBatch = prevBatch?.value
+        if let minTs = events.map(\.originServerTs).min() {
+            room.prevBatchTs = minTs
+        }
+        room.historyGapEventId = nil
         try recomputeUnread(room: room)
         try modelContext.save()
+    }
+
+    /// Resolve a history gap using events recovered from `/context`
+    /// around `historyGapEventId`. Identical to `prependHistory` —
+    /// insertion, cursor adoption, and anchor clearing are the same —
+    /// under a name that matches the `/context` recovery flow rather
+    /// than `/messages` pagination.
+    public func resolveHistoryGap(
+        _ events: [MessageEvent], roomId: RoomId, prevBatch: BatchToken?
+    ) throws {
+        try prependHistory(events, roomId: roomId, prevBatch: prevBatch)
+    }
+
+    /// Delete locally cached timeline rows older than `cutoff`. Local only.
+    /// Each room always keeps its newest `minimum` message-like events
+    /// (and everything interleaved with them), so no room looks empty.
+    /// Returns the IDs of rooms that lost rows.
+    @discardableResult
+    public func trimEvents(
+        olderThan cutoff: Date, keepingLatestMessages minimum: Int = 50
+    ) throws -> [RoomId] {
+        let cutoffTs = Int(cutoff.timeIntervalSince1970 * 1000)
+        var changed: [RoomId] = []
+        for room in try modelContext.fetch(FetchDescriptor<SDRoom>())
+        where try trimRoom(room, cutoffTs: cutoffTs, minimum: minimum) {
+            changed.append(RoomId(unchecked: room.roomId))
+        }
+        if !changed.isEmpty {
+            try modelContext.save()
+        }
+        return changed
+    }
+
+    /// One room's trim pass, factored out of `trimEvents` so the
+    /// per-room fetch/delete/anchor steps aren't duplicated across the
+    /// room loop. Deletes rows below the effective threshold (`cutoff`,
+    /// floored by the newest `minimum` message-like events), never
+    /// touching pending/failed echoes. Sets `historyGapEventId` when the
+    /// deletion opens a hole `prevBatch` can no longer reach. Returns
+    /// whether any row was deleted.
+    private func trimRoom(
+        _ room: SDRoom, cutoffTs: Int, minimum: Int
+    ) throws -> Bool {
+        let id = room.roomId
+        var newest = FetchDescriptor<SDRoomEvent>(
+            predicate: #Predicate { $0.roomId == id && $0.isMessageLike },
+            sortBy: [SortDescriptor(\.ts, order: .reverse)])
+        newest.fetchLimit = minimum
+        let floor = try modelContext.fetch(newest)
+        guard floor.count >= minimum, let floorTs = floor.last?.ts else {
+            return false
+        }
+        let threshold = min(cutoffTs, floorTs)
+        let toDelete = try modelContext.fetch(
+            FetchDescriptor<SDRoomEvent>(predicate: #Predicate {
+                $0.roomId == id && $0.ts < threshold && $0.sendState == nil
+            }))
+        guard !toDelete.isEmpty else { return false }
+        for row in toDelete {
+            modelContext.delete(row)
+        }
+        var oldest = FetchDescriptor<SDRoomEvent>(
+            predicate: #Predicate {
+                $0.roomId == id && ($0.ts >= threshold || $0.sendState != nil)
+            },
+            sortBy: [SortDescriptor(\.ts)])
+        oldest.fetchLimit = 1
+        if let first = try modelContext.fetch(oldest).first,
+            room.prevBatchTs == nil || room.prevBatchTs! < threshold
+        {
+            room.historyGapEventId = first.eventId
+        }
+        try recomputeUnread(room: room)
+        return true
     }
 
     /// Record the latest fully-read event (drives unread badges).

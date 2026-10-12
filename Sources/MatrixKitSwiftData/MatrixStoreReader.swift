@@ -50,6 +50,9 @@ public struct StoredRoomDetail: Hashable, Sendable {
     public var highlight: Int
     public var effectiveUnread: Int
     public var prevBatch: String?
+    /// When set, `prevBatch` is unusable for back-pagination; resume
+    /// before this event using `/context`. See `SDRoom.historyGapEventId`.
+    public var historyGapEventId: String?
     public var fullyRead: String?
     public var firstUnreadEventId: String?
     public var memberCount: Int
@@ -170,6 +173,7 @@ public struct MatrixStoreReader: Sendable {
             highlight: room.highlight,
             effectiveUnread: room.effectiveUnread,
             prevBatch: room.prevBatch,
+            historyGapEventId: room.historyGapEventId,
             fullyRead: room.fullyRead,
             firstUnreadEventId: room.firstUnreadEventId,
             memberCount: members.count,

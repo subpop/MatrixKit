@@ -75,6 +75,12 @@ struct MatrixStoreWriterTests {
                 predicate: #Predicate { $0.roomId == id })).first)
     }
 
+    /// Builds a `Date` from a millisecond `originServerTs`-style value, the
+    /// inverse of `trimEvents`' cutoff conversion.
+    private func date(ms: Int) -> Date {
+        Date(timeIntervalSince1970: TimeInterval(ms) / 1000)
+    }
+
     private func stateDelta(_ id: String) -> JoinedRoomDelta {
         switch id {
         case "name":
@@ -950,6 +956,321 @@ struct MatrixStoreWriterTests {
         #expect(try await writer.encryptedEvents(roomId: roomId).isEmpty)
         let stored = try await writer.storedEvents(roomId: roomId)
         #expect(stored.first?.messageContent?.body == "hi")
+    }
+
+    // MARK: - Event trimming
+
+    @Test("Basic cutoff deletes only rows older than it")
+    func trimBasicCutoff() async throws {
+        let (writer, _) = try writer()
+        let roomId = RoomId(unchecked: "!room:x")
+        let old = [unreadMessage("a", ts: 10), unreadMessage("b", ts: 20)]
+        let new = [
+            unreadMessage("c", ts: 100), unreadMessage("d", ts: 110),
+            unreadMessage("e", ts: 120), unreadMessage("f", ts: 130),
+        ]
+        try await writer.apply(joinedTimelineDelta(old + new, nextBatch: "s1"))
+        let changed = try await writer.trimEvents(
+            olderThan: date(ms: 50), keepingLatestMessages: 3)
+        #expect(changed == [roomId])
+        let events = try await writer.storedEvents(roomId: roomId)
+        #expect(events.map(\.eventId.value) == ["$c", "$d", "$e", "$f"])
+    }
+
+    @Test("Floor keeps the newest minimum messages when all are older than cutoff")
+    func trimFloorKeepsNewest() async throws {
+        let (writer, _) = try writer()
+        let roomId = RoomId(unchecked: "!room:x")
+        let messages = [
+            unreadMessage("a", ts: 10), unreadMessage("b", ts: 20),
+            unreadMessage("c", ts: 30), unreadMessage("d", ts: 40),
+            unreadMessage("e", ts: 50),
+        ]
+        try await writer.apply(joinedTimelineDelta(messages, nextBatch: "s1"))
+        let changed = try await writer.trimEvents(
+            olderThan: date(ms: 1000), keepingLatestMessages: 3)
+        #expect(changed == [roomId])
+        let events = try await writer.storedEvents(roomId: roomId)
+        #expect(events.map(\.eventId.value) == ["$c", "$d", "$e"])
+    }
+
+    @Test("Interleaved non-message events follow the message floor")
+    func trimInterleaved() async throws {
+        let (writer, _) = try writer()
+        let roomId = RoomId(unchecked: "!room:x")
+        let messages = [
+            unreadMessage("a", ts: 10), unreadMessage("b", ts: 20),
+            unreadMessage("c", ts: 30), unreadMessage("d", ts: 40),
+            unreadMessage("e", ts: 50),
+        ]
+        // Between "c" and "d": survives alongside the kept messages.
+        let keptReaction = reactionEvent("r1", target: "c", ts: 35)
+        // Older than the floor ("c" at ts 30): deleted with the rest.
+        let droppedReaction = reactionEvent("r2", target: "a", ts: 15)
+        try await writer.apply(joinedTimelineDelta(
+            messages + [keptReaction, droppedReaction], nextBatch: "s1"))
+        let changed = try await writer.trimEvents(
+            olderThan: date(ms: 1000), keepingLatestMessages: 3)
+        #expect(changed == [roomId])
+        let events = try await writer.storedEvents(roomId: roomId)
+        #expect(events.map(\.eventId.value) == ["$c", "$r1", "$d", "$e"])
+    }
+
+    @Test("Rooms under the message floor are left untouched")
+    func trimUnderFloor() async throws {
+        let (writer, _) = try writer()
+        let roomId = RoomId(unchecked: "!room:x")
+        let messages = [unreadMessage("a", ts: 10), unreadMessage("b", ts: 20)]
+        try await writer.apply(joinedTimelineDelta(messages, nextBatch: "s1"))
+        let changed = try await writer.trimEvents(
+            olderThan: date(ms: 1000), keepingLatestMessages: 3)
+        #expect(changed.isEmpty)
+        let events = try await writer.storedEvents(roomId: roomId)
+        #expect(events.map(\.eventId.value) == ["$a", "$b"])
+    }
+
+    @Test("Membership churn doesn't count toward the message floor")
+    func trimMembershipChurn() async throws {
+        let (writer, _) = try writer()
+        let roomId = RoomId(unchecked: "!room:x")
+        let members = (1...5).map {
+            memberStateEvent(
+                "@user\($0):x", membership: "join", id: "$m\($0)", ts: $0)
+        }
+        let fewMessages = [unreadMessage("a", ts: 6), unreadMessage("b", ts: 7)]
+        try await writer.apply(joinedTimelineDelta(
+            members + fewMessages, nextBatch: "s1"))
+        // Fewer than `minimum` messages: the room (and its old state
+        // churn) is skipped entirely, even though it has plenty of rows.
+        var changed = try await writer.trimEvents(
+            olderThan: date(ms: 1000), keepingLatestMessages: 3)
+        #expect(changed.isEmpty)
+        var events = try await writer.storedEvents(roomId: roomId)
+        #expect(events.count == members.count + fewMessages.count)
+
+        // A third message reaches `minimum`; state older than the
+        // resulting floor is now deleted.
+        try await writer.apply(joinedTimelineDelta(
+            [unreadMessage("c", ts: 8)], nextBatch: "s2"))
+        changed = try await writer.trimEvents(
+            olderThan: date(ms: 1000), keepingLatestMessages: 3)
+        #expect(changed == [roomId])
+        events = try await writer.storedEvents(roomId: roomId)
+        #expect(events.map(\.eventId.value) == ["$a", "$b", "$c"])
+    }
+
+    @Test("Pending and failed echoes survive regardless of age")
+    func trimEchoesSurvive() async throws {
+        let (writer, _) = try writer()
+        let roomId = RoomId(unchecked: "!room:x")
+        let messages = [
+            unreadMessage("old", ts: 5),
+            unreadMessage("a", ts: 100), unreadMessage("b", ts: 110),
+            unreadMessage("c", ts: 120),
+        ]
+        try await writer.apply(joinedTimelineDelta(messages, nextBatch: "s1"))
+        try await writer.stageEcho(
+            snapshotMessage("pending", id: "$pending", ts: 10),
+            roomId: roomId, transactionId: TransactionId("t1"))
+        try await writer.stageEcho(
+            snapshotMessage("failed", id: "$failed", ts: 20),
+            roomId: roomId, transactionId: TransactionId("t2"))
+        try await writer.failEcho(
+            transactionId: TransactionId("t2"), reason: "offline")
+
+        let changed = try await writer.trimEvents(
+            olderThan: date(ms: 50), keepingLatestMessages: 3)
+        #expect(changed == [roomId])
+        let events = try await writer.storedEvents(roomId: roomId)
+        #expect(
+            Set(events.map(\.eventId.value))
+                == ["$pending", "$failed", "$a", "$b", "$c"])
+    }
+
+    @Test("Trimming sets the gap anchor when prevBatch can no longer reach the new frontier")
+    func trimSetsAnchor() async throws {
+        let (writer, container) = try writer()
+        // Event IDs are globally unique, so the two rooms need disjoint
+        // IDs even though their shapes are identical.
+        func messages(_ suffix: String) -> [MessageEvent] {
+            [
+                unreadMessage("a\(suffix)", ts: 10), unreadMessage("b\(suffix)", ts: 20),
+                unreadMessage("c\(suffix)", ts: 100), unreadMessage("d\(suffix)", ts: 110),
+                unreadMessage("e\(suffix)", ts: 120),
+            ]
+        }
+        // Unknown cursor: prevBatchTs was never recorded.
+        try await writer.apply(joinedTimelineDelta(
+            messages("1"), roomId: "!unknown:x", nextBatch: "s1"))
+        // Known cursor, but anchored older than the new frontier.
+        try await writer.apply(joinedTimelineDelta(
+            messages("2"), roomId: "!stale:x", nextBatch: "s1"))
+        try await writer.prependHistory(
+            [stateEvent(type: "m.room.name", id: "$old-state", ts: 5)],
+            roomId: RoomId(unchecked: "!stale:x"), prevBatch: BatchToken("p0"))
+
+        let changed = try await writer.trimEvents(
+            olderThan: date(ms: 50), keepingLatestMessages: 3)
+        #expect(
+            Set(changed)
+                == [RoomId(unchecked: "!unknown:x"), RoomId(unchecked: "!stale:x")])
+        #expect(try self.room(container, "!unknown:x").historyGapEventId == "$c1")
+        #expect(try self.room(container, "!stale:x").historyGapEventId == "$c2")
+    }
+
+    @Test("A fresh prevBatch anchor is left alone")
+    func trimLeavesFreshAnchor() async throws {
+        let (writer, container) = try writer()
+        let roomId = RoomId(unchecked: "!room:x")
+        let messages = [
+            unreadMessage("a", ts: 10), unreadMessage("b", ts: 20),
+            unreadMessage("c", ts: 100), unreadMessage("d", ts: 110),
+            unreadMessage("e", ts: 120),
+        ]
+        try await writer.apply(joinedTimelineDelta(messages, nextBatch: "s1"))
+        try await writer.prependHistory(
+            [stateEvent(type: "m.room.topic", id: "$anchor-marker", ts: 60)],
+            roomId: roomId, prevBatch: BatchToken("p0"))
+        #expect(try self.room(container, "!room:x").prevBatchTs == 60)
+
+        let changed = try await writer.trimEvents(
+            olderThan: date(ms: 50), keepingLatestMessages: 3)
+        #expect(changed == [roomId])
+        let stored = try self.room(container, "!room:x")
+        #expect(stored.historyGapEventId == nil)
+        #expect(stored.prevBatch == "p0")
+    }
+
+    @Test("prependHistory, resolveHistoryGap, and a limited apply each clear the anchor")
+    func trimAnchorClearing() async throws {
+        let (writer, container) = try writer()
+        // Event IDs are globally unique, so each room needs its own set.
+        func seedGap(_ roomId: String, suffix: String) async throws {
+            try await writer.apply(joinedTimelineDelta(
+                [
+                    unreadMessage("a\(suffix)", ts: 10), unreadMessage("b\(suffix)", ts: 20),
+                    unreadMessage("c\(suffix)", ts: 100), unreadMessage("d\(suffix)", ts: 110),
+                    unreadMessage("e\(suffix)", ts: 120),
+                ], roomId: roomId, nextBatch: "s1"))
+            _ = try await writer.trimEvents(
+                olderThan: date(ms: 50), keepingLatestMessages: 3)
+            #expect(
+                try self.room(container, roomId).historyGapEventId == "$c\(suffix)")
+        }
+
+        try await seedGap("!prepend:x", suffix: "1")
+        try await writer.prependHistory(
+            [unreadMessage("c1", ts: 100)],
+            roomId: RoomId(unchecked: "!prepend:x"), prevBatch: BatchToken("p1"))
+        #expect(try self.room(container, "!prepend:x").historyGapEventId == nil)
+
+        try await seedGap("!context:x", suffix: "2")
+        try await writer.resolveHistoryGap(
+            [unreadMessage("c2", ts: 100)],
+            roomId: RoomId(unchecked: "!context:x"), prevBatch: BatchToken("p1"))
+        #expect(try self.room(container, "!context:x").historyGapEventId == nil)
+
+        try await seedGap("!limited:x", suffix: "3")
+        try await writer.apply(SyncDelta(
+            nextBatch: BatchToken("s2"),
+            joined: [RoomId(unchecked: "!limited:x"): JoinedRoomDelta(
+                timeline: [unreadMessage("f", ts: 130)],
+                timelineLimited: true,
+                prevBatch: BatchToken("p2"))]))
+        #expect(try self.room(container, "!limited:x").historyGapEventId == nil)
+    }
+
+    @Test("prevBatchTs records the oldest event at the pagination boundary")
+    func prevBatchTsRecorded() async throws {
+        let (writer, container) = try writer()
+        let roomId = RoomId(unchecked: "!room:x")
+        try await writer.apply(SyncDelta(
+            nextBatch: BatchToken("s1"),
+            joined: [roomId: JoinedRoomDelta(
+                timeline: [unreadMessage("a", ts: 10), unreadMessage("b", ts: 20)],
+                prevBatch: BatchToken("p0"))]))
+        #expect(try self.room(container, "!room:x").prevBatchTs == 10)
+
+        try await writer.prependHistory(
+            [unreadMessage("z", ts: 1)], roomId: roomId, prevBatch: BatchToken("p-1"))
+        #expect(try self.room(container, "!room:x").prevBatchTs == 1)
+    }
+
+    @Test("A second trim with the same cutoff is a no-op")
+    func trimIdempotent() async throws {
+        let (writer, _) = try writer()
+        let roomId = RoomId(unchecked: "!room:x")
+        let messages = [
+            unreadMessage("a", ts: 10), unreadMessage("b", ts: 20),
+            unreadMessage("c", ts: 100), unreadMessage("d", ts: 110),
+            unreadMessage("e", ts: 120),
+        ]
+        try await writer.apply(joinedTimelineDelta(messages, nextBatch: "s1"))
+        let first = try await writer.trimEvents(
+            olderThan: date(ms: 50), keepingLatestMessages: 3)
+        #expect(first == [roomId])
+        let second = try await writer.trimEvents(
+            olderThan: date(ms: 50), keepingLatestMessages: 3)
+        #expect(second.isEmpty)
+    }
+
+    @Test("A busy room with enough recent messages is trimmed at the cutoff alone")
+    func trimBusyRoomUsesCutoff() async throws {
+        let (writer, _) = try writer()
+        let roomId = RoomId(unchecked: "!room:x")
+        let messages = [
+            unreadMessage("a", ts: 10), unreadMessage("b", ts: 20),
+            unreadMessage("c", ts: 100), unreadMessage("d", ts: 110),
+            unreadMessage("e", ts: 120), unreadMessage("f", ts: 130),
+        ]
+        // Older than the floor ("d" at 110) but newer than the cutoff:
+        // the cutoff governs, so it survives.
+        let reaction = reactionEvent("r1", target: "c", ts: 60)
+        try await writer.apply(joinedTimelineDelta(
+            messages + [reaction], nextBatch: "s1"))
+        let changed = try await writer.trimEvents(
+            olderThan: date(ms: 50), keepingLatestMessages: 3)
+        #expect(changed == [roomId])
+        let events = try await writer.storedEvents(roomId: roomId)
+        #expect(events.map(\.eventId.value) == ["$r1", "$c", "$d", "$e", "$f"])
+    }
+
+    @Test("A trim with nothing older than the cutoff returns no rooms")
+    func trimNothingOld() async throws {
+        let (writer, _) = try writer()
+        let roomId = RoomId(unchecked: "!room:x")
+        let messages = (1...5).map { unreadMessage("m\($0)", ts: 100 + $0) }
+        try await writer.apply(joinedTimelineDelta(messages, nextBatch: "s1"))
+        let changed = try await writer.trimEvents(
+            olderThan: date(ms: 50), keepingLatestMessages: 3)
+        #expect(changed.isEmpty)
+        let events = try await writer.storedEvents(roomId: roomId)
+        #expect(events.count == 5)
+    }
+
+    @Test("Trimming recomputes unread counts from the surviving rows")
+    func trimRecomputesUnread() async throws {
+        let (writer, container) = try writer()
+        let roomId = RoomId(unchecked: "!room:x")
+        try await writer.setLocalUser(UserId(unchecked: "@me:x"))
+        let messages = [
+            unreadMessage("a", ts: 10), unreadMessage("b", ts: 20),
+            unreadMessage("c", ts: 100), unreadMessage("d", ts: 110),
+            unreadMessage("e", ts: 120),
+        ]
+        try await writer.apply(joinedTimelineDelta(messages, nextBatch: "s1"))
+        try await writer.setFullyRead(
+            roomId: roomId, eventId: EventId(unchecked: "$a"))
+        // Before trimming: four peer messages newer than the marker.
+        #expect(try self.room(container, "!room:x").effectiveUnread == 4)
+        #expect(try self.room(container, "!room:x").firstUnreadEventId == "$b")
+
+        _ = try await writer.trimEvents(
+            olderThan: date(ms: 50), keepingLatestMessages: 3)
+        let stored = try self.room(container, "!room:x")
+        // "a" and "b" are gone; the new first-unread is the oldest survivor.
+        #expect(stored.effectiveUnread == 3)
+        #expect(stored.firstUnreadEventId == "$c")
     }
 }
 #endif
