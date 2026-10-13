@@ -20,6 +20,8 @@ struct StoreReaderTests {
         var id: String
         var name: String?
         var members: [String]
+        var displaynames: [String: String] = [:]
+        var heroes: [String] = []
         var expected: String
     }
 
@@ -30,6 +32,14 @@ struct StoreReaderTests {
         DisplayNameCase(
             id: "member-fallback", name: nil,
             members: ["@alice:x", "@me:x"], expected: "@alice:x"),
+        DisplayNameCase(
+            id: "member-displayname", name: nil,
+            members: ["@alice:x", "@me:x"],
+            displaynames: ["@alice:x": "Alice"],
+            expected: "Alice"),
+        DisplayNameCase(
+            id: "heroes-fallback", name: nil, members: [],
+            heroes: ["@alice:x", "@me:x"], expected: "@alice:x"),
         DisplayNameCase(
             id: "room-id-fallback", name: nil, members: [],
             expected: "!room:x"),
@@ -62,11 +72,14 @@ struct StoreReaderTests {
         }
         for (index, user) in row.members.enumerated() {
             state.append(memberStateEvent(
-                user, membership: "join", id: "$m\(index)"))
+                user, membership: "join", displayname: row.displaynames[user],
+                id: "$m\(index)"))
         }
         try await writer.apply(SyncDelta(
             nextBatch: BatchToken("s1"),
-            joined: [RoomId(unchecked: "!room:x"): JoinedRoomDelta(state: state)]))
+            joined: [RoomId(unchecked: "!room:x"): JoinedRoomDelta(
+                state: state,
+                heroes: row.heroes.map { UserId(unchecked: $0) })]))
         let entries = try reader(container).roomEntries()
         #expect(entries.joined.map(\.displayName) == [row.expected])
     }

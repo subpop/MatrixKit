@@ -282,16 +282,31 @@ public struct MatrixStoreReader: Sendable {
             .map { RoomId(unchecked: $0.roomId) }
     }
 
-    // MARK: - Private
+    // MARK: - Room names
 
-    /// Best-effort display name: explicit name, else other members'
-    /// IDs, else the room ID.
-    private static func displayName(
+    /// Best-effort display name: explicit name, else other joined
+    /// members' display names, else sync heroes, else the room ID.
+    ///
+    /// Public so app layers reuse the canonical fallback instead of
+    /// reimplementing (and drifting from) it.
+    public static func displayName(
         room: SDRoom, members: [SDRoomMember], localUser: String?
     ) -> String {
         if let name = room.name, !name.isEmpty { return name }
-        let others = members.map(\.userId).filter { $0 != localUser }
-        if !others.isEmpty { return others.sorted().joined(separator: ", ") }
+        let byId = Dictionary(grouping: members, by: \.userId)
+        let others = members
+            .filter { $0.userId != localUser && $0.membership == Membership.join.rawValue }
+            .sorted {
+                ($0.displayname ?? $0.userId) < ($1.displayname ?? $1.userId)
+            }
+            .prefix(3)
+            .map { $0.displayname ?? $0.userId }
+        if !others.isEmpty { return others.joined(separator: ", ") }
+        let heroes = room.decodedHeroes()
+            .filter { $0 != localUser }
+            .prefix(3)
+            .map { byId[$0]?.first?.displayname ?? $0 }
+        if !heroes.isEmpty { return heroes.joined(separator: ", ") }
         return room.roomId
     }
 

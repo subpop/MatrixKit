@@ -415,5 +415,12 @@ public extension SDRoom {
         guard let data = altAliases else { return [] }
         return (try? decoder.decode([String].self, from: data)) ?? []
     }
+
+    /// Sync hero user IDs, or empty when never synced (or the blob no
+    /// longer decodes).
+    func decodedHeroes(decoder: JSONDecoder = JSONDecoder()) -> [String] {
+        guard let data = heroes else { return [] }
+        return (try? decoder.decode([String].self, from: data)) ?? []
+    }
 }
 #endif
