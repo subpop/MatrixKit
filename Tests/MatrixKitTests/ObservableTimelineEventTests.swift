@@ -106,20 +106,49 @@ struct ObservableTimelineEventTests {
     func poll() {
         let event = messageEvent(
             type: "m.poll.start",
-            content: ["question": .object([
-                "org.matrix.msc1767.text": .string("Lunch?")])])
+            content: [
+                "m.text": .array([.object(["body": .string("Lunch?\n1. Pizza")])]),
+                "m.poll": .object([
+                    "kind": .string("m.disclosed"),
+                    "max_selections": .int(1),
+                    "question": .object([
+                        "m.text": .array([.object(["body": .string("Lunch?")])]),
+                    ]),
+                    "answers": .array([
+                        .object([
+                            "m.id": .string("a1"),
+                            "m.text": .array([.object(["body": .string("Pizza")])]),
+                        ]),
+                    ]),
+                ]),
+            ])
         let wrapper = ObservableTimelineEvent.make(from: event, localUser: nil)
-        #expect(wrapper.kind == .poll(PollSummary(question: "Lunch?", answers: [])))
+        #expect(wrapper.kind == .poll(PollSummary(
+            question: "Lunch?",
+            answers: [PollSummary.Answer(id: "a1", text: "Pizza")],
+            kind: .disclosed,
+            maxSelections: 1)))
     }
 
-    @Test("Poll start understands the unstable prefix")
-    func pollUnstable() {
+    @Test("Legacy poll shapes classify as unknown")
+    func pollLegacyUnknown() {
         let event = messageEvent(
-            type: "org.matrix.msc3381.poll.start",
-            content: ["question": .object([
-                "org.matrix.msc1767.text": .string("Dinner?")])])
+            type: "m.poll.start",
+            content: ["m.poll.start": .object([
+                "kind": .string("m.poll.disclosed"),
+                "max_selections": .int(1),
+                "question": .object([
+                    "org.matrix.msc1767.text": .string("Dinner?"),
+                ]),
+                "answers": .array([
+                    .object([
+                        "id": .string("b1"),
+                        "org.matrix.msc1767.text": .string("Soup"),
+                    ]),
+                ]),
+            ])])
         let wrapper = ObservableTimelineEvent.make(from: event, localUser: nil)
-        #expect(wrapper.kind == .poll(PollSummary(question: "Dinner?", answers: [])))
+        #expect(wrapper.kind == .unknown(type: "m.poll.start"))
     }
 
     @Test("Location with a beacon reference is live")
@@ -515,17 +544,30 @@ struct ObservableTimelinePollTests {
     private func start(kind: String? = nil, maxSelections: Int? = nil) -> MessageEvent {
         var block: [String: AnyCodable] = [
             "answers": .array([
-                .object(["id": .string("a1"), "org.matrix.msc1767.text": .string("Pizza")]),
-                .object(["id": .string("a2"), "org.matrix.msc1767.text": .string("Tacos")]),
+                .object([
+                    "m.id": .string("a1"),
+                    "m.text": .array([.object(["body": .string("Pizza")])]),
+                ]),
+                .object([
+                    "m.id": .string("a2"),
+                    "m.text": .array([.object(["body": .string("Tacos")])]),
+                ]),
             ])
         ]
         if let kind { block["kind"] = .string(kind) }
         if let maxSelections { block["max_selections"] = .int(maxSelections) }
-        block["question"] = .object(["org.matrix.msc1767.text": .string("Lunch?")])
+        block["question"] = .object([
+            "m.text": .array([.object(["body": .string("Lunch?")])]),
+        ])
         return MessageEvent(
             type: "m.poll.start", eventId: pollId, sender: alice,
             originServerTs: 1_000,
-            content: ["m.poll.start": .object(block)])
+            content: [
+                "m.text": .array([.object([
+                    "body": .string("Lunch?\n1. Pizza\n2. Tacos"),
+                ])]),
+                "m.poll": .object(block),
+            ])
     }
 
     private func vote(
@@ -540,9 +582,7 @@ struct ObservableTimelinePollTests {
                     "rel_type": .string("m.reference"),
                     "event_id": .string("$poll:x"),
                 ]),
-                "m.poll.response": .object([
-                    "answers": .array(answers.map { AnyCodable.string($0) })
-                ]),
+                "m.selections": .array(answers.map { AnyCodable.string($0) }),
             ],
             unsigned: id == nil ? nil : ["transaction_id": .string("t1")])
     }
@@ -635,7 +675,15 @@ struct ObservableTimelinePollTests {
     @Test("Undisclosed kind carries through")
     func undisclosedKind() {
         let result = summary([
-            start(kind: "org.matrix.msc3381.poll.undisclosed"),
+            start(kind: "m.undisclosed"),
+        ])
+        #expect(result.kind == .undisclosed)
+    }
+
+    @Test("Unknown kind assumes undisclosed")
+    func unknownKindDefaultsUndisclosed() {
+        let result = summary([
+            start(kind: "org.example.custom"),
         ])
         #expect(result.kind == .undisclosed)
     }
@@ -746,8 +794,22 @@ struct ObservableTimelineHighlightTests {
             eventId: EventId(unchecked: "$poll:x"),
             sender: UserId(unchecked: "@bob:x"),
             originServerTs: 1_700_000_000_000,
-            content: ["question": .object([
-                "org.matrix.msc1767.text": .string("Lunch?")])])
+            content: [
+                "m.text": .array([.object(["body": .string("Lunch?\n1. Pizza")])]),
+                "m.poll": .object([
+                    "kind": .string("m.disclosed"),
+                    "max_selections": .int(1),
+                    "question": .object([
+                        "m.text": .array([.object(["body": .string("Lunch?")])]),
+                    ]),
+                    "answers": .array([
+                        .object([
+                            "m.id": .string("a1"),
+                            "m.text": .array([.object(["body": .string("Pizza")])]),
+                        ]),
+                    ]),
+                ]),
+            ])
         let vote = messageEvent(
             type: row.type,
             sender: UserId(unchecked: "@alice:x"),
@@ -756,11 +818,17 @@ struct ObservableTimelineHighlightTests {
                     "rel_type": .string("m.reference"),
                     "event_id": .string("$poll:x"),
                 ]),
-                row.type: .object(["answers": .array([.string("a1")])]),
+                "m.selections": .array([.string("a1")]),
             ])
         let events = rendered(events: [message, vote])
         #expect(events.count == 1)
-        #expect(events[0].kind == .poll(PollSummary(question: "Lunch?", answers: [])))
+        #expect(events[0].kind == .poll(PollSummary(
+            question: "Lunch?",
+            answers: [PollSummary.Answer(id: "a1", text: "Pizza", voteCount: 1)],
+            kind: .disclosed,
+            maxSelections: 1,
+            totalVotes: 1,
+            ownSelections: ["a1"])))
     }
 
     @Test("Redacted reactions are excluded from aggregation")

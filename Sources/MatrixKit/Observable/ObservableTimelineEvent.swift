@@ -502,8 +502,9 @@ public final class ObservableTimelineEvent {
         return try? JSONDecoder().decode(T.self, from: data)
     }
 
-    /// The poll start as a summary with zero votes. Content that won't
-    /// decode still renders as a poll, titled "Poll".
+    /// The poll start as a summary with zero votes. Undecodable content
+    /// folds as an empty poll titled "Poll"; classification treats such
+    /// events as unknown (see `classify`).
     static func pollSummary(for event: MessageEvent) -> PollSummary {
         guard let start = decoded(PollStartContent.self, from: event) else {
             return PollSummary(question: "Poll", answers: [])
@@ -631,6 +632,11 @@ public final class ObservableTimelineEvent {
                 url: event.content["url"]?.stringValue,
                 info: mediaInfo(in: event.content))
         case .pollStart:
+            // Only the current poll shape renders as a poll; legacy or
+            // malformed starts fall through to unknown.
+            guard decoded(PollStartContent.self, from: event) != nil else {
+                return .unknown(type: event.type)
+            }
             return .poll(pollSummary(for: event))
         case .pollEnd:
             return .pollEnd

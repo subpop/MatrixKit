@@ -414,9 +414,9 @@ public struct MessageEvent: Hashable, Sendable, Codable {
         return decoded
     }
 
-    /// Decode `content` as `m.poll.start` (stable and MSC3381 prefixes).
-    /// Never fails on novel shapes (all fields default), so gate use on
-    /// the event type — any event decodes, but only poll starts are one.
+    /// Decode `content` as `m.poll.start`. Strict: only the current
+    /// MSC3381 shape decodes, so gate poll rendering on non-nil here —
+    /// legacy or malformed polls are not polls.
     public var pollStartContent: PollStartContent? {
         // Re-encode through JSON to decode the concrete content type.
         guard
@@ -551,13 +551,12 @@ public struct EncryptedEventContent: Hashable, Sendable, Codable {
     }
 }
 
-/// `m.poll.response` content (stable and MSC3381 prefixes): a vote on the
-/// referenced poll. Selected answer IDs live under the namespaced
-/// `m.poll.response` / `org.matrix.msc3381.poll.response` block.
+/// `m.poll.response` content: a vote on the referenced poll. Selections
+/// are answer IDs under `m.selections`; an empty array retracts the vote.
 public struct PollResponseContent: Hashable, Sendable, Codable {
     /// `m.reference` relation pointing at the `m.poll.start` event.
     public var relatesTo: RelatesTo
-    /// Selected answer IDs.
+    /// Selected answer IDs (empty retracts the vote).
     public var answers: [String]
 
     public init(relatesTo: RelatesTo, answers: [String] = []) {
@@ -568,37 +567,28 @@ public struct PollResponseContent: Hashable, Sendable, Codable {
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         relatesTo = try container.decode(RelatesTo.self, forKey: .relatesTo)
-        let stable = try container.decodeIfPresent(
-            AnswersBlock.self, forKey: .response)
-        let unstable = try container.decodeIfPresent(
-            AnswersBlock.self, forKey: .unstableResponse)
-        answers = stable?.answers ?? unstable?.answers ?? []
+        answers = try container.decode([String].self, forKey: .selections)
     }
 
     public func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(relatesTo, forKey: .relatesTo)
-        try container.encode(AnswersBlock(answers: answers), forKey: .response)
-    }
-
-    private struct AnswersBlock: Hashable, Sendable, Codable {
-        var answers: [String]
+        try container.encode(answers, forKey: .selections)
     }
 
     private enum CodingKeys: String, CodingKey {
         case relatesTo = "m.relates_to"
-        case response = "m.poll.response"
-        case unstableResponse = "org.matrix.msc3381.poll.response"
+        case selections = "m.selections"
     }
 }
 
-/// `m.poll.end` content (stable and MSC3381 prefixes): closes the
-/// referenced poll. Carries the `m.reference` relation and an `m.text`
-/// fallback for clients without poll support.
+/// `m.poll.end` content: closes the referenced poll. Carries the
+/// `m.reference` relation and an `m.text` fallback for clients
+/// without poll support.
 public struct PollEndContent: Hashable, Sendable, Codable {
     /// `m.reference` relation pointing at the `m.poll.start` event.
     public var relatesTo: RelatesTo
-    /// Plain-text fallback (`m.text`).
+    /// Plain-text fallback (first `m.text` representation).
     public var fallbackText: String
 
     public init(relatesTo: RelatesTo, fallbackText: String = "Poll ended") {
@@ -609,13 +599,35 @@ public struct PollEndContent: Hashable, Sendable, Codable {
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         relatesTo = try container.decode(RelatesTo.self, forKey: .relatesTo)
-        fallbackText = (try? container.decodeIfPresent(String.self, forKey: .fallbackText))
-            ?? "Poll ended"
+        let representations = try container.decodeIfPresent(
+            [TextRepresentation].self, forKey: .fallbackText)
+        fallbackText = representations?.first?.body ?? "Poll ended"
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(relatesTo, forKey: .relatesTo)
+        try container.encode(
+            [TextRepresentation(body: fallbackText)], forKey: .fallbackText)
     }
 
     private enum CodingKeys: String, CodingKey {
         case relatesTo = "m.relates_to"
         case fallbackText = "m.text"
+    }
+}
+
+/// One MSC1767 text representation: a `body` string with an optional
+/// mimetype (defaulting to `text/plain` when absent).
+private struct TextRepresentation: Hashable, Sendable, Codable {
+    /// Representation text.
+    var body: String
+    /// Representation mimetype, if the sender specified one.
+    var mimetype: String?
+
+    init(body: String, mimetype: String? = "text/plain") {
+        self.body = body
+        self.mimetype = mimetype
     }
 }
 
@@ -627,14 +639,16 @@ public enum PollKind: Hashable, Sendable {
     case undisclosed
 }
 
-/// `m.poll.start` content (stable and MSC3381 prefixes): a question, its
-/// answers, and the selection rules.
+/// `m.poll.start` content: a question, its answers, and the selection
+/// rules. Only the current MSC3381 shape is supported — an `m.text`
+/// fallback plus the `m.poll` block, with `m.text` arrays throughout
+/// and `m.id` answer IDs. Anything else fails to decode.
 public struct PollStartContent: Hashable, Sendable, Codable {
     /// One selectable answer.
     public struct Answer: Hashable, Sendable, Codable {
         /// Answer ID referenced by `PollResponseContent.answers`.
         public var id: String
-        /// Answer text.
+        /// Answer text (first `m.text` representation).
         public var text: String
 
         public init(id: String, text: String) {
@@ -643,33 +657,38 @@ public struct PollStartContent: Hashable, Sendable, Codable {
         }
 
         public init(from decoder: any Decoder) throws {
-            let object = try decoder.singleValueContainer().decode([String: AnyCodable].self)
-            guard let id = object["id"]?.stringValue else {
-                throw DecodingError.dataCorrupted(.init(
-                    codingPath: decoder.codingPath,
-                    debugDescription: "Poll answer has no id"))
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            id = try container.decode(String.self, forKey: .id)
+            let representations = try container.decode(
+                [TextRepresentation].self, forKey: .text)
+            guard let body = representations.first?.body else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .text, in: container,
+                    debugDescription: "Poll answer has no text representations")
             }
-            self.id = id
-            text = PollStartContent.text(in: object) ?? ""
+            text = body
         }
 
         public func encode(to encoder: any Encoder) throws {
-            let object: [String: AnyCodable] = [
-                "id": .string(id),
-                "org.matrix.msc1767.text": .string(text),
-            ]
-            var container = encoder.singleValueContainer()
-            try container.encode(object)
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(id, forKey: .id)
+            try container.encode(
+                [TextRepresentation(body: text)], forKey: .text)
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case id = "m.id"
+            case text = "m.text"
         }
     }
 
-    /// Question text.
+    /// Question text (first `m.text` representation in the poll block).
     public var question: String
     /// Disclosure mode.
     public var kind: PollKind
     /// Maximum answers a voter may select (at least 1).
     public var maxSelections: Int
-    /// Answers in display order.
+    /// Answers in display order (at most 20).
     public var answers: [Answer]
 
     public init(
@@ -682,53 +701,52 @@ public struct PollStartContent: Hashable, Sendable, Codable {
         self.answers = answers
     }
 
+    /// Plain-text fallback for clients without poll support: the question
+    /// followed by numbered answers.
+    public var fallbackText: String {
+        ([question] + answers.enumerated().map { "\($0.offset + 1). \($0.element.text)" })
+            .joined(separator: "\n")
+    }
+
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        let block = (try? container.decodeIfPresent(Block.self, forKey: .stable))
-            ?? (try? container.decodeIfPresent(Block.self, forKey: .unstable))
-        // The question lives in the namespaced block; a top-level `question`
-        // is accepted from earlier drafts.
-        let questionObject = block?.question ?? (try? container.decodeIfPresent(
-            [String: AnyCodable].self, forKey: .question))
-        question = questionObject.flatMap(Self.text(in:)) ?? ""
-        let wireKind = block?.kind
-        kind = wireKind == "m.poll.undisclosed"
-            || wireKind == "org.matrix.msc3381.poll.undisclosed" ? .undisclosed : .disclosed
-        maxSelections = max(1, block?.maxSelections ?? 1)
-        answers = block?.answers ?? []
+        let block = try container.decode(Block.self, forKey: .poll)
+        guard let questionBody = block.question.representations.first?.body else {
+            throw DecodingError.dataCorrupted(.init(
+                codingPath: decoder.codingPath,
+                debugDescription: "Poll has no question text"))
+        }
+        question = questionBody
+        kind = block.kind == "m.disclosed" ? .disclosed : .undisclosed
+        maxSelections = max(1, block.maxSelections ?? 1)
+        guard !block.answers.isEmpty else {
+            throw DecodingError.dataCorrupted(.init(
+                codingPath: decoder.codingPath,
+                debugDescription: "Poll has no answers"))
+        }
+        answers = Array(block.answers.prefix(20))
     }
 
     public func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(question, forKey: .fallbackText)
+        try container.encode(
+            [TextRepresentation(body: fallbackText)], forKey: .fallbackText)
         try container.encode(
             Block(
-                kind: kind == .undisclosed ? "m.poll.undisclosed" : "m.poll.disclosed",
-                maxSelections: maxSelections, answers: answers,
-                question: ["org.matrix.msc1767.text": .string(question)]),
-            forKey: .stable)
+                kind: kind == .undisclosed ? "m.undisclosed" : "m.disclosed",
+                maxSelections: maxSelections,
+                answers: answers,
+                question: TextBlock(
+                    representations: [TextRepresentation(body: question)])),
+            forKey: .poll)
     }
 
-    /// The first text representation present in a poll text object. Each
-    /// key holds either a plain string or an MSC1767 array of
-    /// `{body, mimetype}` representations; the first representation's
-    /// body is used.
-    private static func text(in object: [String: AnyCodable]) -> String? {
-        for key in ["m.text", "org.matrix.msc1767.text", "body"] {
-            if let text = object[key]?.stringValue { return text }
-            if let first = object[key]?.arrayValue?.first?.objectValue?["body"]?.stringValue {
-                return first
-            }
-        }
-        return nil
-    }
-
-    /// The namespaced selection-rules block (`m.poll.start` or its MSC3381 twin).
+    /// The namespaced selection-rules block.
     private struct Block: Codable {
         var kind: String?
         var maxSelections: Int?
-        var answers: [Answer]?
-        var question: [String: AnyCodable]?
+        var answers: [Answer]
+        var question: TextBlock
 
         private enum CodingKeys: String, CodingKey {
             case kind
@@ -738,11 +756,18 @@ public struct PollStartContent: Hashable, Sendable, Codable {
         }
     }
 
+    /// An `m.text` array wrapper shared by the question and answers.
+    private struct TextBlock: Codable {
+        var representations: [TextRepresentation]
+
+        private enum CodingKeys: String, CodingKey {
+            case representations = "m.text"
+        }
+    }
+
     private enum CodingKeys: String, CodingKey {
-        case question
         case fallbackText = "m.text"
-        case stable = "m.poll.start"
-        case unstable = "org.matrix.msc3381.poll.start"
+        case poll = "m.poll"
     }
 }
 

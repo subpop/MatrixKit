@@ -140,87 +140,107 @@ struct EventTypeTests {
         #expect(content.ciphertext?.stringValue == "cipher")
     }
 
-    @Test("Poll response decodes answers under either prefix")
+    @Test("Poll response carries selections under m.selections")
     func pollResponseContent() throws {
-        let stable = """
+        let data = """
             {"m.relates_to":{"rel_type":"m.reference","event_id":"$poll:x"},
-             "m.poll.response":{"answers":["a1","a2"]}}
+             "m.selections":["a1","a2"]}
             """.data(using: .utf8)!
-        let stableContent = try JSONDecoder().decode(
-            PollResponseContent.self, from: stable)
-        #expect(stableContent.relatesTo.eventId == EventId(unchecked: "$poll:x"))
-        #expect(stableContent.relatesTo.relType == .reference)
-        #expect(stableContent.answers == ["a1", "a2"])
+        let content = try JSONDecoder().decode(
+            PollResponseContent.self, from: data)
+        #expect(content.relatesTo.eventId == EventId(unchecked: "$poll:x"))
+        #expect(content.relatesTo.relType == .reference)
+        #expect(content.answers == ["a1", "a2"])
 
-        let unstable = """
+        let encoded = try JSONEncoder().encode(content)
+        let roundTripped = try JSONDecoder().decode(
+            PollResponseContent.self, from: encoded)
+        #expect(roundTripped == content)
+
+        let legacy = """
             {"m.relates_to":{"rel_type":"m.reference","event_id":"$poll:x"},
-             "org.matrix.msc3381.poll.response":{"answers":["a9"]}}
+             "m.poll.response":{"answers":["a1"]}}
             """.data(using: .utf8)!
-        let unstableContent = try JSONDecoder().decode(
-            PollResponseContent.self, from: unstable)
-        #expect(unstableContent.answers == ["a9"])
+        #expect((try? JSONDecoder().decode(PollResponseContent.self, from: legacy)) == nil)
     }
 
-    @Test("Poll start decodes question, rules, and answers under either prefix")
+    @Test("Poll start round-trips the current shape and rejects legacy shapes")
     func pollStartContent() throws {
-        let stable = """
-            {"question":{"org.matrix.msc1767.text":"Lunch?"},
-             "m.poll.start":{"kind":"m.poll.undisclosed","max_selections":0,
-               "answers":[{"id":"a1","org.matrix.msc1767.text":"Pizza"},
-                          {"id":"a2","org.matrix.msc1767.text":"Tacos"}]}}
+        let content = PollStartContent(
+            question: "Lunch?", kind: .disclosed, maxSelections: 1,
+            answers: [
+                PollStartContent.Answer(id: "a1", text: "Pizza"),
+                PollStartContent.Answer(id: "a2", text: "Tacos"),
+            ])
+        let encoded = try JSONEncoder().encode(content)
+        let decoded = try JSONDecoder().decode(PollStartContent.self, from: encoded)
+        #expect(decoded == content)
+
+        let wire = try #require(
+            try JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        let fallback = try #require(wire["m.text"] as? [[String: Any]])
+        #expect(fallback.count == 1)
+        #expect(fallback[0]["body"] as? String == "Lunch?\n1. Pizza\n2. Tacos")
+        let block = try #require(wire["m.poll"] as? [String: Any])
+        #expect(block["kind"] as? String == "m.disclosed")
+        #expect(block["max_selections"] as? Int == 1)
+        let question = try #require(block["question"] as? [String: Any])
+        let questionText = try #require(question["m.text"] as? [[String: Any]])
+        #expect(questionText.first?["body"] as? String == "Lunch?")
+        let answers = try #require(block["answers"] as? [[String: Any]])
+        #expect(answers.map { $0["m.id"] as? String } == ["a1", "a2"])
+        #expect((answers[0]["m.text"] as? [[String: Any]])?.first?["body"] as? String == "Pizza")
+
+        // Missing or unknown kinds assume undisclosed; max_selections
+        // defaults to 1.
+        let undisclosed = """
+            {"m.text":[{"body":"Dinner?\\n1. Soup"}],
+             "m.poll":{"max_selections":2,
+               "question":{"m.text":[{"body":"Dinner?"}]},
+               "answers":[{"m.id":"b1","m.text":[{"body":"Soup"}]}]}}
             """.data(using: .utf8)!
-        let stableContent = try JSONDecoder().decode(PollStartContent.self, from: stable)
-        #expect(stableContent.question == "Lunch?")
-        #expect(stableContent.kind == .undisclosed)
-        #expect(stableContent.maxSelections == 1)
-        #expect(stableContent.answers == [
-            PollStartContent.Answer(id: "a1", text: "Pizza"),
-            PollStartContent.Answer(id: "a2", text: "Tacos"),
-        ])
+        let undisclosedContent = try JSONDecoder().decode(PollStartContent.self, from: undisclosed)
+        #expect(undisclosedContent.kind == .undisclosed)
+        #expect(undisclosedContent.maxSelections == 2)
+
+        let legacy = """
+            {"m.text":"Open poll test",
+             "m.poll.start":{"kind":"m.poll.disclosed",
+               "question":{"org.matrix.msc1767.text":"Open poll test"},
+               "answers":[{"id":"c1","org.matrix.msc1767.text":"Option 1"}]}}
+            """.data(using: .utf8)!
+        #expect((try? JSONDecoder().decode(PollStartContent.self, from: legacy)) == nil)
 
         let unstable = """
-            {"question":{"body":"Dinner?"},
-             "org.matrix.msc3381.poll.start":{"kind":"org.matrix.msc3381.poll.disclosed",
-               "max_selections":2,"answers":[{"id":"b1","m.text":"Soup"}]}}
-            """.data(using: .utf8)!
-        let unstableContent = try JSONDecoder().decode(PollStartContent.self, from: unstable)
-        #expect(unstableContent.question == "Dinner?")
-        #expect(unstableContent.kind == .disclosed)
-        #expect(unstableContent.maxSelections == 2)
-        #expect(unstableContent.answers == [PollStartContent.Answer(id: "b1", text: "Soup")])
-
-        let mscArray = """
-            {"question":{"m.text":[{"body":"Open poll test","mimetype":"text/plain"}]},
-             "m.poll.start":{"kind":"m.poll.disclosed",
-               "answers":[{"id":"c1","m.text":[{"body":"Option 1"}]}]}}
-            """.data(using: .utf8)!
-        let mscContent = try JSONDecoder().decode(PollStartContent.self, from: mscArray)
-        #expect(mscContent.question == "Open poll test")
-        #expect(mscContent.answers == [PollStartContent.Answer(id: "c1", text: "Option 1")])
-
-        let element = """
             {"org.matrix.msc1767.text":"Open poll test\\n1. Option 1",
              "org.matrix.msc3381.poll.start":{
                "answers":[{"id":"1UP2VbXvE2J1TBqy","org.matrix.msc1767.text":"Option 1"}],
                "kind":"org.matrix.msc3381.poll.disclosed","max_selections":1,
-               "question":{"body":"Open poll test","msgtype":"m.text",
-                           "org.matrix.msc1767.text":"Open poll test"}}}
+               "question":{"org.matrix.msc1767.text":"Open poll test"}}}
             """.data(using: .utf8)!
-        let elementContent = try JSONDecoder().decode(PollStartContent.self, from: element)
-        #expect(elementContent.question == "Open poll test")
-        #expect(elementContent.kind == .disclosed)
-        #expect(elementContent.answers == [
-            PollStartContent.Answer(id: "1UP2VbXvE2J1TBqy", text: "Option 1"),
-        ])
+        #expect((try? JSONDecoder().decode(PollStartContent.self, from: unstable)) == nil)
     }
 
-    @Test("Poll end decodes the reference relation")
+    @Test("Poll end carries the reference relation and an m.text fallback")
     func pollEndContent() throws {
         let data = """
-            {"m.relates_to":{"rel_type":"m.reference","event_id":"$poll:x"}}
+            {"m.relates_to":{"rel_type":"m.reference","event_id":"$poll:x"},
+             "m.text":[{"mimetype":"text/plain","body":"Poll ended"}]}
             """.data(using: .utf8)!
         let content = try JSONDecoder().decode(PollEndContent.self, from: data)
         #expect(content.relatesTo.eventId == EventId(unchecked: "$poll:x"))
+        #expect(content.fallbackText == "Poll ended")
+
+        let encoded = try JSONEncoder().encode(
+            PollEndContent(
+                relatesTo: RelatesTo(
+                    eventId: EventId(unchecked: "$poll:x"), relType: .reference)))
+        let roundTripped = try JSONDecoder().decode(PollEndContent.self, from: encoded)
+        #expect(roundTripped.fallbackText == "Poll ended")
+        let wire = try #require(
+            try JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        let fallback = try #require(wire["m.text"] as? [[String: Any]])
+        #expect(fallback.first?["body"] as? String == "Poll ended")
     }
 
     @Test("Server notice decodes the full wire shape")

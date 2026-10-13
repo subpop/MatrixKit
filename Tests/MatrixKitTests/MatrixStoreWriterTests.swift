@@ -551,21 +551,27 @@ struct MatrixStoreWriterTests {
     func pollMessageLikeFlags() async throws {
         let (writer, container) = try writer()
         let pollBlock: [String: AnyCodable] = [
-            "kind": .string("m.poll.disclosed"),
+            "kind": .string("m.disclosed"),
             "max_selections": .int(1),
             "answers": .array([]),
-            "question": .object(["org.matrix.msc1767.text": .string("Lunch?")]),
+            "question": .object([
+                "m.text": .array([.object(["body": .string("Lunch?")])]),
+            ]),
+        ]
+        let pollContent: [String: AnyCodable] = [
+            "m.text": .array([.object(["body": .string("Lunch?")])]),
+            "m.poll": .object(pollBlock),
         ]
         try await writer.apply(joinedTimelineDelta([
             MessageEvent(
                 type: "m.poll.start", eventId: EventId(unchecked: "$poll"),
                 sender: UserId(unchecked: "@alice:x"), originServerTs: 1_000,
-                content: ["m.poll.start": .object(pollBlock)]),
+                content: pollContent),
             MessageEvent(
                 type: "org.matrix.msc3381.poll.start",
                 eventId: EventId(unchecked: "$poll-unstable"),
                 sender: UserId(unchecked: "@alice:x"), originServerTs: 2_000,
-                content: ["org.matrix.msc3381.poll.start": .object(pollBlock)]),
+                content: pollContent),
             MessageEvent(
                 type: "m.poll.response", eventId: EventId(unchecked: "$vote"),
                 sender: UserId(unchecked: "@bob:x"), originServerTs: 3_000,
