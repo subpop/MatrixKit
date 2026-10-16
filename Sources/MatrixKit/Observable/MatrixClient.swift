@@ -1140,6 +1140,14 @@ public final class MatrixClient {
         return total
     }
 
+    /// Diagnostic details for an encrypted event that most recently
+    /// failed timeline decryption.
+    public func decryptionFailure(
+        roomId: RoomId, eventId: EventId
+    ) async -> RoomCrypto.DecryptionFailure? {
+        await roomCrypto.decryptionFailure(roomId: roomId, eventId: eventId)
+    }
+
     /// Re-run the decryptor over one room's stored ciphertext. Returns
     /// the number of events decrypted.
     @discardableResult

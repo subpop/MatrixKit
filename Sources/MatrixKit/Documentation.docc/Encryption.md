@@ -21,7 +21,9 @@ try await client.sendEncryptedContent(
 
 Stored room rows carry `isEncrypted`; undecryptable timeline events
 surface with their session details so the UI can offer
-`retryTimelineDecryption()` after keys arrive.
+`retryTimelineDecryption()` after keys arrive. The most recent failure
+reason and Megolm session ID are queryable with
+`decryptionFailure(roomId:eventId:)` until decryption succeeds.
 
 ### Olm device messaging
 
@@ -74,6 +76,7 @@ its README for the protocol and fixture-harvesting workflow.
 - ``MatrixClient/sendEncryptedContent(_:_:transactionId:)``
 - ``MatrixClient/shareRoomKey(_:)``
 - ``MatrixClient/retryTimelineDecryption()``
+- ``MatrixClient/decryptionFailure(roomId:eventId:)``
 - ``MatrixClient/recover(withRecoveryKey:progress:)``
 - ``MatrixClient/recover(withPassphrase:progress:)``
 - ``MatrixClient/restoreKeyBackup(privateKey:progress:)``

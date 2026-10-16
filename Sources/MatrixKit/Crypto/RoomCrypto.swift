@@ -39,6 +39,22 @@ public actor RoomCrypto {
         public var sender: UserId
     }
 
+    /// Why one encrypted timeline event could not be decrypted.
+    public enum DecryptionFailureReason: String, Hashable, Sendable {
+        case unknownSession
+        case sessionTooOld
+        case replay
+        case cryptoFailure
+        case malformedEnvelope
+        case nonJSONPlaintext
+    }
+
+    /// Diagnostic details for an undecryptable encrypted event.
+    public struct DecryptionFailure: Hashable, Sendable {
+        public var reason: DecryptionFailureReason
+        public var sessionId: String?
+    }
+
     /// An inbound share as received, for byte-identical forwarding.
     /// Re-sending the originator's bytes keeps their signature valid;
     /// anything we re-encode ourselves (exports) is unsigned. Chain and
@@ -54,6 +70,7 @@ public actor RoomCrypto {
     }
 
     private static let storeService = "MatrixKit.RoomCrypto"
+    private static let decryptionFailureLimit = 10_000
     private static let keyRequestCooldown: TimeInterval = 120
     private static let maxKeyRequestAttempts = 3
 
@@ -97,6 +114,9 @@ public actor RoomCrypto {
     /// `"roomId|sessionId"` key-request cooldowns and attempts. Arrival
     /// of a key clears the cooldown but preserves the per-launch cap.
     private var requestedSessions: [String: KeyRequestState] = [:]
+    /// Decryption diagnostics keyed by `"roomId|eventId"`; a successful
+    /// retry removes its prior failure. Capped for long-running syncs.
+    private var decryptionFailures: [String: DecryptionFailure] = [:]
     /// `"roomId|sessionId"` keys already tried against the key backup.
     /// Never re-armed within a launch: backup content is static per
     /// version, so a miss stays a miss. Capped like `requestedSessions`.
@@ -198,6 +218,24 @@ public actor RoomCrypto {
             requestedSessions[oldestKey] = nil
         }
         return true
+    }
+
+    /// Details for one event that most recently failed decryption.
+    public func decryptionFailure(
+        roomId: RoomId, eventId: EventId
+    ) -> DecryptionFailure? {
+        decryptionFailures["\(roomId.value)|\(eventId.value)"]
+    }
+
+    private func recordDecryptionFailure(
+        _ failure: DecryptionFailure, for key: String
+    ) {
+        decryptionFailures[key] = failure
+        if decryptionFailures.count > Self.decryptionFailureLimit,
+            let keyToEvict = decryptionFailures.keys.first(where: { $0 != key })
+        {
+            decryptionFailures[keyToEvict] = nil
+        }
     }
 
     /// Record a served key `request_id`, returning true when newly seen
@@ -666,17 +704,25 @@ public actor RoomCrypto {
         _ event: MessageEvent, in roomId: RoomId
     ) async -> MessageEvent? {
         guard event.type == Self.roomEncryptedType else { return event }
+        let failureKey = "\(roomId.value)|\(event.eventId.value)"
         guard
             let sessionId = event.content["session_id"]?.stringValue,
             let cipherB64 = event.content["ciphertext"]?.stringValue,
             let wire = Primitives.base64UnpaddedDecode(cipherB64)
         else {
+            recordDecryptionFailure(DecryptionFailure(
+                reason: .malformedEnvelope,
+                sessionId: event.content["session_id"]?.stringValue),
+                for: failureKey)
             MatrixKitLog.crypto.debug(
                 "RoomCrypto cannot decrypt: malformed envelope sender=\(event.sender.value, privacy: .private(mask: .hash))"
             )
             return nil
         }
         guard var session = inbound["\(roomId.value)|\(sessionId)"] else {
+            recordDecryptionFailure(
+                DecryptionFailure(reason: .unknownSession, sessionId: sessionId),
+                for: failureKey)
             MatrixKitLog.crypto.debug(
                 "RoomCrypto cannot decrypt: unknown inbound session sender=\(event.sender.value, privacy: .private(mask: .hash)) session=\(String(sessionId.prefix(8)), privacy: .private(mask: .hash))"
             )
@@ -696,6 +742,15 @@ public actor RoomCrypto {
         do {
             plaintext = try session.decrypt(wire)
         } catch {
+            let reason: DecryptionFailureReason
+            switch error {
+            case .indexTooOld: reason = .sessionTooOld
+            case .replayDetected: reason = .replay
+            default: reason = .cryptoFailure
+            }
+            recordDecryptionFailure(
+                DecryptionFailure(reason: reason, sessionId: sessionId),
+                for: failureKey)
             MatrixKitLog.crypto.debug(
                 "RoomCrypto cannot decrypt: Megolm payload failed sender=\(event.sender.value, privacy: .private(mask: .hash)) session=\(String(sessionId.prefix(8)), privacy: .private(mask: .hash))"
             )
@@ -727,6 +782,9 @@ public actor RoomCrypto {
             let content = try? JSONDecoder().decode(
                 [String: AnyCodable].self, from: contentData)
         else {
+            recordDecryptionFailure(
+                DecryptionFailure(reason: .nonJSONPlaintext, sessionId: sessionId),
+                for: failureKey)
             MatrixKitLog.crypto.debug(
                 "RoomCrypto cannot decrypt: Megolm payload failed sender=\(event.sender.value, privacy: .private(mask: .hash)) session=\(String(sessionId.prefix(8)), privacy: .private(mask: .hash))"
             )
@@ -735,6 +793,7 @@ public actor RoomCrypto {
             )
             return nil
         }
+        decryptionFailures[failureKey] = nil
         inbound["\(roomId.value)|\(sessionId)"] = session
         await markPersistDirty()
         return MessageEvent(

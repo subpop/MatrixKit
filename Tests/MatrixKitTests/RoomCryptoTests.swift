@@ -213,6 +213,95 @@ struct RoomCryptoTests {
             roomId: room, sessionId: sessionId) == false)
     }
 
+    @Test("decryption failures expose details and clear after recovery")
+    func decryptionFailureDetails() async throws {
+        let (room, aliceUser, bobUser) = try roomFixture()
+        let (alice, _, aliceSharer, aliceSender) = try wirePair()
+        let bob = RoomCrypto(sharer: FakeSharer(), sender: FakeRoomSender())
+        await aliceSharer.setDevices([bobUser.value: ["BOB"]])
+        try await alice.shareRoomKey(roomId: room, users: [bobUser])
+        _ = try await alice.sendEncryptedContent(
+            room, MessageContent.markdown("recover me"))
+        let sent = await aliceSender.sent[0]
+        let event = MessageEvent(
+            type: sent.type, eventId: EventId(unchecked: "$failure"),
+            sender: aliceUser, roomId: room, originServerTs: 1,
+            content: sent.content)
+
+        #expect(await bob.decryptRoomEvent(event, in: room) == nil)
+        let failure = await bob.decryptionFailure(
+            roomId: room, eventId: event.eventId)
+        #expect(failure?.reason == .unknownSession)
+        #expect(failure?.sessionId == sent.content["session_id"]?.stringValue)
+
+        let shares = await aliceSharer.shares
+        await bob.receiveRoomKey(BasicEvent(
+            type: "m.room_key", sender: aliceUser,
+            content: shares[0].content))
+        #expect(
+            await bob.decryptRoomEvent(event, in: room)?.content["body"]
+                == .string("recover me"))
+        #expect(await bob.decryptionFailure(
+            roomId: room, eventId: event.eventId) == nil)
+    }
+
+    @Test("malformed encrypted events expose malformed-envelope diagnostics")
+    func malformedEnvelopeFailure() async throws {
+        let (room, aliceUser, _) = try roomFixture()
+        let (_, bob, _, _) = try wirePair()
+        let event = MessageEvent(
+            type: "m.room.encrypted", eventId: EventId(unchecked: "$malformed"),
+            sender: aliceUser, roomId: room, originServerTs: 1,
+            content: ["session_id": .string("sess")])
+
+        #expect(await bob.decryptRoomEvent(event, in: room) == nil)
+        let failure = await bob.decryptionFailure(
+            roomId: room, eventId: event.eventId)
+        #expect(failure?.reason == .malformedEnvelope)
+        #expect(failure?.sessionId == "sess")
+    }
+
+    @Test("crypto and plaintext parse failures expose distinct diagnostics")
+    func decryptFailureReasons() async throws {
+        let (room, aliceUser, _) = try roomFixture()
+        let receiver = RoomCrypto(
+            sharer: FakeSharer(), sender: FakeRoomSender())
+        let invalidCipherSession = MegolmSession.create()
+        let invalidCipherSessionId = invalidCipherSession.id
+        try await receiver.importSession(
+            roomId: room, sessionId: invalidCipherSessionId,
+            export: invalidCipherSession.export())
+        let invalidCipher = MessageEvent(
+            type: "m.room.encrypted", eventId: EventId(unchecked: "$bad-crypto"),
+            sender: aliceUser, roomId: room, originServerTs: 1,
+            content: [
+                "session_id": .string(invalidCipherSessionId),
+                "ciphertext": .string(
+                    Primitives.base64UnpaddedEncode(Data([1, 2, 3]))),
+            ])
+        #expect(await receiver.decryptRoomEvent(invalidCipher, in: room) == nil)
+        #expect(await receiver.decryptionFailure(
+            roomId: room, eventId: invalidCipher.eventId)?.reason == .cryptoFailure)
+
+        var nonJSONSession = MegolmSession.create()
+        let nonJSONSessionId = nonJSONSession.id
+        let nonJSONExport = nonJSONSession.export()
+        let ciphertext = try nonJSONSession.encrypt(Data("not json".utf8))
+        try await receiver.importSession(
+            roomId: room, sessionId: nonJSONSessionId,
+            export: nonJSONExport)
+        let nonJSON = MessageEvent(
+            type: "m.room.encrypted", eventId: EventId(unchecked: "$not-json"),
+            sender: aliceUser, roomId: room, originServerTs: 1,
+            content: [
+                "session_id": .string(nonJSONSessionId),
+                "ciphertext": .string(Primitives.base64UnpaddedEncode(ciphertext)),
+            ])
+        #expect(await receiver.decryptRoomEvent(nonJSON, in: room) == nil)
+        #expect(await receiver.decryptionFailure(
+            roomId: room, eventId: nonJSON.eventId)?.reason == .nonJSONPlaintext)
+    }
+
     @Test("inbound sessions persist across restore")
     func persistence() async throws {
         let (room, aliceUser, bobUser) = try roomFixture()
@@ -590,6 +679,15 @@ struct RoomCryptoTests {
         _ = await receiver.decryptRoomEvent(wireEvent, in: room)
         _ = await receiver.decryptRoomEvent(wireEvent, in: room)
         #expect(box.count == c.expectRequests, "row \(c.id)")
+        let failure = await receiver.decryptionFailure(
+            roomId: room, eventId: wireEvent.eventId)
+        if c.heldIndex == 5 && c.wireIndex == 2 {
+            #expect(failure?.reason == .sessionTooOld, "row \(c.id)")
+        } else if c.heldIndex == 0 {
+            #expect(failure?.reason == .replay, "row \(c.id)")
+        } else {
+            #expect(failure == nil, "row \(c.id)")
+        }
     }
 
     @Test("shareRequestedSession answers the requested session only")
@@ -901,6 +999,31 @@ struct MatrixClientEncryptionTests {
             #expect(client.isAuthenticated)
             #expect(client.serverVersions?.supportsVersion(.v1_13) == true)
             await client.configureEncryption()
+            try? await client.transport.shutdown()
+        }
+    }
+
+    @Test("decryption failure diagnostics are exposed by MatrixClient")
+    @MainActor
+    func failureDiagnosticsFacade() async throws {
+        try await withHarness { harness in
+            let client = await MatrixClient.restore(
+                homeserver: await harness.baseURL,
+                userId: UserId(unchecked: "@alice:test"),
+                deviceId: DeviceId("ALICEDEVICE"),
+                accessToken: "harness-token-alice")
+            let room = RoomId(unchecked: "!room:test")
+            let event = MessageEvent(
+                type: "m.room.encrypted", eventId: EventId(unchecked: "$diagnostic"),
+                sender: UserId(unchecked: "@bob:test"), roomId: room,
+                originServerTs: 1,
+                content: ["session_id": .string("missing-ciphertext")])
+
+            #expect(await client.roomCrypto.decryptRoomEvent(event, in: room) == nil)
+            let failure = await client.decryptionFailure(
+                roomId: room, eventId: event.eventId)
+            #expect(failure?.reason == .malformedEnvelope)
+            #expect(failure?.sessionId == "missing-ciphertext")
             try? await client.transport.shutdown()
         }
     }
