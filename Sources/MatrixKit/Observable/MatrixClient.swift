@@ -672,8 +672,8 @@ public final class MatrixClient {
         await roomCrypto.setLocalUserId(userId)
         let olm = self.olm
         let roomCrypto = self.roomCrypto
-        // Unknown sessions fire once per session (throttled in
-        // `RoomCrypto`): recover via backup fetch plus a key request
+        // Unknown sessions fire when their cooldown allows (throttled
+        // in `RoomCrypto`): recover via backup fetch plus a key request
         // to the sender. Recovery runs on the main actor; this
         // sendable entry hops there so sync-time sightings stay
         // fire-and-forget.

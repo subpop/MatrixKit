@@ -40,6 +40,23 @@ private func megolmPayload(_ body: String, _ room: RoomId) throws -> Data {
     ])
 }
 
+private final class TestDate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var date: Date
+
+    init(_ date: Date) {
+        self.date = date
+    }
+
+    var value: Date {
+        lock.withLock { date }
+    }
+
+    func advance(by interval: TimeInterval) {
+        lock.withLock { date.addTimeInterval(interval) }
+    }
+}
+
 @Suite("RoomCrypto")
 struct RoomCryptoTests {
     @Test("send produces m.room.encrypted with Megolm fields")
@@ -159,6 +176,41 @@ struct RoomCryptoTests {
 
         try await alice.ensureShared(roomId: room, users: [bobUser])
         #expect(await aliceSharer.shares.count == 1)
+    }
+
+    @Test("unknown-session key requests use cooldown and per-launch cap")
+    func keyRequestCooldown() async throws {
+        let (room, _, _) = try roomFixture()
+        let date = TestDate(Date(timeIntervalSince1970: 1_000))
+        let crypto = RoomCrypto(
+            sharer: FakeSharer(), sender: FakeRoomSender(),
+            now: { date.value })
+        let session = MegolmSession.create()
+        let sessionId = session.id
+
+        #expect(await crypto.claimUnknownSession(
+            roomId: room, sessionId: sessionId) == true)
+        #expect(await crypto.claimUnknownSession(
+            roomId: room, sessionId: sessionId) == false)
+        await crypto.receiveRoomKey(BasicEvent(
+            type: RoomCrypto.roomKeyType, sender: UserId(unchecked: "@bob:x"),
+            content: [
+                "algorithm": .string(RoomCrypto.megolmAlgorithm),
+                "room_id": .string(room.value),
+                "session_id": .string(sessionId),
+                "session_key": .string(Primitives.base64UnpaddedEncode(
+                    try session.sessionKey())),
+            ]))
+        #expect(await crypto.claimUnknownSession(
+            roomId: room, sessionId: sessionId) == true)
+        #expect(await crypto.claimUnknownSession(
+            roomId: room, sessionId: sessionId) == false)
+        date.advance(by: 120)
+        #expect(await crypto.claimUnknownSession(
+            roomId: room, sessionId: sessionId) == true)
+        date.advance(by: 120)
+        #expect(await crypto.claimUnknownSession(
+            roomId: room, sessionId: sessionId) == false)
     }
 
     @Test("inbound sessions persist across restore")
@@ -533,8 +585,8 @@ struct RoomCryptoTests {
                 "ciphertext": .string(
                     Primitives.base64UnpaddedEncode(wireData)),
             ])
-        // Twice: the second sighting proves the once-per-session
-        // throttle (or the silent paths) rather than re-firing.
+        // Twice: the second sighting proves the cooldown (or the silent
+        // paths) rather than re-firing immediately.
         _ = await receiver.decryptRoomEvent(wireEvent, in: room)
         _ = await receiver.decryptRoomEvent(wireEvent, in: room)
         #expect(box.count == c.expectRequests, "row \(c.id)")

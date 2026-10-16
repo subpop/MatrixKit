@@ -54,10 +54,13 @@ public actor RoomCrypto {
     }
 
     private static let storeService = "MatrixKit.RoomCrypto"
+    private static let keyRequestCooldown: TimeInterval = 120
+    private static let maxKeyRequestAttempts = 3
 
     private let sharer: any RoomKeySharer
     private let sender: any RoomEventSender
     private let keystore: (any KeyStore)?
+    private let now: @Sendable () -> Date
 
     /// Debounced megolm persistence (see `PersistCoalescer`), created
     /// on first mutation so `init` never captures `self`.
@@ -86,10 +89,14 @@ public actor RoomCrypto {
     /// Cleared by `rotateOutbound(_:)`; empty after launch (fresh
     /// outbound), so the first `ensureShared` re-shares post-restart.
     private var shared: Set<String> = []
-    /// `"roomId|sessionId"` keys already surfaced via `onUnknownSession`.
-    /// Cleared for a session when its key arrives, so a later re-loss
-    /// re-requests. Capped to bound memory on pathological timelines.
-    private var requestedSessions: Set<String> = []
+    private struct KeyRequestState {
+        var attempts: Int
+        var lastRequestedAt: Date?
+    }
+
+    /// `"roomId|sessionId"` key-request cooldowns and attempts. Arrival
+    /// of a key clears the cooldown but preserves the per-launch cap.
+    private var requestedSessions: [String: KeyRequestState] = [:]
     /// `"roomId|sessionId"` keys already tried against the key backup.
     /// Never re-armed within a launch: backup content is static per
     /// version, so a miss stays a miss. Capped like `requestedSessions`.
@@ -99,19 +106,21 @@ public actor RoomCrypto {
     /// Local user: own sends never trigger key requests (self-decrypt is
     /// registered at send time). Nil until `setLocalUserId` runs.
     private var localUserId: UserId?
-    /// Fired once per unknown inbound session — and once per held-but-
-    /// too-old session (see `decryptRoomEvent`). The owner builds an
-    /// `m.room_key_request` via `keyRequestContent` and sends it to
-    /// `UnknownSession.sender`.
+    /// Fired for unknown inbound sessions and held-but-too-old sessions
+    /// (see `decryptRoomEvent`), with retries governed by the per-session
+    /// cooldown. The owner builds an `m.room_key_request` via
+    /// `keyRequestContent` and sends it to `UnknownSession.sender`.
     private var onUnknownSession: (@Sendable (UnknownSession) -> Void)?
 
     public init(
         sharer: any RoomKeySharer, sender: any RoomEventSender,
-        keystore: (any KeyStore)? = nil
+        keystore: (any KeyStore)? = nil,
+        now: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.sharer = sharer
         self.sender = sender
         self.keystore = keystore
+        self.now = now
     }
 
     /// Record a megolm-state mutation for debounced persistence.
@@ -160,13 +169,34 @@ public actor RoomCrypto {
         ]
     }
 
-    /// Record an unknown session, returning true when newly seen (the
-    /// caller should send one key request). Re-armed by `receiveRoomKey`.
+    /// Record an unknown session, returning true when a key request is
+    /// due. Requests are limited to three per session per launch, at
+    /// least two minutes apart. Re-armed immediately by `receiveRoomKey`.
     func claimUnknownSession(roomId: RoomId, sessionId: String) -> Bool {
         let key = "\(roomId.value)|\(sessionId)"
-        guard !requestedSessions.contains(key) else { return false }
-        requestedSessions.insert(key)
-        if requestedSessions.count > 1000 { requestedSessions.removeAll() }
+        let currentTime = now()
+        if var state = requestedSessions[key] {
+            guard state.attempts < Self.maxKeyRequestAttempts else { return false }
+            if let lastRequestedAt = state.lastRequestedAt,
+                currentTime.timeIntervalSince(lastRequestedAt) < Self.keyRequestCooldown
+            {
+                return false
+            }
+            state.attempts += 1
+            state.lastRequestedAt = currentTime
+            requestedSessions[key] = state
+        } else {
+            requestedSessions[key] = KeyRequestState(
+                attempts: 1, lastRequestedAt: currentTime)
+        }
+        if requestedSessions.count > 1000,
+            let oldestKey = requestedSessions.min(by: {
+                ($0.value.lastRequestedAt ?? .distantPast)
+                    < ($1.value.lastRequestedAt ?? .distantPast)
+            })?.key
+        {
+            requestedSessions[oldestKey] = nil
+        }
         return true
     }
 
@@ -602,7 +632,10 @@ public actor RoomCrypto {
         // outstanding ask whether or not it improves our position, so
         // the next undecryptable sighting asks again instead of
         // staying silent when only late state has arrived so far.
-        requestedSessions.remove(mapKey)
+        if var request = requestedSessions[mapKey] {
+            request.lastRequestedAt = nil
+            requestedSessions[mapKey] = request
+        }
         if let held = inbound[mapKey], !isEarlier(arrival: session, than: held) {
             MatrixKitLog.crypto.debug(
                 "RoomCrypto ignoring superseded room key sender=\(event.sender?.value ?? "?", privacy: .private(mask: .hash)) session=\(String(sessionId.prefix(8)), privacy: .private(mask: .hash)) type=\(event.type, privacy: .public)"
