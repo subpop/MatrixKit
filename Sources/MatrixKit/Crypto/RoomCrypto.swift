@@ -348,11 +348,13 @@ public actor RoomCrypto {
     public func shareRoomKey(
         roomId: RoomId, users: [UserId], excludingDevice: DeviceId? = nil
     ) async throws(MatrixError) {
+        var deviceQueryFailed = false
         for user in users {
             let ids: [String]
             do {
                 ids = try await sharer.deviceIds(for: user)
             } catch {
+                deviceQueryFailed = true
                 MatrixKitLog.crypto.warning(
                     "RoomCrypto skipping key share: device query failed user=\(user.value, privacy: .private(mask: .hash)) error=\(error, privacy: .public)"
                 )
@@ -370,7 +372,9 @@ public actor RoomCrypto {
             try await shareCurrentSession(
                 roomId: roomId, to: user, devices: devices)
         }
-        shared.insert(roomId.value)
+        if !deviceQueryFailed {
+            shared.insert(roomId.value)
+        }
     }
 
     /// Share the room's current outbound session (created if needed) with

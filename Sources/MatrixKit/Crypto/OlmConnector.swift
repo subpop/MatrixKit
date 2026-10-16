@@ -563,7 +563,14 @@ public actor OlmConnector {
             return cached
         }
         let query = try await keys.queryKeys(users: [user])
-        let ids = Array((query.deviceKeys[user.value] ?? [:]).keys)
+        var ids = Array((query.deviceKeys[user.value] ?? [:]).keys)
+        if ids.isEmpty {
+            // An empty response can be a transient stale device-list
+            // result. Evict and query once more before caching the miss.
+            evictUser(user)
+            let refreshed = try await keys.queryKeys(users: [user])
+            ids = Array((refreshed.deviceKeys[user.value] ?? [:]).keys)
+        }
         listedDevices[user.value] = ids
         return ids
     }

@@ -44,6 +44,19 @@ struct OlmConnectorTests {
         #expect(query.deviceKeys[aliceUser.value]?["ALICE"] != nil)
     }
 
+    @Test("empty device query is refreshed once before caching")
+    func emptyDeviceQueryRefreshes() async throws {
+        let (alice, bob, keys, _, _, _, bobUser) = try await makePair()
+        try await bob.ensureKeys()
+        await keys.enqueueQueryResponse(KeyQueryResponse(
+            deviceKeys: [bobUser.value: [:]]))
+
+        #expect(try await alice.deviceIds(for: bobUser) == ["BOB"])
+        #expect(await keys.queryCalls == 2)
+        #expect(try await alice.deviceIds(for: bobUser) == ["BOB"])
+        #expect(await keys.queryCalls == 2)
+    }
+
     @Test("encrypted loopback decrypts and validates")
     func loopback() async throws {
         let (alice, bob, _, aliceSender, _, aliceUser, bobUser) =
@@ -235,11 +248,11 @@ struct OlmConnectorTests {
     func deviceListCache() async throws {
         let (alice, _, keys, _, _, _, bobUser) = try await makePair()
         try await alice.ensureKeys()
-        // Bob has no keys yet: empty list, one query.
+        // Bob has no keys yet: retry one empty response, then cache it.
         #expect(try await alice.deviceIds(for: bobUser) == [])
-        #expect(await keys.queryCalls == 1)
+        #expect(await keys.queryCalls == 2)
         #expect(try await alice.deviceIds(for: bobUser) == [])
-        #expect(await keys.queryCalls == 1)
+        #expect(await keys.queryCalls == 2)
     }
 
     @Test("sessions + OTK pool survive connector restart via keystore")

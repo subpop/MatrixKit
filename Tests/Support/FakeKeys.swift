@@ -16,6 +16,7 @@ public actor FakeKeys: OlmKeyService {
     public var queryCalls = 0
     /// Users argument of each `queryKeys` call, in order.
     public var queriedUsers: [[UserId]] = []
+    private var queryResponses: [KeyQueryResponse?] = []
     /// `(user, device)` of each `claimKeys` call, in order.
     public var claimedDevices: [(user: String, device: String)] = []
     /// Every `uploadDeviceKeys` request, in order.
@@ -31,11 +32,21 @@ public actor FakeKeys: OlmKeyService {
         uploads = []
     }
 
+    /// Queue a response for a query. A nil response falls through to the
+    /// seeded device state, allowing tests to model a transient empty read.
+    public func enqueueQueryResponse(_ response: KeyQueryResponse?) {
+        queryResponses.append(response)
+    }
+
     public func queryKeys(
         users: [UserId]
     ) async throws(MatrixError) -> KeyQueryResponse {
         queryCalls += 1
         queriedUsers.append(users)
+        if !queryResponses.isEmpty {
+            let response = queryResponses.removeFirst()
+            if let response { return response }
+        }
         var out: [String: [String: DeviceKeys]] = [:]
         for user in users {
             out[user.value] = devices[user.value] ?? [:]

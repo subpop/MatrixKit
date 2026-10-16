@@ -147,6 +147,20 @@ struct RoomCryptoTests {
         #expect(await aliceSharer.shares.count == 2)
     }
 
+    @Test("failed device lookup does not mark a room shared")
+    func failedDeviceLookupRetriesShare() async throws {
+        let (room, _, bobUser) = try roomFixture()
+        let (alice, _, aliceSharer, _) = try wirePair()
+        await aliceSharer.setDevices([bobUser.value: ["BOB"]])
+        await aliceSharer.failNextDeviceQueries()
+
+        try await alice.ensureShared(roomId: room, users: [bobUser])
+        #expect(await aliceSharer.shares.isEmpty)
+
+        try await alice.ensureShared(roomId: room, users: [bobUser])
+        #expect(await aliceSharer.shares.count == 1)
+    }
+
     @Test("inbound sessions persist across restore")
     func persistence() async throws {
         let (room, aliceUser, bobUser) = try roomFixture()

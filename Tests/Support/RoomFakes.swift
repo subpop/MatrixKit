@@ -12,6 +12,7 @@ public actor FakeSharer: RoomKeySharer {
         content: [String: AnyCodable], eventType: String
     )] = []
     public var identity = "SELFEDKEY"
+    private var failedDeviceQueries = 0
 
     public init() {}
 
@@ -20,8 +21,17 @@ public actor FakeSharer: RoomKeySharer {
         self.devices = devices
     }
 
+    /// Fail the next device-list lookup(s).
+    public func failNextDeviceQueries(_ count: Int = 1) {
+        failedDeviceQueries += count
+    }
+
     public func deviceIds(for user: UserId) async throws(MatrixError) -> [String] {
-        devices[user.value] ?? []
+        if failedDeviceQueries > 0 {
+            failedDeviceQueries -= 1
+            throw .networkError("Fake device query failure")
+        }
+        return devices[user.value] ?? []
     }
 
     public func sendEncrypted(
