@@ -955,7 +955,7 @@ public actor HarnessWorld {
 
     private func oidcTokens(deviceId: String = "OIDCDEV") -> OIDCTokenResponse {
         OIDCTokenResponse(
-            accessToken: "oidc-access-\(deviceId)",
+            accessToken: "swordfish-\(deviceId)",
             tokenType: "Bearer",
             expiresIn: 299,
             refreshToken: "oidc-refresh",
