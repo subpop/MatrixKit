@@ -160,7 +160,7 @@ public struct RoomPermissions: Hashable, Sendable {
     }
 
     /// Evaluate permissions for `userId` under a power-levels content dict.
-    public static func evaluate(
+    static func evaluate(
         powerLevels content: [String: AnyCodable], userId: UserId
     ) -> RoomPermissions {
         let level = powerLevel(of: userId, in: content)

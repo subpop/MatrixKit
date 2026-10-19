@@ -62,6 +62,40 @@ struct RoomDetailsTests {
         }
     }
 
+    @Test("Timeline permissions include infinite room v12 creator power")
+    func creatorPermissions() async throws {
+        try await withHarness { harness in
+            let (rooms, _, _) = await harness.roomClient()
+            let (roomState, _, _) = await harness.roomStateClient()
+            let creator = UserId(unchecked: "@alice:test")
+            let v12Room = try await rooms.create(CreateRoomRequest())
+            try await roomState.sendStateEvent(
+                v12Room, type: "m.room.create",
+                content: ["room_version": .string("12")])
+            try await roomState.sendStateEvent(
+                v12Room, type: "m.room.power_levels",
+                content: ["redact": .int(50), "users_default": .int(0)])
+
+            let v12Permissions = try await rooms.roomPermissions(
+                v12Room, localUser: creator)
+            #expect(v12Permissions?.canRedactOther == true)
+            let details = try await rooms.roomDetails(v12Room, localUser: creator)
+            #expect(details.permissions?.canRedactOther == true)
+
+            let v10Room = try await rooms.create(CreateRoomRequest())
+            try await roomState.sendStateEvent(
+                v10Room, type: "m.room.create",
+                content: ["room_version": .string("10")])
+            try await roomState.sendStateEvent(
+                v10Room, type: "m.room.power_levels",
+                content: ["redact": .int(50), "users_default": .int(0)])
+
+            let v10Permissions = try await rooms.roomPermissions(
+                v10Room, localUser: creator)
+            #expect(v10Permissions?.canRedactOther == false)
+        }
+    }
+
     @Test("Banned users are reported, not listed")
     func banned() async throws {
         try await withHarness { harness in

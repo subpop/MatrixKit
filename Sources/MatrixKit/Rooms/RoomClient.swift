@@ -317,6 +317,32 @@ public actor RoomClient {
 
     // MARK: - Details
 
+    /// Current user's permissions, including room-version creator privileges.
+    public func roomPermissions(
+        _ roomId: RoomId, localUser: UserId
+    ) async throws(MatrixError) -> RoomPermissions? {
+        let roomState = RoomStateClient(transport: transport, session: session)
+        let state = try await roomState.getState(roomId)
+        let powerContent = state.first {
+            EventType(rawValue: $0.type) == .roomPowerLevels
+        }?.content
+        let createEvent = state.first {
+            EventType(rawValue: $0.type) == .roomCreate
+        }
+        let (creators, creatorsInfinite): (Set<UserId>, Bool)
+        if let createEvent {
+            (creators, creatorsInfinite) = RoomMemberDetails.creators(
+                sender: createEvent.sender, createContent: createEvent.content)
+        } else {
+            (creators, creatorsInfinite) = ([], false)
+        }
+        return Self.permissions(
+            localUser: localUser,
+            powerLevels: powerContent,
+            creators: creators,
+            creatorsInfinite: creatorsInfinite)
+    }
+
     /// Full room snapshot (state walk, membership, permissions) for
     /// inspector and settings UI.
     ///
@@ -419,12 +445,11 @@ public actor RoomClient {
                 powerLevel: level,
                 isCreator: creators.contains(userId))
         }
-        let permissions = localUser.flatMap { user -> RoomPermissions? in
-            if creatorsInfinite && creators.contains(user) { return .infinite }
-            return powerContent.map {
-                RoomPermissions.evaluate(powerLevels: $0, userId: user)
-            }
-        }
+        let permissions = Self.permissions(
+            localUser: localUser,
+            powerLevels: powerContent,
+            creators: creators,
+            creatorsInfinite: creatorsInfinite)
         return RoomDetails(
             id: roomId,
             name: name,
@@ -444,6 +469,19 @@ public actor RoomClient {
             historyVisibility: historyVisibility,
             permissions: permissions,
             powerLevelSettings: powerLevels.map(RoomPowerLevelSettings.parse))
+    }
+
+    private static func permissions(
+        localUser: UserId?,
+        powerLevels: [String: AnyCodable]?,
+        creators: Set<UserId>,
+        creatorsInfinite: Bool
+    ) -> RoomPermissions? {
+        guard let localUser else { return nil }
+        if creatorsInfinite && creators.contains(localUser) { return .infinite }
+        return powerLevels.map {
+            RoomPermissions.evaluate(powerLevels: $0, userId: localUser)
+        }
     }
 
     // MARK: - Preview
