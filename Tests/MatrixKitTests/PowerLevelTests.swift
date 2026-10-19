@@ -108,6 +108,37 @@ struct PowerLevelTests {
             powerLevels: content, userId: UserId(unchecked: "@a:x"))
         #expect(permissions.canInvite)
         #expect(!permissions.canSendMessages)
+        #expect(!permissions.canSendReactions)
+        #expect(!permissions.canSendRedactions)
+    }
+
+    @Test("Message, reaction, and redaction event overrides are independent")
+    func eventTypeOverrides() {
+        let content = powerContent(
+            users: ["@a:x": 10], redact: 100, eventsDefault: 20,
+            events: [
+                "m.room.message": 50,
+                "m.reaction": 10,
+                "m.room.redaction": 5,
+            ])
+        let permissions = RoomPermissions.evaluate(
+            powerLevels: content, userId: UserId(unchecked: "@a:x"))
+        #expect(!permissions.canSendMessages)
+        #expect(permissions.canSendReactions)
+        #expect(permissions.canSendRedactions)
+        #expect(!permissions.canRedactOther)
+    }
+
+    @Test("Reaction and redaction permissions fall back to events_default")
+    func eventTypeDefaults() {
+        let content = powerContent(
+            users: ["@a:x": 10], eventsDefault: 20,
+            events: ["m.room.message": 5])
+        let permissions = RoomPermissions.evaluate(
+            powerLevels: content, userId: UserId(unchecked: "@a:x"))
+        #expect(permissions.canSendMessages)
+        #expect(!permissions.canSendReactions)
+        #expect(!permissions.canSendRedactions)
     }
 
     @Test("String-encoded power levels coerce per spec")
@@ -178,7 +209,17 @@ struct PowerLevelTests {
         #expect(permissions.canChangePermissions)
         #expect(permissions.canInvite)
         #expect(permissions.canSendMessages)
+        #expect(permissions.canSendReactions)
+        #expect(permissions.canSendRedactions)
         #expect(permissions.canEditDetails)
+    }
+
+    @Test("Default permissions allow ordinary event types")
+    func defaultEventPermissions() {
+        let permissions = RoomPermissions()
+        #expect(permissions.canSendMessages)
+        #expect(permissions.canSendReactions)
+        #expect(permissions.canSendRedactions)
     }
 
     @Test("Roles bucket power levels", arguments: [

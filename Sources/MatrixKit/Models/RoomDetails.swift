@@ -103,8 +103,12 @@ public struct RoomPermissions: Hashable, Sendable {
     public var canEditHistoryVisibility: Bool
     /// May change the canonical alias.
     public var canEditCanonicalAlias: Bool
-    /// May send message events.
+    /// May send `m.room.message` events.
     public var canSendMessages: Bool
+    /// May send `m.reaction` events.
+    public var canSendReactions: Bool
+    /// May send `m.room.redaction` events, including redactions of own events.
+    public var canSendRedactions: Bool
 
     public init(
         canEditName: Bool = false,
@@ -119,7 +123,9 @@ public struct RoomPermissions: Hashable, Sendable {
         canEditJoinRules: Bool = false,
         canEditHistoryVisibility: Bool = false,
         canEditCanonicalAlias: Bool = false,
-        canSendMessages: Bool = true
+        canSendMessages: Bool = true,
+        canSendReactions: Bool = true,
+        canSendRedactions: Bool = true
     ) {
         self.canEditName = canEditName
         self.canEditTopic = canEditTopic
@@ -134,6 +140,8 @@ public struct RoomPermissions: Hashable, Sendable {
         self.canEditHistoryVisibility = canEditHistoryVisibility
         self.canEditCanonicalAlias = canEditCanonicalAlias
         self.canSendMessages = canSendMessages
+        self.canSendReactions = canSendReactions
+        self.canSendRedactions = canSendRedactions
     }
 
     /// Permissions for infinitely-powered room creators (room v12+):
@@ -143,7 +151,8 @@ public struct RoomPermissions: Hashable, Sendable {
         canInvite: true, canKick: true, canBan: true,
         canRedactOther: true, canChangePermissions: true,
         canPin: true, canEditJoinRules: true, canEditHistoryVisibility: true,
-        canEditCanonicalAlias: true, canSendMessages: true
+        canEditCanonicalAlias: true, canSendMessages: true,
+        canSendReactions: true, canSendRedactions: true
     )
 
     /// Whether any room-detail field is editable.
@@ -186,6 +195,12 @@ public struct RoomPermissions: Hashable, Sendable {
             canEditCanonicalAlias: can(event("m.room.canonical_alias", fallback: stateDefault)),
             canSendMessages: can(event(
                 "m.room.message",
+                fallback: content["events_default"]?.intValue ?? 0)),
+            canSendReactions: can(event(
+                "m.reaction",
+                fallback: content["events_default"]?.intValue ?? 0)),
+            canSendRedactions: can(event(
+                "m.room.redaction",
                 fallback: content["events_default"]?.intValue ?? 0)))
     }
 }
