@@ -208,6 +208,48 @@ public struct MatrixStoreReader: Sendable {
             .compactMap { try? Self.decodeEvent($0, decoder: decoder) }
     }
 
+    /// Search stored message text, newest first. Edit hits navigate to the
+    /// original event and display the matched replacement body.
+    public func searchMessages(
+        term: String, roomId: RoomId? = nil
+    ) throws -> [MessageSearchResult] {
+        let query = term.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return [] }
+
+        let context = ModelContext(modelContainer)
+        let rows = try context.fetch(
+            SDRoomEvent.searchDescriptor(term: query, roomId: roomId?.value))
+        let rooms = try context.fetch(FetchDescriptor<SDRoom>())
+        let members = try context.fetch(FetchDescriptor<SDRoomMember>())
+        let membersByRoom = Dictionary(grouping: members, by: \.roomId)
+        let roomById = Dictionary(uniqueKeysWithValues: rooms.map { ($0.roomId, $0) })
+        let meta = try context.fetch(FetchDescriptor<SDStoreMeta>()).first
+        let localId = localUser?.value ?? meta?.localUser
+
+        var seenTargets = Set<String>()
+        return rows.compactMap { row in
+            let targetEventId = row.relType == "m.replace"
+                ? row.threadRootId ?? row.eventId
+                : row.eventId
+            let targetKey = "\(row.roomId)|\(targetEventId)"
+            guard seenTargets.insert(targetKey).inserted else { return nil }
+            let roomMembers = membersByRoom[row.roomId] ?? []
+            let roomName = roomById[row.roomId].map {
+                Self.displayName(room: $0, members: roomMembers, localUser: localId)
+            }
+            let senderName = roomMembers.first { $0.userId == row.sender }?.displayname
+            return MessageSearchResult(
+                eventId: EventId(unchecked: targetEventId),
+                roomId: RoomId(unchecked: row.roomId),
+                roomName: roomName,
+                sender: UserId(unchecked: row.sender),
+                senderDisplayName: senderName,
+                body: row.searchableText,
+                timestamp: Date(timeIntervalSince1970: TimeInterval(row.ts) / 1000),
+                highlights: [query])
+        }
+    }
+
     /// Room members, sorted by user ID.
     public func members(_ roomId: RoomId) throws -> [StoredMember] {
         let context = ModelContext(modelContainer)

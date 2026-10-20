@@ -29,6 +29,10 @@ public enum MatrixStore {
             at: file.deletingLastPathComponent(),
             withIntermediateDirectories: true)
         do {
+            if let container = try openIfCurrent(file: file) {
+                return container
+            }
+            removeStoreFiles(file: file)
             return try open(file: file)
         } catch {
             removeStoreFiles(file: file)
@@ -41,6 +45,15 @@ public enum MatrixStore {
         let configuration = ModelConfiguration(
             schema: schema, isStoredInMemoryOnly: true)
         return try ModelContainer(for: schema, configurations: [configuration])
+    }
+
+    private static func openIfCurrent(file: URL) throws -> ModelContainer? {
+        let container = try open(file: file)
+        let context = ModelContext(container)
+        guard let meta = try context.fetch(FetchDescriptor<SDStoreMeta>()).first,
+              meta.version != NormalizedStoreVersion.current
+        else { return container }
+        return nil
     }
 
     private static func open(file: URL) throws -> ModelContainer {
@@ -111,6 +124,33 @@ public extension SDRoomEvent {
             sortBy: [SortDescriptor(\.ts)])
         descriptor.fetchLimit = fetchLimit
         return descriptor
+    }
+
+    /// Message-like events containing the search term, newest first.
+    static func searchDescriptor(
+        term: String, roomId: String? = nil
+    ) -> FetchDescriptor<SDRoomEvent> {
+        if let roomId {
+            return FetchDescriptor<SDRoomEvent>(
+                predicate: #Predicate {
+                    $0.roomId == roomId
+                        && $0.isMessageLike
+                        && $0.searchableText.localizedStandardContains(term)
+                },
+                sortBy: [
+                    SortDescriptor(\.ts, order: .reverse),
+                    SortDescriptor(\.eventId),
+                ])
+        }
+        return FetchDescriptor<SDRoomEvent>(
+            predicate: #Predicate {
+                $0.isMessageLike
+                    && $0.searchableText.localizedStandardContains(term)
+            },
+            sortBy: [
+                SortDescriptor(\.ts, order: .reverse),
+                SortDescriptor(\.eventId),
+            ])
     }
 
     /// Message-like events for previews and unread estimates.

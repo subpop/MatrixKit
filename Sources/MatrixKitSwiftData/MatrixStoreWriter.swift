@@ -511,6 +511,7 @@ public actor MatrixStoreWriter {
         row.ts = event.originServerTs
         row.content = try encoder.encode(event.content)
         row.unsigned = try event.unsigned.map { try encoder.encode($0) }
+        row.searchableText = Self.searchableText(type: event.type, content: event.content)
         let flags = Self.promotedFlags(for: event)
         row.isState = flags.isState
         row.isMessageLike = flags.isMessageLike
@@ -618,6 +619,7 @@ public actor MatrixStoreWriter {
             redacts: event.redacts?.value,
             content: try encoder.encode(event.content),
             unsigned: try event.unsigned.map { try encoder.encode($0) },
+            searchableText: Self.searchableText(type: event.type, content: event.content),
             isState: flags.isState,
             isMessageLike: flags.isMessageLike,
             relType: flags.relType,
@@ -644,6 +646,17 @@ public actor MatrixStoreWriter {
             originServerTs: row.ts,
             content: content,
             unsigned: unsigned)
+    }
+
+    private nonisolated static func searchableText(
+        type: String, content: [String: AnyCodable]
+    ) -> String {
+        guard type == EventType.roomMessage.rawValue || type == "m.sticker" else {
+            return ""
+        }
+        return content["m.new_content"]?.objectValue?["body"]?.stringValue
+            ?? content["body"]?.stringValue
+            ?? ""
     }
 
     private nonisolated static func promotedFlags(
@@ -728,8 +741,10 @@ public actor MatrixStoreWriter {
             row.unsigned = try encoder.encode(unsigned)
             let content = try decoder.decode(
                 [String: AnyCodable].self, from: row.content)
-            row.content = try encoder.encode(
-                EventRedactor.prunedContent(type: row.type, content: content))
+            let prunedContent = EventRedactor.prunedContent(type: row.type, content: content)
+            row.content = try encoder.encode(prunedContent)
+            row.searchableText = Self.searchableText(
+                type: row.type, content: prunedContent)
         }
     }
 

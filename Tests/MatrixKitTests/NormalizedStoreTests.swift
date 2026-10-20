@@ -244,6 +244,30 @@ struct NormalizedStoreTests {
         #expect(try context.fetch(FetchDescriptor<SDRoomEdge>()).isEmpty)
     }
 
+    @Test("A normalized-store version mismatch resets the cache")
+    func resetsOnVersionMismatch() throws {
+        let file = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathComponent("matrix-store.swiftdata")
+        do {
+            let existing = try MatrixStore.makeContainer(at: file)
+            let room = SDRoom(roomId: "!old:x", membership: "join")
+            let event = SDRoomEvent(
+                roomId: room.roomId, eventId: "$old", ts: 1,
+                type: "m.room.message", sender: "@alice:x")
+            event.room = room
+            existing.mainContext.insert(room)
+            existing.mainContext.insert(event)
+            existing.mainContext.insert(SDStoreMeta(
+                version: NormalizedStoreVersion.current - 1))
+            try existing.mainContext.save()
+        }
+
+        let reopened = try MatrixStore.makeContainer(at: file)
+        #expect(try reopened.mainContext.fetch(FetchDescriptor<SDRoom>()).isEmpty)
+        #expect(try reopened.mainContext.fetch(FetchDescriptor<SDRoomEvent>()).isEmpty)
+    }
+
     @Test("databaseURL uses the normalized filename")
     func databaseURL() {
         let url = MatrixStore.databaseURL(

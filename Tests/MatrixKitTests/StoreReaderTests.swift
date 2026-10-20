@@ -60,6 +60,41 @@ struct StoreReaderTests {
             localUser: UserId(unchecked: "@me:x"))
     }
 
+    private func message(
+        _ eventId: String, roomId: String, body: String, ts: Int
+    ) -> MessageEvent {
+        MessageEvent(
+            type: "m.room.message",
+            eventId: EventId(unchecked: eventId),
+            sender: UserId(unchecked: "@alice:x"),
+            roomId: RoomId(unchecked: roomId),
+            originServerTs: ts,
+            content: ["msgtype": .string("m.text"), "body": .string(body)])
+    }
+
+    private func edit(
+        _ eventId: String, roomId: String, target: String,
+        body: String, ts: Int
+    ) -> MessageEvent {
+        MessageEvent(
+            type: "m.room.message",
+            eventId: EventId(unchecked: eventId),
+            sender: UserId(unchecked: "@alice:x"),
+            roomId: RoomId(unchecked: roomId),
+            originServerTs: ts,
+            content: [
+                "body": .string("* \\(body)"),
+                "m.new_content": .object([
+                    "msgtype": .string("m.text"),
+                    "body": .string(body),
+                ]),
+                "m.relates_to": .object([
+                    "rel_type": .string("m.replace"),
+                    "event_id": .string(target),
+                ]),
+            ])
+    }
+
     // MARK: - Tests
 
     @Test("Display names fall back like the actor", arguments: displayNameCases)
@@ -154,6 +189,81 @@ struct StoreReaderTests {
         #expect(full.map(\.eventId.value) == ["$e1", "$e2", "$e3", "$e4", "$e5"])
         let window = try reader(container).timeline(roomId, limit: 2)
         #expect(window.map(\.eventId.value) == ["$e4", "$e5"])
+    }
+
+    @Test("Search finds messages and edits with optional room scope")
+    func messageSearch() async throws {
+        let (writer, container) = try writer()
+        let firstRoom = RoomId(unchecked: "!first:x")
+        let secondRoom = RoomId(unchecked: "!second:x")
+        try await writer.apply(SyncDelta(
+            nextBatch: BatchToken("s1"),
+            joined: [
+                firstRoom: JoinedRoomDelta(timeline: [
+                    message("$original", roomId: firstRoom.value,
+                            body: "Original searchable message", ts: 1_000),
+                    edit("$edit", roomId: firstRoom.value, target: "$original",
+                         body: "Revised searchable message", ts: 2_000),
+                    MessageEvent(
+                        type: "m.reaction", eventId: EventId(unchecked: "$reaction"),
+                        sender: UserId(unchecked: "@alice:x"), roomId: firstRoom,
+                        originServerTs: 3_000,
+                        content: ["body": .string("searchable reaction")]),
+                ]),
+                secondRoom: JoinedRoomDelta(timeline: [
+                    message("$other", roomId: secondRoom.value,
+                            body: "Searchable in another room", ts: 4_000),
+                ]),
+            ]))
+
+        let reader = reader(container)
+        let scoped = try reader.searchMessages(term: "SEARCHABLE", roomId: firstRoom)
+        #expect(scoped.count == 1)
+        #expect(scoped.first?.eventId.value == "$original")
+        #expect(scoped.first?.body == "Revised searchable message")
+        #expect(scoped.first?.timestamp == Date(timeIntervalSince1970: 2))
+
+        let global = try reader.searchMessages(term: "searchable")
+        #expect(global.count == 2)
+        #expect(Set(global.map(\\.roomId.value)) == [firstRoom.value, secondRoom.value])
+        #expect(try reader.searchMessages(term: "   ").isEmpty)
+    }
+
+    @Test("Search index follows decryption and redaction writes")
+    func messageSearchIndexUpdates() async throws {
+        let (writer, container) = try writer()
+        let roomId = RoomId(unchecked: "!room:x")
+        let encrypted = MessageEvent(
+            type: "m.room.encrypted",
+            eventId: EventId(unchecked: "$encrypted"),
+            sender: UserId(unchecked: "@alice:x"),
+            roomId: roomId,
+            originServerTs: 1_000,
+            content: ["ciphertext": .string("ciphertext")])
+        try await writer.apply(SyncDelta(
+            nextBatch: BatchToken("s1"),
+            joined: [roomId: JoinedRoomDelta(timeline: [encrypted])]))
+        let reader = reader(container)
+        #expect(try reader.searchMessages(term: "private phrase", roomId: roomId).isEmpty)
+
+        try await writer.replaceEvent(
+            message("$encrypted", roomId: roomId.value,
+                    body: "private phrase", ts: 1_000),
+            roomId: roomId)
+        #expect(try reader.searchMessages(term: "private phrase", roomId: roomId).count == 1)
+
+        let redaction = MessageEvent(
+            type: "m.room.redaction",
+            eventId: EventId(unchecked: "$redaction"),
+            sender: UserId(unchecked: "@alice:x"),
+            roomId: roomId,
+            redacts: EventId(unchecked: "$encrypted"),
+            originServerTs: 2_000,
+            content: [:])
+        try await writer.apply(SyncDelta(
+            nextBatch: BatchToken("s2"),
+            joined: [roomId: JoinedRoomDelta(timeline: [redaction])]))
+        #expect(try reader.searchMessages(term: "private phrase", roomId: roomId).isEmpty)
     }
 
     @Test("Members sort by user ID with profiles")

@@ -80,6 +80,14 @@ public actor SearchClient {
     ) async -> MessageSearchResult? {
         let event = entry.result
         guard let roomId = event.roomId else { return nil }
+        let editBody = event.content["m.new_content"]?.objectValue?["body"]?.stringValue
+        let body = editBody
+            ?? event.messageContent?.body
+            ?? event.content["body"]?.stringValue
+            ?? ""
+        let navigationEventId = event.wireRelation?.relType == .replacement
+            ? event.wireRelation?.eventId ?? event.eventId
+            : event.eventId
         let profile = entry.context?.profileInfo?[event.sender.value]
         var roomName: String?
         var memberDisplayName: String?
@@ -92,13 +100,13 @@ public actor SearchClient {
             memberAvatar = member.avatarUrl.flatMap { try? MXCURI($0) }
         }
         return MessageSearchResult(
-            eventId: event.eventId,
+            eventId: navigationEventId,
             roomId: roomId,
             roomName: roomName,
             sender: event.sender,
             senderDisplayName: profile?.displayname ?? memberDisplayName,
             senderAvatarURL: profile?.avatarUrl.flatMap { try? MXCURI($0) } ?? memberAvatar,
-            body: event.messageContent?.body ?? "",
+            body: body,
             timestamp: event.timestamp,
             rank: entry.rank,
             highlights: highlights)

@@ -7,7 +7,7 @@ import SwiftData
 /// (never migrated — a full sync rebuilds it), same policy as the
 /// snapshot caches.
 public enum NormalizedStoreVersion {
-    public static let current = 1
+    public static let current = 2
 }
 
 /// Single-row store metadata (`id == "meta"`).
@@ -192,6 +192,8 @@ public final class SDRoomEvent {
     public var redacts: String?
     public var content: Data
     public var unsigned: Data?
+    /// Plain searchable text extracted from message bodies and edit content.
+    public var searchableText: String
     /// True when `stateKey != nil`.
     public var isState: Bool
     /// Message or sticker, for list previews and unread estimates.
@@ -216,6 +218,7 @@ public final class SDRoomEvent {
         redacts: String? = nil,
         content: Data = Data(),
         unsigned: Data? = nil,
+        searchableText: String = "",
         isState: Bool = false,
         isMessageLike: Bool = false,
         relType: String? = nil,
@@ -232,6 +235,7 @@ public final class SDRoomEvent {
         self.redacts = redacts
         self.content = content
         self.unsigned = unsigned
+        self.searchableText = searchableText
         self.isState = isState
         self.isMessageLike = isMessageLike
         self.relType = relType
