@@ -10,6 +10,9 @@ import MatrixKitTesting
 /// harness. First coverage of the 1.2k-line facade.
 @Suite("FacadeCompliance")
 struct FacadeComplianceTests {
+    private let testOrigin = SessionOrigin(
+        senderKey: "senderCurveKey", claimedEd25519: "senderEdKey")
+
     @MainActor
     private func client(_ harness: Harness) async -> MatrixClient {
         await MatrixClient.restore(
@@ -540,7 +543,7 @@ struct FacadeComplianceTests {
             let publicKey = try BackupCrypto.publicKey(privateKey: privateKey)
             let version = try await client.backup.createBackup(publicKey: publicKey)
             try await client.backup.uploadSessions(
-                [(roomId: room, sessionId: sessionId, export: exportEarly)],
+                [BackedUpSession(roomId: room, sessionId: sessionId, export: exportEarly, origin: testOrigin)],
                 publicKey: publicKey, version: version)
             await client.secrets.cacheBackupKey(privateKey)
             await client.roomCrypto.receiveRoomKey(BasicEvent(
@@ -614,7 +617,7 @@ struct FacadeComplianceTests {
             let blob = sender.export()
             _ = try sender.encrypt(Data("backed up".utf8))
             try await client.backup.uploadSessions(
-                [(roomId: RoomId(unchecked: "!room:test"), sessionId: "sid1", export: blob)],
+                [BackedUpSession(roomId: RoomId(unchecked: "!room:test"), sessionId: "sid1", export: blob, origin: testOrigin)],
                 publicKey: publicKey, version: version)
             let count = try await client.restoreKeyBackup(privateKey: privateKey)
             #expect(count == 1)

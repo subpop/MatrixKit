@@ -727,12 +727,12 @@ public final class MatrixClient {
         {
             do {
                 if let version = try await backup.cachedBackupVersion(for: backupKey),
-                    let export = try? await backup.downloadSession(
+                    let session = try? await backup.downloadSession(
                         roomId: unknown.roomId, sessionId: unknown.sessionId,
                         version: version, privateKey: backupKey),
                     try await roomCrypto.importSession(
                         roomId: unknown.roomId, sessionId: unknown.sessionId,
-                        export: export)
+                        export: session.export, origin: session.origin)
                 {
                     await refreshRoomDecryption(unknown.roomId)
                     MatrixKitLog.crypto.debug(
@@ -995,7 +995,7 @@ public final class MatrixClient {
                 if Task.isCancelled { throw MatrixError.cancelled }
                 try await roomCrypto.importSession(
                     roomId: session.roomId, sessionId: session.sessionId,
-                    export: session.export)
+                    export: session.export, origin: session.origin)
                 await progress?(
                     .init(phase: .importing, completed: index + 1, total: sessions.count))
             }

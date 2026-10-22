@@ -250,17 +250,41 @@ public struct BasicEvent: Hashable, Sendable, Codable {
     public var content: [String: AnyCodable]
     /// Server-supplied metadata, when present.
     public var unsigned: [String: AnyCodable]?
+    /// For events recovered from an Olm-encrypted to-device message: the
+    /// sending device's keys as validated during decryption. Set locally
+    /// only, never decoded from the wire.
+    public var olmOrigin: OlmOrigin?
 
     public init(
         type: String,
         sender: UserId? = nil,
         content: [String: AnyCodable] = [:],
-        unsigned: [String: AnyCodable]? = nil
+        unsigned: [String: AnyCodable]? = nil,
+        olmOrigin: OlmOrigin? = nil
     ) {
         self.type = type
         self.sender = sender
         self.content = content
         self.unsigned = unsigned
+        self.olmOrigin = olmOrigin
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case type, sender, content, unsigned
+    }
+}
+
+/// Identity keys of the device that sent an Olm-encrypted to-device
+/// event, bound to the event's sender during decryption.
+public struct OlmOrigin: Hashable, Sendable {
+    /// Unpadded-base64 Curve25519 identity key.
+    public var curve25519: String
+    /// Unpadded-base64 Ed25519 fingerprint key.
+    public var ed25519: String
+
+    public init(curve25519: String, ed25519: String) {
+        self.curve25519 = curve25519
+        self.ed25519 = ed25519
     }
 }
 

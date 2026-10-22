@@ -583,6 +583,12 @@ public actor OlmConnector {
             try requireConfigured().material.curve25519Public())
     }
 
+    /// Unpadded-base64 Ed25519 fingerprint key of the local device.
+    /// Part of the `RoomKeySharer` seam consumed by `RoomCrypto`.
+    public func signingKey() async throws(MatrixError) -> String {
+        try requireConfigured().material.signing.publicKeyBase64
+    }
+
     /// Unpadded-base64 Ed25519 signature by this device's key over
     /// `message` (e.g. canonical key-backup `auth_data`).
     public func sign(_ message: Data) throws(MatrixError) -> String {
@@ -986,7 +992,8 @@ public actor OlmConnector {
             throw .invalidIdentifier("Olm sender device unverified")
         }
         return BasicEvent(
-            type: innerType, sender: event.sender, content: contentDict)
+            type: innerType, sender: event.sender, content: contentDict,
+            olmOrigin: OlmOrigin(curve25519: senderKeyB64, ed25519: keysEd))
     }
 
     /// Establish that the session Curve25519 key belongs to the claimed

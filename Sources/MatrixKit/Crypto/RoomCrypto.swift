@@ -92,6 +92,9 @@ public actor RoomCrypto {
     private var initialShares: [String: (sessionId: String, blob: Data)] = [:]
     /// Inbound sessions by `"roomId|sessionId"`.
     private var inbound: [String: MegolmSession] = [:]
+    /// Origin of each inbound session, by `"roomId|sessionId"`. Absent
+    /// for sessions persisted before origins were recorded.
+    private var origins: [String: SessionOrigin] = [:]
     /// Original `session_key` blobs as received, by `"roomId|sessionId"`.
     /// Served byte-identical on key requests (see
     /// `shareRequestedSession`). In-memory only: after a restart the
@@ -131,6 +134,12 @@ public actor RoomCrypto {
     /// cooldown. The owner builds an `m.room_key_request` via
     /// `keyRequestContent` and sends it to `UnknownSession.sender`.
     private var onUnknownSession: (@Sendable (UnknownSession) -> Void)?
+
+    /// Persisted form of one inbound session.
+    private struct StoredSession: Codable {
+        var export: String
+        var origin: SessionOrigin?
+    }
 
     public init(
         sharer: any RoomKeySharer, sender: any RoomEventSender,
@@ -269,16 +278,28 @@ public actor RoomCrypto {
         guard let keystore else { return }
         guard
             let data = try? await keystore.load(KeyStoreKey(
-                service: Self.storeService, account: "megolm")),
-            let stored = try? JSONDecoder().decode(
-                [String: String].self, from: data)
+                service: Self.storeService, account: "megolm"))
         else { return }
-        for (key, b64) in stored {
+        let stored: [String: StoredSession]
+        if let current = try? JSONDecoder().decode(
+            [String: StoredSession].self, from: data)
+        {
+            stored = current
+        } else if let legacy = try? JSONDecoder().decode(
+            [String: String].self, from: data)
+        {
+            // Earlier builds stored bare exports.
+            stored = legacy.mapValues { StoredSession(export: $0) }
+        } else {
+            return
+        }
+        for (key, entry) in stored {
             guard
-                let blob = Primitives.base64UnpaddedDecode(b64),
+                let blob = Primitives.base64UnpaddedDecode(entry.export),
                 let session = try? MegolmSession.importSessionKey(blob)
             else { continue }
             inbound[key] = session
+            origins[key] = entry.origin
         }
     }
 
@@ -286,9 +307,11 @@ public actor RoomCrypto {
     /// `markPersistDirty()` instead of calling this directly.
     private func persist() async {
         guard let keystore else { return }
-        var stored: [String: String] = [:]
+        var stored: [String: StoredSession] = [:]
         for (key, session) in inbound {
-            stored[key] = Primitives.base64UnpaddedEncode(session.export())
+            stored[key] = StoredSession(
+                export: Primitives.base64UnpaddedEncode(session.export()),
+                origin: origins[key])
         }
         guard let data = try? JSONEncoder().encode(stored) else { return }
         do {
@@ -343,6 +366,12 @@ public actor RoomCrypto {
                 let inboundSession = try? MegolmSession.importSessionKey(keyBlob)
             {
                 inbound[inboundKey] = inboundSession
+                if let senderKey = try? await sharer.identityKey(),
+                    let claimed = try? await sharer.signingKey()
+                {
+                    origins[inboundKey] = SessionOrigin(
+                        senderKey: senderKey, claimedEd25519: claimed)
+                }
                 // Stash the signed blob at its pre-encrypt position: the
                 // earliest signed state of this outbound session, used to
                 // answer key requests for old history (see
@@ -587,15 +616,18 @@ public actor RoomCrypto {
 
     // MARK: - Backup
 
-    /// Inbound sessions as backup payloads: room, session ID, and the
-    /// session export blob. Keys are `"roomId|sessionId"` (neither ID
-    /// may contain a pipe per the Matrix ID grammar).
-    public func backupExports() -> [(roomId: RoomId, sessionId: String, export: Data)] {
-        var out: [(RoomId, String, Data)] = []
+    /// Inbound sessions as backup payloads: room, session ID, the
+    /// session export blob, and its origin when known. Keys are
+    /// `"roomId|sessionId"` (neither ID may contain a pipe per the
+    /// Matrix ID grammar).
+    public func backupExports() -> [BackedUpSession] {
+        var out: [BackedUpSession] = []
         for (key, session) in inbound {
             let parts = key.split(separator: "|", maxSplits: 1).map(String.init)
             guard parts.count == 2 else { continue }
-            out.append((RoomId(unchecked: parts[0]), parts[1], session.export()))
+            out.append(BackedUpSession(
+                roomId: RoomId(unchecked: parts[0]), sessionId: parts[1],
+                export: session.export(), origin: origins[key]))
         }
         return out
     }
@@ -605,9 +637,12 @@ public actor RoomCrypto {
     /// the earliest-held state: arrivals at or beyond the held ratchet
     /// position are ignored so a late share never regresses history.
     /// Returns true when stored.
+    ///
+    /// `origin` is what the source recorded for the session.
     @discardableResult
     public func importSession(
-        roomId: RoomId, sessionId: String, export: Data
+        roomId: RoomId, sessionId: String, export: Data,
+        origin: SessionOrigin? = nil
     ) async throws(MatrixError) -> Bool {
         guard let session = try? MegolmSession.importSessionKey(export) else {
             throw .encodingError("Cannot import session export for \(roomId.value)")
@@ -619,9 +654,19 @@ public actor RoomCrypto {
             )
             return false
         }
-        inbound[key] = session
+        store(session, for: key, origin: origin)
         await markPersistDirty()
         return true
+    }
+
+    /// Record an inbound session that improves on any held state. A
+    /// missing origin keeps the one already known for the session.
+    private func store(
+        _ session: MegolmSession, for key: String,
+        origin: SessionOrigin?
+    ) {
+        inbound[key] = session
+        if let origin { origins[key] = origin }
     }
 
     /// Whether an arriving session state decrypts strictly more history
@@ -674,13 +719,18 @@ public actor RoomCrypto {
             request.lastRequestedAt = nil
             requestedSessions[mapKey] = request
         }
+        let origin = Self.origin(of: event)
         if let held = inbound[mapKey], !isEarlier(arrival: session, than: held) {
+            if origins[mapKey] == nil, let origin {
+                origins[mapKey] = origin
+                await markPersistDirty()
+            }
             MatrixKitLog.crypto.debug(
                 "RoomCrypto ignoring superseded room key sender=\(event.sender?.value ?? "?", privacy: .private(mask: .hash)) session=\(String(sessionId.prefix(8)), privacy: .private(mask: .hash)) type=\(event.type, privacy: .public)"
             )
             return nil
         }
-        inbound[mapKey] = session
+        store(session, for: mapKey, origin: origin)
         receivedBlobs[mapKey] = ReceivedShare(
             blob: blob,
             chain: event.content["forwarding_curve25519_key_chain"]?
@@ -690,6 +740,28 @@ public actor RoomCrypto {
             senderKey: event.content["sender_key"]?.stringValue)
         await markPersistDirty()
         return RoomId(unchecked: roomId)
+    }
+
+    /// Origin of the session in a received room-key event, from the
+    /// Olm-validated sending device. A direct `m.room_key` was created
+    /// by that device; a forward names its creator in the content and
+    /// appends the forwarder to the chain. Nil when the event carries no
+    /// validated origin or a forward omits attribution.
+    private static func origin(of event: BasicEvent) -> SessionOrigin? {
+        guard let sender = event.olmOrigin else { return nil }
+        if event.type == roomKeyType {
+            return SessionOrigin(
+                senderKey: sender.curve25519, claimedEd25519: sender.ed25519)
+        }
+        guard
+            let senderKey = event.content["sender_key"]?.stringValue,
+            let claimed = event.content["sender_claimed_ed25519_key"]?.stringValue
+        else { return nil }
+        let chain = event.content["forwarding_curve25519_key_chain"]?
+            .arrayValue?.compactMap(\.stringValue) ?? []
+        return SessionOrigin(
+            senderKey: senderKey, claimedEd25519: claimed,
+            forwardingChain: chain + [sender.curve25519])
     }
 
     /// Decrypt an `m.room.encrypted` timeline event, returning the inner
@@ -818,6 +890,9 @@ public protocol RoomKeySharer: Actor {
     /// Unpadded-base64 Curve25519 identity key of the local device, sent
     /// as `sender_key` on room events.
     func identityKey() async throws(MatrixError) -> String
+    /// Unpadded-base64 Ed25519 fingerprint key of the local device,
+    /// claimed for sessions this device originates.
+    func signingKey() async throws(MatrixError) -> String
 }
 
 extension OlmConnector: RoomKeySharer {}

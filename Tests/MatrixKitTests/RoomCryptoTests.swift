@@ -334,6 +334,97 @@ struct RoomCryptoTests {
         #expect(decrypted?.content["body"] == .string("persistent"))
     }
 
+    @Test("received keys record their Olm origin and persist it")
+    func originRecordedAndPersisted() async throws {
+        let (room, aliceUser, bobUser) = try roomFixture()
+        let (alice, _, aliceSharer, _) = try wirePair()
+        await aliceSharer.setDevices([bobUser.value: ["BOB"]])
+        let keystore = InMemoryKeyStore()
+        let bob = RoomCrypto(
+            sharer: FakeSharer(), sender: FakeRoomSender(), keystore: keystore)
+        try await alice.shareRoomKey(roomId: room, users: [bobUser])
+        let shares = await aliceSharer.shares
+        await bob.receiveRoomKey(BasicEvent(
+            type: "m.room_key", sender: aliceUser, content: shares[0].content,
+            olmOrigin: OlmOrigin(curve25519: "ALICECURVE", ed25519: "ALICEED")))
+
+        let expected = SessionOrigin(senderKey: "ALICECURVE", claimedEd25519: "ALICEED")
+        #expect(await bob.backupExports().first?.origin == expected)
+
+        await bob.flushCryptoState()
+        let revived = RoomCrypto(
+            sharer: FakeSharer(), sender: FakeRoomSender(), keystore: keystore)
+        await revived.restore()
+        #expect(await revived.backupExports().first?.origin == expected)
+    }
+
+    @Test("forwarded keys take their creator from the content and chain the forwarder")
+    func forwardedOrigin() async throws {
+        let (room, aliceUser, bobUser) = try roomFixture()
+        let (alice, _, aliceSharer, _) = try wirePair()
+        await aliceSharer.setDevices([bobUser.value: ["BOB"]])
+        try await alice.shareRoomKey(roomId: room, users: [bobUser])
+        let shares = await aliceSharer.shares
+        let base = shares[0].content
+        let forwardedContent = base.merging([
+            "sender_key": .string("CREATORCURVE"),
+            "sender_claimed_ed25519_key": .string("CREATORED"),
+            "forwarding_curve25519_key_chain": .array([.string("HOPONE")]),
+        ]) { $1 }
+
+        let bob = RoomCrypto(sharer: FakeSharer(), sender: FakeRoomSender())
+        await bob.receiveRoomKey(BasicEvent(
+            type: "m.forwarded_room_key", sender: aliceUser, content: forwardedContent,
+            olmOrigin: OlmOrigin(curve25519: "FORWARDERCURVE", ed25519: "FORWARDERED")))
+        #expect(await bob.backupExports().first?.origin
+            == SessionOrigin(
+                senderKey: "CREATORCURVE", claimedEd25519: "CREATORED",
+                forwardingChain: ["HOPONE", "FORWARDERCURVE"]))
+
+        // A forward that omits attribution cannot be backed up.
+        let carol = RoomCrypto(sharer: FakeSharer(), sender: FakeRoomSender())
+        await carol.receiveRoomKey(BasicEvent(
+            type: "m.forwarded_room_key", sender: aliceUser, content: base,
+            olmOrigin: OlmOrigin(curve25519: "FORWARDERCURVE", ed25519: "FORWARDERED")))
+        #expect(await carol.backupExports().first?.origin == nil)
+    }
+
+    @Test("own sessions are attributed to this device")
+    func ownSessionOrigin() async throws {
+        let (room, _, _) = try roomFixture()
+        let (alice, _, _, _) = try wirePair()
+        _ = try await alice.sendEncryptedContent(room, MessageContent.markdown("mine"))
+        #expect(await alice.backupExports().first?.origin
+            == SessionOrigin(senderKey: "SELFEDKEY", claimedEd25519: "SELFEDKEY-ed25519"))
+    }
+
+    @Test("sessions persisted by earlier builds restore without an origin")
+    func legacyStoreFormat() async throws {
+        let room = RoomId(unchecked: "!room:x")
+        var outbound = MegolmSession.create()
+        let export = outbound.export()
+        let wire = try outbound.encrypt(try megolmPayload("legacy", room))
+        let keystore = InMemoryKeyStore()
+        try await keystore.save(
+            JSONEncoder().encode([
+                "\(room.value)|\(outbound.id)": Primitives.base64UnpaddedEncode(export)
+            ]),
+            for: KeyStoreKey(service: "MatrixKit.RoomCrypto", account: "megolm"))
+        let crypto = RoomCrypto(
+            sharer: FakeSharer(), sender: FakeRoomSender(), keystore: keystore)
+        await crypto.restore()
+        let event = MessageEvent(
+            type: "m.room.encrypted", eventId: EventId(unchecked: "$l"),
+            sender: UserId(unchecked: "@alice:x"), roomId: room, originServerTs: 1,
+            content: [
+                "session_id": .string(outbound.id),
+                "ciphertext": .string(Primitives.base64UnpaddedEncode(wire)),
+            ])
+        #expect(await crypto.decryptRoomEvent(event, in: room)?.content["body"]
+            == .string("legacy"))
+        #expect(await crypto.backupExports().first?.origin == nil)
+    }
+
     @Test("bursty imports collapse into one keystore write")
     func importsCoalescePersists() async throws {
         let (_, aliceUser, bobUser) = try roomFixture()

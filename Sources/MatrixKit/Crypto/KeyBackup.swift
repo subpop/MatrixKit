@@ -143,14 +143,63 @@ public struct BackupRoomSessions: Hashable, Sendable, Codable {
     }
 }
 
+/// Where a Megolm session came from: the originating device's keys and
+/// the devices it was forwarded through. Backup entries carry it so a
+/// restoring device can attribute the session.
+public struct SessionOrigin: Hashable, Sendable, Codable {
+    /// Curve25519 identity key of the device that created the session.
+    public var senderKey: String
+    /// Ed25519 key that device claims.
+    public var claimedEd25519: String
+    /// Curve25519 keys of the devices the session was forwarded
+    /// through, oldest first. Empty when received directly.
+    public var forwardingChain: [String]
+
+    public init(
+        senderKey: String, claimedEd25519: String, forwardingChain: [String] = []
+    ) {
+        self.senderKey = senderKey
+        self.claimedEd25519 = claimedEd25519
+        self.forwardingChain = forwardingChain
+    }
+}
+
+/// One Megolm session as stored in a key backup.
+public struct BackedUpSession: Hashable, Sendable {
+    public var roomId: RoomId
+    public var sessionId: String
+    /// Unsigned export blob (`MegolmSession.export()`).
+    public var export: Data
+    /// Origin recorded with the session; nil for entries without it.
+    /// Uploads skip sessions without an origin: restoring clients need
+    /// `sender_key` to decrypt.
+    public var origin: SessionOrigin?
+
+    public init(
+        roomId: RoomId, sessionId: String, export: Data, origin: SessionOrigin?
+    ) {
+        self.roomId = roomId
+        self.sessionId = sessionId
+        self.export = export
+        self.origin = origin
+    }
+}
+
 /// Plaintext encrypted into `session_data` (decrypted on restore).
 struct BackupPlaintext: Codable {
-    var algorithm: String = "m.megolm.v1.aes-sha2"
+    /// Optional so entries from clients that omit it still restore.
+    var algorithm: String? = "m.megolm.v1.aes-sha2"
     var sessionKey: String
+    var senderKey: String?
+    var senderClaimedKeys: [String: String]?
+    var forwardingChain: [String]?
 
     private enum CodingKeys: String, CodingKey {
         case algorithm
         case sessionKey = "session_key"
+        case senderKey = "sender_key"
+        case senderClaimedKeys = "sender_claimed_keys"
+        case forwardingChain = "forwarding_curve25519_key_chain"
     }
 }
 
@@ -292,19 +341,19 @@ public actor KeyBackup {
 
     // MARK: - Keys
 
-    /// Upload session exports encrypted for the backup public key.
-    /// Malformed exports are skipped.
+    /// Upload sessions encrypted for the backup public key. Sessions
+    /// without an origin and malformed exports are skipped.
     public func uploadSessions(
-        _ sessions: [(roomId: RoomId, sessionId: String, export: Data)],
-        publicKey: Data, version: String
+        _ sessions: [BackedUpSession], publicKey: Data, version: String
     ) async throws(MatrixError) {
         var rooms: [String: BackupRoomSessions] = [:]
         for session in sessions {
             guard
+                let origin = session.origin,
                 let imported = try? MegolmSession.importSessionKey(session.export),
                 let firstIndex = imported.firstMessageIndex,
                 let entry = try? backupEntry(
-                    export: session.export, publicKey: publicKey,
+                    export: session.export, origin: origin, publicKey: publicKey,
                     firstIndex: Int(firstIndex))
             else { continue }
             rooms[session.roomId.value, default: BackupRoomSessions()].sessions[
@@ -324,7 +373,7 @@ public actor KeyBackup {
     /// malformed entries are skipped.
     public func downloadSessions(
         version: String, privateKey: Data
-    ) async throws(MatrixError) -> [(roomId: RoomId, sessionId: String, export: Data)] {
+    ) async throws(MatrixError) -> [BackedUpSession] {
         struct Response: Decodable {
             var rooms: [String: BackupRoomSessions]
         }
@@ -334,13 +383,15 @@ public actor KeyBackup {
             query: ["version": version],
             accessToken: try await token()
         )
-        var out: [(RoomId, String, Data)] = []
+        var out: [BackedUpSession] = []
         for (roomId, room) in response.rooms {
             for (sessionId, entry) in room.sessions {
-                guard let export = try? decryptEntry(entry, privateKey: privateKey) else {
+                guard let decrypted = try? decryptEntry(entry, privateKey: privateKey) else {
                     continue
                 }
-                out.append((RoomId(unchecked: roomId), sessionId, export))
+                out.append(BackedUpSession(
+                    roomId: RoomId(unchecked: roomId), sessionId: sessionId,
+                    export: decrypted.export, origin: decrypted.origin))
             }
         }
         return out
@@ -349,28 +400,34 @@ public actor KeyBackup {
     /// Download and decrypt one backed-up session.
     public func downloadSession(
         roomId: RoomId, sessionId: String, version: String, privateKey: Data
-    ) async throws(MatrixError) -> Data {
+    ) async throws(MatrixError) -> BackedUpSession {
         let entry: BackupSessionData = try await transport.send(
             .get,
             path: "/_matrix/client/v3/room_keys/keys/\(roomId.pathSegmentEncoded)/\(sessionId.pathSegmentEncoded)",
             query: ["version": version],
             accessToken: try await token()
         )
-        guard let export = try? decryptEntry(entry, privateKey: privateKey) else {
+        guard let decrypted = try? decryptEntry(entry, privateKey: privateKey) else {
             throw .encodingError("Cannot decrypt backed-up session \(sessionId)")
         }
-        return export
+        return BackedUpSession(
+            roomId: roomId, sessionId: sessionId,
+            export: decrypted.export, origin: decrypted.origin)
     }
 
     // MARK: - Private
 
     private func backupEntry(
-        export: Data, publicKey: Data, firstIndex: Int
+        export: Data, origin: SessionOrigin, publicKey: Data, firstIndex: Int
     ) throws(MatrixError) -> BackupSessionData {
         let plaintext: Data
         do {
             plaintext = try JSONEncoder().encode(
-                BackupPlaintext(sessionKey: Primitives.base64UnpaddedEncode(export)))
+                BackupPlaintext(
+                    sessionKey: Primitives.base64UnpaddedEncode(export),
+                    senderKey: origin.senderKey,
+                    senderClaimedKeys: ["ed25519": origin.claimedEd25519],
+                    forwardingChain: origin.forwardingChain))
         } catch {
             throw .encodingError("Cannot encode session export: \(error.localizedDescription)")
         }
@@ -382,6 +439,7 @@ public actor KeyBackup {
         }
         return BackupSessionData(
             firstMessageIndex: firstIndex,
+            forwardedCount: origin.forwardingChain.count,
             sessionData: BackupSessionPayload(
                 ephemeral: Primitives.base64UnpaddedEncode(encrypted.ephemeral),
                 ciphertext: Primitives.base64UnpaddedEncode(encrypted.ciphertext),
@@ -390,7 +448,7 @@ public actor KeyBackup {
 
     private func decryptEntry(
         _ entry: BackupSessionData, privateKey: Data
-    ) throws(MatrixError) -> Data {
+    ) throws(MatrixError) -> (export: Data, origin: SessionOrigin?) {
         func decode(_ string: String, what: String) throws(MatrixError) -> Data {
             guard let data = Primitives.base64UnpaddedDecode(string) else {
                 throw .encodingError("Backed-up session has malformed \(what)")
@@ -407,19 +465,21 @@ public actor KeyBackup {
         } catch {
             throw .encodingError("Cannot decrypt backed-up session: \(error)")
         }
-        struct Plaintext: Decodable {
-            var sessionKey: String
-            private enum CodingKeys: String, CodingKey {
-                case sessionKey = "session_key"
-            }
-        }
         guard
-            let json = try? JSONDecoder().decode(Plaintext.self, from: decrypted),
+            let json = try? JSONDecoder().decode(BackupPlaintext.self, from: decrypted),
             let blob = Primitives.base64UnpaddedDecode(json.sessionKey),
             (try? MegolmSession.importSessionKey(blob)) != nil
         else {
             throw .encodingError("Backed-up session has malformed plaintext")
         }
-        return blob
+        var origin: SessionOrigin?
+        if let senderKey = json.senderKey,
+            let claimed = json.senderClaimedKeys?["ed25519"]
+        {
+            origin = SessionOrigin(
+                senderKey: senderKey, claimedEd25519: claimed,
+                forwardingChain: json.forwardingChain ?? [])
+        }
+        return (blob, origin)
     }
 }

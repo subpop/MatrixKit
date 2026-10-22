@@ -147,20 +147,29 @@ struct BackupComplianceTests {
             let message = try sender.encrypt(Data("room message".utf8))
             let roomId = RoomId(unchecked: "!room:test")
             let sessionId = "sid1"
+            let origin = SessionOrigin(
+                senderKey: "senderCurveKey", claimedEd25519: "senderEdKey",
+                forwardingChain: ["hopOne"])
             try await backup.uploadSessions(
-                [(roomId: roomId, sessionId: sessionId, export: blob)],
+                [BackedUpSession(
+                    roomId: roomId, sessionId: sessionId, export: blob, origin: origin),
+                 BackedUpSession(
+                    roomId: roomId, sessionId: "no-origin", export: blob, origin: nil)],
                 publicKey: publicKey, version: version)
             let info = try #require(try await backup.backupInfo())
             #expect(info.count == 1)
             let downloaded = try await backup.downloadSessions(version: version, privateKey: privateKey)
             #expect(downloaded.count == 1)
-            #expect(downloaded.first?.0 == roomId)
-            #expect(downloaded.first?.1 == sessionId)
-            var restored = try MegolmSession.importSessionKey(try #require(downloaded.first?.2))
+            #expect(downloaded.first?.roomId == roomId)
+            #expect(downloaded.first?.sessionId == sessionId)
+            // Sender attribution survives the round trip.
+            #expect(downloaded.first?.origin == origin)
+            var restored = try MegolmSession.importSessionKey(try #require(downloaded.first?.export))
             #expect(try restored.decrypt(message) == Data("room message".utf8))
             let single = try await backup.downloadSession(
                 roomId: roomId, sessionId: sessionId, version: version, privateKey: privateKey)
-            #expect(single == blob)
+            #expect(single.export == blob)
+            #expect(single.origin == origin)
         }
     }
 

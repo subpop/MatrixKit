@@ -43,6 +43,8 @@ public actor FakeSharer: RoomKeySharer {
     }
 
     public func identityKey() async throws(MatrixError) -> String { identity }
+
+    public func signingKey() async throws(MatrixError) -> String { "\(identity)-ed25519" }
 }
 
 /// In-memory `RoomEventSender`: records sent room events.
