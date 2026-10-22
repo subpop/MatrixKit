@@ -83,6 +83,11 @@ public actor RoomCrypto {
     public struct DecryptionFailure: Hashable, Sendable {
         public var reason: DecryptionFailureReason
         public var sessionId: String?
+
+        public init(reason: DecryptionFailureReason, sessionId: String? = nil) {
+            self.reason = reason
+            self.sessionId = sessionId
+        }
     }
 
     /// An inbound share as received, for byte-identical forwarding.
