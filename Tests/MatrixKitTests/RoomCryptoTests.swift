@@ -1023,6 +1023,52 @@ struct RoomCryptoTests {
         }
     }
 
+    @Test("an event must name the device that created the session")
+    func senderKeyMustMatchOrigin() async throws {
+        let (room, aliceUser, _) = try roomFixture()
+        var origin = MegolmSession.create()
+        let blob = try origin.sessionKey()
+        let wires = try (0..<4).map { try origin.encrypt(megolmPayload("m\($0)", room)) }
+        func receiver(origin known: Bool) async -> RoomCrypto {
+            let crypto = RoomCrypto(sharer: FakeSharer(), sender: FakeRoomSender())
+            await crypto.receiveRoomKey(BasicEvent(
+                type: RoomCrypto.roomKeyType, sender: aliceUser,
+                content: [
+                    "algorithm": .string(RoomCrypto.megolmAlgorithm),
+                    "room_id": .string(room.value),
+                    "session_id": .string(origin.id),
+                    "session_key": .string(Primitives.base64UnpaddedEncode(blob)),
+                ],
+                olmOrigin: known
+                    ? OlmOrigin(curve25519: "ALICECURVE", ed25519: "ALICEED") : nil))
+            return crypto
+        }
+        func event(_ index: Int, senderKey: String?) -> MessageEvent {
+            var content: [String: AnyCodable] = [
+                "session_id": .string(origin.id),
+                "ciphertext": .string(Primitives.base64UnpaddedEncode(wires[index])),
+            ]
+            if let senderKey { content["sender_key"] = .string(senderKey) }
+            return MessageEvent(
+                type: "m.room.encrypted", eventId: EventId(unchecked: "$e\(index)"),
+                sender: aliceUser, roomId: room, originServerTs: index, content: content)
+        }
+
+        let crypto = await receiver(origin: true)
+        #expect(await crypto.decryptRoomEvent(event(0, senderKey: "ALICECURVE"), in: room) != nil)
+        // Events from before the Curve25519 fix carry the Ed25519 key.
+        #expect(await crypto.decryptRoomEvent(event(1, senderKey: "ALICEED"), in: room) != nil)
+        #expect(await crypto.decryptRoomEvent(event(2, senderKey: nil), in: room) != nil)
+        let forged = event(3, senderKey: "MALLORYCURVE")
+        #expect(await crypto.decryptRoomEvent(forged, in: room) == nil)
+        #expect(await crypto.decryptionFailure(
+            roomId: room, eventId: forged.eventId)?.reason == .cryptoFailure)
+
+        // Without a known origin there is nothing to compare against.
+        let unknownOrigin = await receiver(origin: false)
+        #expect(await unknownOrigin.decryptRoomEvent(forged, in: room) != nil)
+    }
+
     @Test("an event claiming an index another event decrypted is a replay")
     func replayedIndexRejected() async throws {
         let (room, aliceUser, _) = try roomFixture()

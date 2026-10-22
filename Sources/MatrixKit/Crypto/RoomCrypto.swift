@@ -1062,6 +1062,23 @@ public actor RoomCrypto {
             }
             return nil
         }
+        // The event must name the device that created the session, when
+        // we know it: otherwise a message could be passed off as coming
+        // from another device. Events sent before the Curve25519 fix
+        // carry the creator's Ed25519 key, and some clients omit the
+        // field, so both are accepted.
+        if let origin = origins["\(roomId.value)|\(sessionId)"],
+            let claimed = event.content["sender_key"]?.stringValue,
+            claimed != origin.senderKey, claimed != origin.claimedEd25519
+        {
+            recordDecryptionFailure(
+                DecryptionFailure(reason: .cryptoFailure, sessionId: sessionId),
+                for: failureKey)
+            MatrixKitLog.crypto.warning(
+                "RoomCrypto rejecting event: sender key does not match session sender=\(event.sender.value, privacy: .private(mask: .hash)) session=\(String(sessionId.prefix(8)), privacy: .private(mask: .hash)) event=\(event.eventId.value, privacy: .private(mask: .hash))"
+            )
+            return nil
+        }
         // The message authenticated, so its index is trustworthy: the
         // same index arriving in another event (or at another time) is a
         // replay. Return before storing the advanced session copy.
