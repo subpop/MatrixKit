@@ -40,15 +40,17 @@ public actor SecretShare {
     private let session: Session
     private let crossSigning: CrossSigning
     private let store: CrossSigningStore?
+    private let backupKeyStore: BackupKeyStore?
     private let olm: OlmConnector?
 
     /// `requestId` → secret name for requests we sent.
     private var pending: [String: String] = [:]
     /// Secret name → private half banked from answers.
     private var received: [String: String] = [:]
-    /// Backup private key held in memory (e.g. from 4S recovery this
-    /// session) for answering peers' `m.megolm_backup.v1` requests.
-    /// Never persisted — request-driven sharing only.
+    /// Backup private key from 4S recovery or a peer's share, for
+    /// targeted backup fetches and for answering peers'
+    /// `m.megolm_backup.v1` requests. Persisted through
+    /// `backupKeyStore` and reloaded by `autoload()`.
     private var heldBackupKey: Data?
 
     public init(
@@ -56,12 +58,14 @@ public actor SecretShare {
         session: Session,
         crossSigning: CrossSigning,
         store: CrossSigningStore?,
+        backupKeyStore: BackupKeyStore? = nil,
         olm: OlmConnector? = nil
     ) {
         self.sender = sender
         self.session = session
         self.crossSigning = crossSigning
         self.store = store
+        self.backupKeyStore = backupKeyStore
         self.olm = olm
     }
 
@@ -144,16 +148,24 @@ public actor SecretShare {
         return requestId
     }
 
-    /// Cache a backup private key for answering peers'
-    /// `m.megolm_backup.v1` requests. In-memory only, never persisted;
-    /// call after 4S recovery. Nil clears the cache.
-    public func cacheBackupKey(_ key: Data?) {
+    /// Hold the backup private key and persist it, so targeted backup
+    /// fetches and answers to peers' `m.megolm_backup.v1` requests keep
+    /// working across launches. Call after 4S recovery or a peer's
+    /// share. Nil clears the cache and the persisted copy. A failed
+    /// write leaves the key held for this launch only.
+    public func cacheBackupKey(_ key: Data?) async {
         heldBackupKey = key
+        guard let backupKeyStore, let userId = await sessionUserId() else { return }
+        if let key {
+            try? await backupKeyStore.save(key, userId: userId)
+        } else {
+            try? await backupKeyStore.delete(userId: userId)
+        }
     }
 
-    /// The cached backup private key, if 4S recovery (or a peer share)
-    /// provided one this launch. The client uses it for targeted
-    /// backup fetches of undecryptable sessions.
+    /// The backup private key from 4S recovery or a peer share
+    /// (this launch, or restored by `autoload()`). The client uses it
+    /// for targeted backup fetches of undecryptable sessions.
     public func backupKey() -> Data? {
         heldBackupKey
     }
@@ -184,6 +196,7 @@ public actor SecretShare {
             // cross-signing half: surface it and stop. Like the halves
             // path, the value is banked verbatim first.
             if let key = Primitives.base64UnpaddedDecode(send.secret) {
+                await cacheBackupKey(key)
                 notify(.backupKeyReceived(key))
             }
             return .stored(name: name)
@@ -218,7 +231,7 @@ public actor SecretShare {
     /// Answer a peer's `m.secret.request` with the held secret,
     /// Olm-encrypted to the requesting device. Cross-signing halves
     /// come from the held keys; `m.megolm_backup.v1` comes from the
-    /// in-memory cache (see `cacheBackupKey`). Silent no-op without a
+    /// cached key (see `cacheBackupKey`). Silent no-op without a
     /// configured `OlmConnector`, for requests from other users, for
     /// unknown secret names, when we don't hold the secret, or for
     /// `request_cancellation` events.
@@ -270,10 +283,16 @@ public actor SecretShare {
 
     // MARK: - Autoload
 
-    /// Import persisted halves into `CrossSigning` when memory is empty.
-    /// Returns whether keys are now held. Call on login.
+    /// Import persisted halves into `CrossSigning` when memory is empty,
+    /// and restore the persisted backup key. Returns whether
+    /// cross-signing keys are now held. Call on login.
     @discardableResult
     public func autoload() async -> Bool {
+        if heldBackupKey == nil, let backupKeyStore,
+            let userId = await sessionUserId()
+        {
+            heldBackupKey = await backupKeyStore.load(userId: userId)
+        }
         if await crossSigning.hasKeys { return true }
         guard
             let store,

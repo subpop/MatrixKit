@@ -11,6 +11,7 @@ import MatrixKitTesting
 struct SecretShareTests {
     private func makeShare(
         store: CrossSigningStore? = nil,
+        backupKeyStore: BackupKeyStore? = nil,
         userId: UserId = UserId(unchecked: "@a:b"),
         deviceId: DeviceId = DeviceId("D"),
         olm: OlmConnector? = nil
@@ -25,7 +26,7 @@ struct SecretShareTests {
         let sender = FakeSender()
         let share = SecretShare(
             sender: sender, session: session, crossSigning: crossSigning,
-            store: store, olm: olm)
+            store: store, backupKeyStore: backupKeyStore, olm: olm)
         return (share, sender, crossSigning, transport)
     }
 
@@ -240,6 +241,48 @@ struct SecretShareTests {
         await second.autoload()
         #expect(await secondKeys.hasKeys == true)
         try? await secondTransport.shutdown()
+    }
+
+    @Test("backup key persists across instances and clears")
+    func backupKeyPersists() async throws {
+        let backupKeys = BackupKeyStore(keystore: InMemoryKeyStore())
+        let key = Data(repeating: 7, count: 32)
+        let (first, _, _, firstTransport) = makeShare(backupKeyStore: backupKeys)
+        await first.cacheBackupKey(key)
+        try? await firstTransport.shutdown()
+
+        let (second, _, _, secondTransport) = makeShare(backupKeyStore: backupKeys)
+        #expect(await second.backupKey() == nil)
+        await second.autoload()
+        #expect(await second.backupKey() == key)
+        await second.cacheBackupKey(nil)
+        try? await secondTransport.shutdown()
+
+        let (third, _, _, thirdTransport) = makeShare(backupKeyStore: backupKeys)
+        await third.autoload()
+        #expect(await third.backupKey() == nil)
+        try? await thirdTransport.shutdown()
+    }
+
+    @Test("a backup key shared by a peer is persisted")
+    func receivedBackupKeyPersists() async throws {
+        let backupKeys = BackupKeyStore(keystore: InMemoryKeyStore())
+        let key = Data(repeating: 9, count: 32)
+        let (share, _, _, transport) = makeShare(backupKeyStore: backupKeys)
+        let requestId = try await share.requestBackupKey(
+            from: UserId(unchecked: "@a:b"), deviceId: "PEER")
+        let outcome = await share.receive(try secretEvent(
+            requestId: requestId, secret: Primitives.base64UnpaddedEncode(key)))
+        guard case .stored = outcome else {
+            Issue.record("expected .stored, got \(outcome)")
+            return
+        }
+        try? await transport.shutdown()
+
+        let (fresh, _, _, freshTransport) = makeShare(backupKeyStore: backupKeys)
+        await fresh.autoload()
+        #expect(await fresh.backupKey() == key)
+        try? await freshTransport.shutdown()
     }
 
     // MARK: - Responder

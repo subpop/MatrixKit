@@ -160,6 +160,7 @@ public final class MatrixClient {
             sender: self.toDevice, session: session,
             crossSigning: self.crossSigning,
             store: CrossSigningStore(keystore: keystore),
+            backupKeyStore: BackupKeyStore(keystore: keystore),
             olm: self.olm)
         self.secretStorage = SecretStorage(accountData: self.accountData)
         self.roomCrypto = RoomCrypto(
@@ -475,6 +476,7 @@ public final class MatrixClient {
         backupUploadTask = nil
         await olm.deletePersistedState()
         await roomCrypto.deletePersistedSessions()
+        await secrets.cacheBackupKey(nil)
         guard let userId, let deviceId else { return }
         try? await CrossSigningStore(keystore: keystore).delete(userId: userId)
         try? await DeviceIdentityStore(keystore: keystore).delete(
@@ -1210,9 +1212,9 @@ public final class MatrixClient {
             }
             if let backupKey, let privateKey = Primitives.base64UnpaddedDecode(backupKey) {
                 outcome.backupPrivateKey = privateKey
-                // Hold the key in memory so this device can answer peers'
-                // `m.megolm_backup.v1` share requests (request-driven only —
-                // never persisted).
+                // Hold and persist the key so targeted backup fetches
+                // and answers to peers' `m.megolm_backup.v1` share
+                // requests work across launches.
                 await secrets.cacheBackupKey(privateKey)
             }
             if outcome.crossSigningImported, let userId, let deviceId {
