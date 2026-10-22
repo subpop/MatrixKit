@@ -5,6 +5,7 @@
 /// user-signing key signs other users' master keys. Keypairs live in
 /// memory — persist `exportPrivateKeys()` output (e.g. 4S/account data)
 /// to survive restarts.
+import Foundation
 import MatrixKitCrypto
 
 public actor CrossSigning {
@@ -153,6 +154,22 @@ public actor CrossSigning {
         } catch {
             throw .encodingError(
                 "Failed to sign cross-signing key: \(error.localizedDescription)")
+        }
+    }
+
+    /// Sign `message` with the master key: its `ed25519:<public key>`
+    /// key ID and unpadded-base64 signature. Nil without the master key.
+    public func signWithMasterKey(
+        _ message: Data
+    ) throws(MatrixError) -> (keyId: String, signature: String)? {
+        guard let master else { return nil }
+        do {
+            return (
+                "ed25519:\(master.publicKeyBase64)",
+                Primitives.base64UnpaddedEncode(try master.sign(message)))
+        } catch {
+            throw .encodingError(
+                "Failed to sign with master key: \(error.localizedDescription)")
         }
     }
 

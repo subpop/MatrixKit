@@ -164,6 +164,46 @@ struct BackupComplianceTests {
         }
     }
 
+    @Test("Backup info accepts only the matching private key")
+    func acceptsMatchingKey() async throws {
+        try await withHarness { harness in
+            let (backup, _, _) = await harness.backupClient()
+            let privateKey = BackupCrypto.generatePrivateKey()
+            let publicKey = try BackupCrypto.publicKey(privateKey: privateKey)
+            let version = try await backup.createBackup(publicKey: publicKey)
+            let info = try #require(try await backup.backupInfo())
+            #expect(info.accepts(privateKey: privateKey))
+            #expect(!info.accepts(privateKey: BackupCrypto.generatePrivateKey()))
+            #expect(try await backup.cachedBackupVersion(for: privateKey) == version)
+            #expect(try await backup.cachedBackupVersion(for: BackupCrypto.generatePrivateKey()) == nil)
+        }
+    }
+
+    @Test("auth_data signatures verify against the signing key only")
+    func authDataSignatures() async throws {
+        try await withHarness { harness in
+            let (backup, _, _) = await harness.backupClient()
+            let publicKey = try BackupCrypto.publicKey(
+                privateKey: BackupCrypto.generatePrivateKey())
+            let signer = SigningKey.generate()
+            let message = try #require(
+                KeyBackup.signedAuthData(KeyBackup.authData(publicKey: publicKey)))
+            let signature = Primitives.base64UnpaddedEncode(try signer.sign(message))
+            _ = try await backup.createBackup(
+                publicKey: publicKey,
+                signatures: ["@alice:test": ["ed25519:ALICEDEVICE": signature]])
+            let info = try #require(try await backup.backupInfo())
+            let user = UserId(unchecked: "@alice:test")
+            #expect(info.isSigned(
+                userId: user, keyId: "ed25519:ALICEDEVICE", by: signer.publicKeyBytes))
+            #expect(!info.isSigned(
+                userId: user, keyId: "ed25519:ALICEDEVICE",
+                by: SigningKey.generate().publicKeyBytes))
+            #expect(!info.isSigned(
+                userId: user, keyId: "ed25519:OTHER", by: signer.publicKeyBytes))
+        }
+    }
+
     @Test("Backup calls reject invalid sessions without network")
     func backupGuards() async {
         let transport = MatrixTransport(homeserver: URL(string: "https://example.com")!)

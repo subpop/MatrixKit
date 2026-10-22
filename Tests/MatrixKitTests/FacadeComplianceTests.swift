@@ -625,6 +625,22 @@ struct FacadeComplianceTests {
         }
     }
 
+    @Test("Backup restore rejects a key that does not match the backup")
+    @MainActor
+    func backupRestoreWrongKey() async throws {
+        try await withHarness { harness in
+            let client = await client(harness)
+            let publicKey = try BackupCrypto.publicKey(
+                privateKey: BackupCrypto.generatePrivateKey())
+            _ = try await client.backup.createBackup(publicKey: publicKey)
+            await #expect(throws: MatrixError.self) {
+                try await client.restoreKeyBackup(
+                    privateKey: BackupCrypto.generatePrivateKey())
+            }
+            try? await client.transport.shutdown()
+        }
+    }
+
     @Test("Backup restore cancellation surfaces cancelled")
     @MainActor
     func backupRestoreCancel() async throws {

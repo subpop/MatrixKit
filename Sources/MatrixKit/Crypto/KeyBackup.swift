@@ -52,6 +52,41 @@ public struct BackupVersionInfo: Hashable, Sendable, Codable {
     }
 }
 
+extension BackupVersionInfo {
+    /// Unpadded-base64 Curve25519 backup public key from `auth_data`.
+    public var publicKey: String? {
+        authData?["public_key"]?.stringValue
+    }
+
+    /// Whether this is a backup this client can use `privateKey` with:
+    /// a supported algorithm whose `auth_data` public key is the public
+    /// half of `privateKey`. A mismatched key decrypts nothing, so
+    /// restore paths check this before downloading.
+    public func accepts(privateKey: Data) -> Bool {
+        guard
+            algorithm == KeyBackup.algorithm, let publicKey,
+            let derived = try? BackupCrypto.publicKey(privateKey: privateKey)
+        else { return false }
+        return publicKey == Primitives.base64UnpaddedEncode(derived)
+    }
+
+    /// Whether `auth_data` carries a valid Ed25519 signature from
+    /// `signingKey` for `userId` under `keyId` (`ed25519:<device or
+    /// cross-signing key>`), over the canonical `auth_data` minus
+    /// `signatures` and `unsigned`. Trust in the signing key itself is
+    /// the caller's decision.
+    public func isSigned(userId: UserId, keyId: String, by signingKey: Data) -> Bool {
+        guard
+            let signature = authData?["signatures"]?.objectValue?[userId.value]?
+                .objectValue?[keyId]?.stringValue,
+            let signatureBytes = Primitives.base64UnpaddedDecode(signature),
+            let signed = KeyBackup.signedAuthData(authData ?? [:])
+        else { return false }
+        return SigningKey.verify(
+            signature: signatureBytes, for: signed, publicKey: signingKey)
+    }
+}
+
 /// One backed-up session (`session_data` of a `PUT /room_keys/keys` entry).
 public struct BackupSessionPayload: Hashable, Sendable, Codable {
     /// Ephemeral Curve25519 key (unpadded base64).
@@ -126,9 +161,9 @@ public actor KeyBackup {
     private let transport: MatrixTransport
     private let session: Session
 
-    /// Memoized backup version for the automatic recovery path (see
+    /// Memoized backup for the automatic recovery path (see
     /// `cachedBackupVersion`). `.none` means unchecked.
-    private var backupVersionCache: String?? = nil
+    private var backupCache: BackupVersionInfo?? = nil
 
     public init(transport: MatrixTransport, session: Session) {
         self.transport = transport
@@ -155,34 +190,93 @@ public actor KeyBackup {
         }
     }
 
-    /// Backup version for automatic recovery, memoized per launch so
-    /// every undecryptable session does not cost a `GET` (users without
-    /// a backup pay exactly one). Explicit version changes through this
-    /// actor refresh the memo; versions created elsewhere apply on the
-    /// next launch.
-    public func cachedBackupVersion() async throws(MatrixError) -> String? {
-        if let cached = backupVersionCache { return cached }
-        let version = try await backupInfo()?.version
-        backupVersionCache = version
-        return version
+    /// Backup version for automatic recovery with `privateKey`,
+    /// memoized per launch so every undecryptable session does not cost
+    /// a `GET` (users without a backup pay exactly one). Nil when there
+    /// is no backup or the key does not belong to it (see
+    /// `BackupVersionInfo.accepts(privateKey:)`). Explicit version
+    /// changes through this actor refresh the memo; versions created
+    /// elsewhere apply on the next launch.
+    public func cachedBackupVersion(
+        for privateKey: Data
+    ) async throws(MatrixError) -> String? {
+        let info: BackupVersionInfo?
+        if let cached = backupCache {
+            info = cached
+        } else {
+            info = try await backupInfo()
+            backupCache = .some(info)
+        }
+        guard let info, info.accepts(privateKey: privateKey) else { return nil }
+        return info.version
     }
 
-    /// Create a backup version for a backup public key. Returns the version.
-    public func createBackup(publicKey: Data) async throws(MatrixError) -> String {
+    /// Canonical JSON signed in backup `auth_data`: the object without
+    /// `signatures` and `unsigned`. Nil when it holds a value canonical
+    /// JSON cannot represent (floats).
+    static func signedAuthData(_ authData: [String: AnyCodable]) -> Data? {
+        var unsigned = authData
+        unsigned["signatures"] = nil
+        unsigned["unsigned"] = nil
+        guard let object = jsonObject(.object(unsigned)) else { return nil }
+        return try? CryptoPrimitives.canonicalJSON(object)
+    }
+
+    private static func jsonObject(_ value: AnyCodable) -> Any? {
+        switch value {
+        case .string(let s): return s
+        case .int(let i): return i
+        case .bool(let b): return b
+        case .null: return NSNull()
+        case .double: return nil
+        case .array(let items):
+            let converted = items.compactMap(jsonObject)
+            return converted.count == items.count ? converted : nil
+        case .object(let fields):
+            var out: [String: Any] = [:]
+            for (key, field) in fields {
+                guard let converted = jsonObject(field) else { return nil }
+                out[key] = converted
+            }
+            return out
+        }
+    }
+
+    /// `auth_data` for a backup public key, before signing. Sign
+    /// `signedAuthData(_:)` of it and pass the signatures to
+    /// `createBackup(publicKey:signatures:)`.
+    public static func authData(publicKey: Data) -> [String: AnyCodable] {
+        ["public_key": .string(Primitives.base64UnpaddedEncode(publicKey))]
+    }
+
+    /// Create a backup version for a backup public key. `signatures`
+    /// (user ID to `ed25519:<key ID>` to unpadded-base64 signature over
+    /// `signedAuthData(authData(publicKey:))`) go into `auth_data` so
+    /// other devices can establish trust in the backup. Returns the
+    /// version.
+    public func createBackup(
+        publicKey: Data, signatures: [String: [String: String]] = [:]
+    ) async throws(MatrixError) -> String {
         struct Response: Decodable {
             var version: String
+        }
+        var authData = Self.authData(publicKey: publicKey)
+        if !signatures.isEmpty {
+            authData["signatures"] = .object(signatures.mapValues { keyed in
+                .object(keyed.mapValues { .string($0) })
+            })
         }
         let response: Response = try await transport.send(
             .post, path: "/_matrix/client/v3/room_keys/version",
             body: [
                 "algorithm": AnyCodable.string(Self.algorithm),
-                "auth_data": .object([
-                    "public_key": .string(Primitives.base64UnpaddedEncode(publicKey)),
-                ]),
+                "auth_data": .object(authData),
             ],
             accessToken: try await token()
         )
-        backupVersionCache = response.version
+        backupCache = .some(BackupVersionInfo(
+            version: response.version, algorithm: Self.algorithm,
+            authData: authData))
         return response.version
     }
 
@@ -193,7 +287,7 @@ public actor KeyBackup {
             path: "/_matrix/client/v3/room_keys/version/\(version.pathSegmentEncoded)",
             accessToken: try await token()
         )
-        backupVersionCache = nil
+        backupCache = nil
     }
 
     // MARK: - Keys

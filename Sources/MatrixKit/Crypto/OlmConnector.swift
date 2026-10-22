@@ -582,6 +582,18 @@ public actor OlmConnector {
         try requireConfigured().material.signing.publicKeyBase64
     }
 
+    /// Unpadded-base64 Ed25519 signature by this device's key over
+    /// `message` (e.g. canonical key-backup `auth_data`).
+    public func sign(_ message: Data) throws(MatrixError) -> String {
+        let signing = try requireConfigured().material.signing
+        do {
+            return Primitives.base64UnpaddedEncode(try signing.sign(message))
+        } catch {
+            throw .encodingError(
+                "Failed to sign with device key: \(error.localizedDescription)")
+        }
+    }
+
     /// Drop cached device data for a user: the next send re-queries
     /// `/keys/query`. Call on `device_lists.changed` entries (stale
     /// cache) and `device_lists.left` entries (dropped keys).

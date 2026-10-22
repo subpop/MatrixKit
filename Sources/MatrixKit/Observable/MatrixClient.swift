@@ -726,7 +726,7 @@ public final class MatrixClient {
                 roomId: unknown.roomId, sessionId: unknown.sessionId)
         {
             do {
-                if let version = try await backup.cachedBackupVersion(),
+                if let version = try await backup.cachedBackupVersion(for: backupKey),
                     let export = try? await backup.downloadSession(
                         roomId: unknown.roomId, sessionId: unknown.sessionId,
                         version: version, privateKey: backupKey),
@@ -983,6 +983,10 @@ public final class MatrixClient {
             guard let info = try await backup.backupInfo(), let version = info.version else {
                 throw MatrixError.recoveryFailed("No key backup on this account")
             }
+            guard info.accepts(privateKey: privateKey) else {
+                throw MatrixError.recoveryFailed(
+                    "The recovery key does not match this account's key backup")
+            }
             await progress?(.init(phase: .fetching))
             let sessions = try await backup.downloadSessions(
                 version: version, privateKey: privateKey)
@@ -1006,6 +1010,32 @@ public final class MatrixClient {
         } catch {
             try rethrowAsCancelledIfCancelled(error)
         }
+    }
+
+    /// Create a key backup version for `privateKey`, signing `auth_data`
+    /// with this device's key and, when held, the master cross-signing
+    /// key so other devices can trust the backup. Returns the version.
+    /// Storing the private key in secret storage is the caller's step.
+    public func createKeyBackup(
+        privateKey: Data
+    ) async throws(MatrixError) -> String {
+        guard let userId, let deviceId else { throw MatrixError.notAuthenticated }
+        let publicKey: Data
+        do {
+            publicKey = try BackupCrypto.publicKey(privateKey: privateKey)
+        } catch {
+            throw MatrixError.encodingError("Invalid backup key: \(error)")
+        }
+        guard let message = KeyBackup.signedAuthData(KeyBackup.authData(publicKey: publicKey))
+        else { throw MatrixError.encodingError("Cannot encode backup auth_data") }
+        var signatures = [
+            "ed25519:\(deviceId.value)": try await olm.sign(message)
+        ]
+        if let master = try await crossSigning.signWithMasterKey(message) {
+            signatures[master.keyId] = master.signature
+        }
+        return try await backup.createBackup(
+            publicKey: publicKey, signatures: [userId.value: signatures])
     }
 
     /// Ask a peer device for the `m.megolm_backup.v1` private key
