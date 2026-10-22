@@ -41,7 +41,7 @@ struct OIDCComplianceTests {
                 deviceCode: auth.deviceCode,
                 intervalSeconds: auth.interval ?? 5,
                 expiresInSeconds: auth.expiresIn)
-            #expect(tokens.accessToken == "oidc-access-OIDCDEV")
+            #expect(tokens.accessToken == "swordfish-OIDCDEV")
             #expect(tokens.refreshToken == "oidc-refresh")
             #expect(tokens.expiresIn == 299)
         }
@@ -82,7 +82,7 @@ struct OIDCComplianceTests {
                 tokenEndpoint: metadata.tokenEndpoint,
                 clientId: "harness-client",
                 refreshToken: "oidc-refresh")
-            #expect(refreshed.accessToken.hasPrefix("oidc-access-"))
+            #expect(refreshed.accessToken.hasPrefix("swordfish-"))
             await #expect(throws: MatrixError.serverError(
                 code: "invalid_grant", message: "invalid_grant", retryAfter: nil))
             {
@@ -132,7 +132,7 @@ struct OIDCComplianceTests {
                 })
             let shown = await box.shown
             #expect(shown?.code == "WDJB-MJHT")
-            #expect(await session.accessToken == "oidc-access-OIDCDEV")
+            #expect(await session.accessToken == "swordfish-OIDCDEV")
             #expect(await session.refreshToken == "oidc-refresh")
             #expect(await session.isOIDC)
             #expect(await session.oidcClientId == "harness-client")
@@ -141,7 +141,7 @@ struct OIDCComplianceTests {
             try await auth.logoutOIDC()
             let world = await harness.world
             let revoked = await world.recordedRevocations()
-            #expect(revoked.contains("oidc-access-OIDCDEV"))
+            #expect(revoked.contains("swordfish-OIDCDEV"))
             #expect(revoked.contains("oidc-refresh"))
             #expect(!(await session.isValid))
             try? await transport.shutdown()

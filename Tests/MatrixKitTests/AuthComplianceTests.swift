@@ -369,7 +369,7 @@ struct AuthComplianceTests {
                 tokenEndpoint: "\(baseURL.absoluteString)/issuer/token")
             #expect(await session.isOIDC)
             try await auth.refresh()
-            #expect((await session.accessToken).hasPrefix("oidc-access-"))
+            #expect((await session.accessToken).hasPrefix("swordfish-"))
             // Missing OIDC metadata falls back to legacy refresh, which
             // needs a refresh token the session lacks.
             let (plain, plainSession, _) = await harness.authClient(token: "")
