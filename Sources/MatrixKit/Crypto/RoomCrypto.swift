@@ -815,8 +815,8 @@ public protocol RoomKeySharer: Actor {
         eventType: String, content: [String: AnyCodable],
         to user: UserId, devices: [DeviceId]
     ) async throws(MatrixError)
-    /// Unpadded-base64 Ed25519 fingerprint of the local device, sent as
-    /// `sender_key` on room events.
+    /// Unpadded-base64 Curve25519 identity key of the local device, sent
+    /// as `sender_key` on room events.
     func identityKey() async throws(MatrixError) -> String
 }
 

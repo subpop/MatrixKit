@@ -31,6 +31,18 @@ struct OlmConnectorTests {
         return (alice, bob, keys, aliceSender, bobSender, aliceUser, bobUser)
     }
 
+    @Test("identityKey is the Curve25519 key, not the Ed25519 signing key")
+    func identityKeyIsCurve() async throws {
+        let identity = DeviceIdentityKeys.generate()
+        let olm = OlmConnector(keys: FakeKeys(), sender: FakeSender())
+        try await olm.configure(
+            identity: identity, userId: UserId(unchecked: "@alice:x"),
+            deviceId: DeviceId("ALICE"))
+        let key = try await olm.identityKey()
+        #expect(key == Primitives.base64UnpaddedEncode(try identity.curve25519Public()))
+        #expect(key != identity.signing.publicKeyBase64)
+    }
+
     @Test("ensureKeys uploads 50 signed OTKs + fallback")
     func ensureKeys() async throws {
         let (alice, _, keys, _, _, aliceUser, _) = try await makePair()

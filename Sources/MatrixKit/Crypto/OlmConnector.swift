@@ -575,11 +575,12 @@ public actor OlmConnector {
         return ids
     }
 
-    /// Unpadded-base64 Ed25519 fingerprint of the local device, sent as
-    /// `sender_key` on `m.room.encrypted` room events. Part of the
+    /// Unpadded-base64 Curve25519 identity key of the local device, sent
+    /// as `sender_key` on `m.room.encrypted` room events. Part of the
     /// `RoomKeySharer` seam consumed by `RoomCrypto`.
     public func identityKey() async throws(MatrixError) -> String {
-        try requireConfigured().material.signing.publicKeyBase64
+        Primitives.base64UnpaddedEncode(
+            try requireConfigured().material.curve25519Public())
     }
 
     /// Unpadded-base64 Ed25519 signature by this device's key over
