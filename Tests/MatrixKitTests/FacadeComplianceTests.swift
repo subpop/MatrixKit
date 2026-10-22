@@ -681,6 +681,78 @@ struct FacadeComplianceTests {
         }
     }
 
+    @Test("Backup trust follows our cross-signing identity once this session is verified")
+    @MainActor
+    func backupTrustViaCrossSigning() async throws {
+        try await withHarness { harness in
+            let client = await client(harness)
+            let user = UserId(unchecked: "@alice:test")
+            let deviceId = DeviceId("ALICEDEVICE")
+            try await client.olm.configure(
+                identity: DeviceIdentityKeys.generate(), userId: user, deviceId: deviceId)
+            try await client.olm.ensureKeys()
+            let publicKeys = await client.crossSigning.generate()
+            try await client.crossSigning.upload()
+
+            // Two more devices of ours: one cross-signed, one not.
+            let trusted = DeviceIdentityKeys.generate()
+            let rogue = DeviceIdentityKeys.generate()
+            for (identity, id) in [(trusted, "TRUSTED"), (rogue, "ROGUE")] {
+                _ = try await client.keys.uploadDeviceKeys(UploadDeviceKeysRequest(
+                    deviceKeys: try identity.deviceKeys(userId: user.value, deviceId: id)))
+            }
+            try await client.crossSigning.signDevice(
+                userId: user, deviceId: DeviceId("TRUSTED"))
+
+            struct Signer {
+                var keyId: String
+                var sign: (Data) async throws -> String
+            }
+            func device(_ identity: DeviceIdentityKeys, _ id: String) -> Signer {
+                Signer(keyId: "ed25519:\(id)") { message in
+                    Primitives.base64UnpaddedEncode(try identity.signing.sign(message))
+                }
+            }
+            let master = Signer(keyId: "ed25519:\(publicKeys.master)") { message in
+                try #require(try await client.crossSigning.signWithMasterKey(message)).signature
+            }
+            /// The server's view of a fresh backup signed by `signers`.
+            func backupInfo(signedBy signers: [Signer]) async throws -> BackupVersionInfo {
+                let publicKey = try BackupCrypto.publicKey(
+                    privateKey: BackupCrypto.generatePrivateKey())
+                let message = try #require(
+                    KeyBackup.signedAuthData(KeyBackup.authData(publicKey: publicKey)))
+                var signatures: [String: String] = [:]
+                for signer in signers { signatures[signer.keyId] = try await signer.sign(message) }
+                _ = try await client.backup.createBackup(
+                    publicKey: publicKey,
+                    signatures: signatures.isEmpty ? [:] : [user.value: signatures])
+                return try #require(try await client.backup.backupInfo())
+            }
+
+            // Before this session is verified, only its own signature counts.
+            #expect(client.isSessionVerified == false)
+            #expect(await client.isBackupTrusted(try await backupInfo(signedBy: [master])) == false)
+            #expect(await client.isBackupTrusted(try await backupInfo(signedBy: [device(trusted, "TRUSTED")])) == false)
+
+            try await client.crossSigning.signDevice(userId: user, deviceId: deviceId)
+            await client.refreshVerificationState()
+            #expect(client.isSessionVerified)
+
+            #expect(await client.isBackupTrusted(try await backupInfo(signedBy: [master])))
+            #expect(await client.isBackupTrusted(try await backupInfo(signedBy: [device(trusted, "TRUSTED")])))
+            // A device nobody cross-signed, a stranger's key, and no
+            // signature at all vouch for nothing.
+            #expect(await client.isBackupTrusted(try await backupInfo(signedBy: [device(rogue, "ROGUE")])) == false)
+            let stranger = Signer(keyId: "ed25519:\(publicKeys.master)") { message in
+                Primitives.base64UnpaddedEncode(try SigningKey.generate().sign(message))
+            }
+            #expect(await client.isBackupTrusted(try await backupInfo(signedBy: [stranger])) == false)
+            #expect(await client.isBackupTrusted(try await backupInfo(signedBy: [])) == false)
+            try? await client.transport.shutdown()
+        }
+    }
+
     @Test("Backup restore cancellation surfaces cancelled")
     @MainActor
     func backupRestoreCancel() async throws {
