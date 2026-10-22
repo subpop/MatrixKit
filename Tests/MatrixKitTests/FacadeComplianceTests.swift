@@ -644,6 +644,46 @@ struct FacadeComplianceTests {
         }
     }
 
+    @Test("Held sessions upload only to a backup this device signed")
+    @MainActor
+    func backupUploadRequiresTrust() async throws {
+        try await withHarness { harness in
+            let client = await client(harness)
+            try await client.olm.configure(
+                identity: DeviceIdentityKeys.generate(),
+                userId: UserId(unchecked: "@alice:test"),
+                deviceId: DeviceId("ALICEDEVICE"))
+            let room = RoomId(unchecked: "!room:test")
+            let session = MegolmSession.create()
+            _ = try await client.roomCrypto.importSession(
+                roomId: room, sessionId: session.id, export: session.export(),
+                origin: testOrigin)
+
+            // An unsigned backup is not trusted: nothing uploads.
+            let publicKey = try BackupCrypto.publicKey(
+                privateKey: BackupCrypto.generatePrivateKey())
+            let unsigned = try await client.backup.createBackup(publicKey: publicKey)
+            await client.uploadPendingSessions()
+            #expect(try await client.backup.backupInfo()?.count == 0)
+            try await client.backup.deleteBackup(version: unsigned)
+
+            // A backup signed by this device is.
+            let privateKey = BackupCrypto.generatePrivateKey()
+            let version = try await client.createKeyBackup(privateKey: privateKey)
+            await client.uploadPendingSessions()
+            #expect(try await client.backup.backupInfo()?.count == 1)
+            #expect(await client.roomCrypto.sessionsPendingBackup(
+                version: version, limit: 10).isEmpty)
+
+            // The upload restores with its origin intact.
+            let restored = try await client.backup.downloadSession(
+                roomId: room, sessionId: session.id, version: version,
+                privateKey: privateKey)
+            #expect(restored.origin == testOrigin)
+            try? await client.transport.shutdown()
+        }
+    }
+
     @Test("Backup restore cancellation surfaces cancelled")
     @MainActor
     func backupRestoreCancel() async throws {

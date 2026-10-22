@@ -334,8 +334,8 @@ struct RoomCryptoTests {
         #expect(decrypted?.content["body"] == .string("persistent"))
     }
 
-    @Test("received keys record their Olm origin and persist it")
-    func originRecordedAndPersisted() async throws {
+    @Test("received keys record their Olm origin and track backup state")
+    func originAndBackupTracking() async throws {
         let (room, aliceUser, bobUser) = try roomFixture()
         let (alice, _, aliceSharer, _) = try wirePair()
         await aliceSharer.setDevices([bobUser.value: ["BOB"]])
@@ -348,14 +348,22 @@ struct RoomCryptoTests {
             type: "m.room_key", sender: aliceUser, content: shares[0].content,
             olmOrigin: OlmOrigin(curve25519: "ALICECURVE", ed25519: "ALICEED")))
 
-        let expected = SessionOrigin(senderKey: "ALICECURVE", claimedEd25519: "ALICEED")
-        #expect(await bob.backupExports().first?.origin == expected)
+        let pending = await bob.sessionsPendingBackup(version: "1", limit: 10)
+        #expect(pending.count == 1)
+        #expect(pending.first?.origin == SessionOrigin(
+            senderKey: "ALICECURVE", claimedEd25519: "ALICEED"))
+        await bob.markBackedUp(pending, version: "1")
+        #expect(await bob.sessionsPendingBackup(version: "1", limit: 10).isEmpty)
+        // A new backup version starts over.
+        #expect(await bob.sessionsPendingBackup(version: "2", limit: 10).count == 1)
 
         await bob.flushCryptoState()
         let revived = RoomCrypto(
             sharer: FakeSharer(), sender: FakeRoomSender(), keystore: keystore)
         await revived.restore()
-        #expect(await revived.backupExports().first?.origin == expected)
+        #expect(await revived.sessionsPendingBackup(version: "1", limit: 10).isEmpty)
+        #expect(await revived.sessionsPendingBackup(version: "2", limit: 10).first?.origin
+            == pending.first?.origin)
     }
 
     @Test("forwarded keys take their creator from the content and chain the forwarder")
@@ -376,7 +384,7 @@ struct RoomCryptoTests {
         await bob.receiveRoomKey(BasicEvent(
             type: "m.forwarded_room_key", sender: aliceUser, content: forwardedContent,
             olmOrigin: OlmOrigin(curve25519: "FORWARDERCURVE", ed25519: "FORWARDERED")))
-        #expect(await bob.backupExports().first?.origin
+        #expect(await bob.sessionsPendingBackup(version: "1", limit: 10).first?.origin
             == SessionOrigin(
                 senderKey: "CREATORCURVE", claimedEd25519: "CREATORED",
                 forwardingChain: ["HOPONE", "FORWARDERCURVE"]))
@@ -386,7 +394,7 @@ struct RoomCryptoTests {
         await carol.receiveRoomKey(BasicEvent(
             type: "m.forwarded_room_key", sender: aliceUser, content: base,
             olmOrigin: OlmOrigin(curve25519: "FORWARDERCURVE", ed25519: "FORWARDERED")))
-        #expect(await carol.backupExports().first?.origin == nil)
+        #expect(await carol.sessionsPendingBackup(version: "1", limit: 10).isEmpty)
     }
 
     @Test("own sessions are attributed to this device")
@@ -394,8 +402,27 @@ struct RoomCryptoTests {
         let (room, _, _) = try roomFixture()
         let (alice, _, _, _) = try wirePair()
         _ = try await alice.sendEncryptedContent(room, MessageContent.markdown("mine"))
-        #expect(await alice.backupExports().first?.origin
+        #expect(await alice.sessionsPendingBackup(version: "1", limit: 10).first?.origin
             == SessionOrigin(senderKey: "SELFEDKEY", claimedEd25519: "SELFEDKEY-ed25519"))
+    }
+
+    @Test("a held session replaced by an earlier state is pending again")
+    func earlierStateRequeues() async throws {
+        let room = RoomId(unchecked: "!room:x")
+        var origin = MegolmSession.create()
+        let early = origin.export()
+        for _ in 0..<3 { _ = try origin.encrypt(Data("x".utf8)) }
+        let late = origin.export()
+        let crypto = RoomCrypto(sharer: FakeSharer(), sender: FakeRoomSender())
+        let sessionOrigin = SessionOrigin(senderKey: "C", claimedEd25519: "E")
+        try await crypto.importSession(
+            roomId: room, sessionId: origin.id, export: late, origin: sessionOrigin)
+        let first = await crypto.sessionsPendingBackup(version: "1", limit: 10)
+        await crypto.markBackedUp(first, version: "1")
+        #expect(await crypto.sessionsPendingBackup(version: "1", limit: 10).isEmpty)
+        try await crypto.importSession(
+            roomId: room, sessionId: origin.id, export: early, origin: sessionOrigin)
+        #expect(await crypto.sessionsPendingBackup(version: "1", limit: 10).count == 1)
     }
 
     @Test("sessions persisted by earlier builds restore without an origin")
@@ -422,7 +449,7 @@ struct RoomCryptoTests {
             ])
         #expect(await crypto.decryptRoomEvent(event, in: room)?.content["body"]
             == .string("legacy"))
-        #expect(await crypto.backupExports().first?.origin == nil)
+        #expect(await crypto.sessionsPendingBackup(version: "1", limit: 10).isEmpty)
     }
 
     @Test("bursty imports collapse into one keystore write")

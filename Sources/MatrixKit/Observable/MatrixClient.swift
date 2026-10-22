@@ -113,6 +113,12 @@ public final class MatrixClient {
     /// session). Follows the `deltas()` pattern; consumed by MatrixRTC
     /// for `io.element.call.encryption_keys`.
     private var decryptedToDeviceContinuations: [AsyncStream<[BasicEvent]>.Continuation] = []
+    private var backupUploadTask: Task<Void, Never>?
+    private var backupUploadRequested = false
+    /// Backup versions found trustworthy this launch (see
+    /// `isBackupTrusted`). Only positive results are kept: verification
+    /// state can change.
+    private var trustedBackupVersions: Set<String> = []
     /// Decryptor for stored ciphertext, armed by `configureEncryption()`.
     private var timelineDecryptor:
         (@Sendable (MessageEvent, RoomId) async -> MessageEvent?)?
@@ -465,6 +471,8 @@ public final class MatrixClient {
     /// needs). Best-effort — every step ignores errors so one failure
     /// can't trap sign-out.
     public func deleteLocalCryptoMaterial() async {
+        backupUploadTask?.cancel()
+        backupUploadTask = nil
         await olm.deletePersistedState()
         await roomCrypto.deletePersistedSessions()
         guard let userId, let deviceId else { return }
@@ -684,6 +692,10 @@ public final class MatrixClient {
         await roomCrypto.setUnknownSessionHandler({ [recover] unknown in
             recover(unknown)
         })
+        await roomCrypto.setSessionsChangedHandler { [weak self] in
+            Task { @MainActor in self?.scheduleBackupUpload() }
+        }
+        scheduleBackupUpload()
         let hooks = SyncCryptoHooks(
             handleToDevice: { events in
                 await self.routeToDeviceEvents(events)
@@ -732,7 +744,8 @@ public final class MatrixClient {
                         version: version, privateKey: backupKey),
                     try await roomCrypto.importSession(
                         roomId: unknown.roomId, sessionId: unknown.sessionId,
-                        export: session.export, origin: session.origin)
+                        export: session.export, origin: session.origin,
+                        backedUpVersion: version)
                 {
                     await refreshRoomDecryption(unknown.roomId)
                     MatrixKitLog.crypto.debug(
@@ -862,7 +875,11 @@ public final class MatrixClient {
     /// failed), re-signs before re-checking. Failures keep the previous
     /// state but still mark it checked.
     public func refreshVerificationState() async {
-        defer { hasCheckedVerificationState = true }
+        defer {
+            hasCheckedVerificationState = true
+            // Trust in a key backup can hinge on this device's verification.
+            if isSessionVerified { scheduleBackupUpload() }
+        }
         guard let userId, let deviceId else { return }
         do {
             let queried = try await keys.queryKeys(users: [userId])
@@ -995,7 +1012,8 @@ public final class MatrixClient {
                 if Task.isCancelled { throw MatrixError.cancelled }
                 try await roomCrypto.importSession(
                     roomId: session.roomId, sessionId: session.sessionId,
-                    export: session.export, origin: session.origin)
+                    export: session.export, origin: session.origin,
+                    backedUpVersion: version)
                 await progress?(
                     .init(phase: .importing, completed: index + 1, total: sessions.count))
             }
@@ -1036,6 +1054,99 @@ public final class MatrixClient {
         }
         return try await backup.createBackup(
             publicKey: publicKey, signatures: [userId.value: signatures])
+    }
+
+    /// Upload held sessions to the account's key backup shortly after
+    /// they arrive. Coalesces bursts into one pass. No-op without a
+    /// trusted backup (see `isBackupTrusted`); sessions stay pending and
+    /// go up once one is available.
+    func scheduleBackupUpload() {
+        guard backupUploadTask == nil else {
+            backupUploadRequested = true
+            return
+        }
+        backupUploadTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(5))
+            guard !Task.isCancelled else { return }
+            while let self {
+                self.backupUploadRequested = false
+                await self.uploadPendingSessions()
+                guard self.backupUploadRequested, !Task.isCancelled else { break }
+            }
+            self?.backupUploadTask = nil
+        }
+    }
+
+    /// Upload sessions not yet in the current backup version, in
+    /// batches. Backup upload needs only the backup public key from the
+    /// server, so no private key is involved.
+    func uploadPendingSessions() async {
+        guard
+            let info = try? await backup.backupInfo(),
+            let version = info.version, info.algorithm == KeyBackup.algorithm,
+            let publicKeyB64 = info.publicKey,
+            let publicKey = Primitives.base64UnpaddedDecode(publicKeyB64),
+            await isBackupTrusted(info)
+        else { return }
+        while !Task.isCancelled {
+            let batch = await roomCrypto.sessionsPendingBackup(
+                version: version, limit: 200)
+            guard !batch.isEmpty else { return }
+            do {
+                try await backup.uploadSessions(
+                    batch, publicKey: publicKey, version: version)
+            } catch {
+                MatrixKitLog.crypto.warning(
+                    "RoomCrypto backup upload failed error=\(error, privacy: .public)"
+                )
+                return
+            }
+            await roomCrypto.markBackedUp(batch, version: version)
+        }
+    }
+
+    /// Whether this client should upload room keys to `info`: only
+    /// backups its own user's trusted keys vouch for, so a malicious
+    /// server cannot substitute a key it controls. Trusted when
+    /// `auth_data` carries a valid signature from this device, or — once
+    /// this session is cross-signing verified — from the master key or
+    /// another of our devices the self-signing key signed.
+    func isBackupTrusted(_ info: BackupVersionInfo) async -> Bool {
+        guard let userId, let deviceId, let version = info.version else { return false }
+        if trustedBackupVersions.contains(version) { return true }
+        if let ours = try? await olm.signingKey(),
+            let key = Primitives.base64UnpaddedDecode(ours),
+            info.isSigned(userId: userId, keyId: "ed25519:\(deviceId.value)", by: key)
+        {
+            trustedBackupVersions.insert(version)
+            return true
+        }
+        guard
+            isSessionVerified,
+            let queried = try? await keys.queryKeys(users: [userId])
+        else { return false }
+        let masterKeys = queried.masterKeys?[userId.value]?.keys ?? [:]
+        for (keyId, publicKey) in masterKeys {
+            if let key = Primitives.base64UnpaddedDecode(publicKey),
+                info.isSigned(userId: userId, keyId: keyId, by: key)
+            {
+                trustedBackupVersions.insert(version)
+                return true
+            }
+        }
+        let selfSigning = queried.selfSigningKeys?[userId.value]?.keys.values.first
+        for (otherId, device) in queried.deviceKeys[userId.value] ?? [:] {
+            guard
+                let selfSigning,
+                CrossSigning.deviceSignatureValid(device, selfSigningKey: selfSigning),
+                let ed = device.keys["ed25519:\(otherId)"],
+                let key = Primitives.base64UnpaddedDecode(ed),
+                info.isSigned(userId: userId, keyId: "ed25519:\(otherId)", by: key)
+            else { continue }
+            trustedBackupVersions.insert(version)
+            return true
+        }
+        return false
     }
 
     /// Ask a peer device for the `m.megolm_backup.v1` private key

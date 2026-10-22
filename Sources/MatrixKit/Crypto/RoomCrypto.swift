@@ -95,6 +95,9 @@ public actor RoomCrypto {
     /// Origin of each inbound session, by `"roomId|sessionId"`. Absent
     /// for sessions persisted before origins were recorded.
     private var origins: [String: SessionOrigin] = [:]
+    /// Key backup version each inbound session (at its held state) is
+    /// stored in, by `"roomId|sessionId"`.
+    private var backedUpVersions: [String: String] = [:]
     /// Original `session_key` blobs as received, by `"roomId|sessionId"`.
     /// Served byte-identical on key requests (see
     /// `shareRequestedSession`). In-memory only: after a restart the
@@ -134,11 +137,15 @@ public actor RoomCrypto {
     /// cooldown. The owner builds an `m.room_key_request` via
     /// `keyRequestContent` and sends it to `UnknownSession.sender`.
     private var onUnknownSession: (@Sendable (UnknownSession) -> Void)?
+    /// Fired when a session that may need backing up was stored (see
+    /// `sessionsPendingBackup`).
+    private var onSessionsChanged: (@Sendable () -> Void)?
 
     /// Persisted form of one inbound session.
     private struct StoredSession: Codable {
         var export: String
         var origin: SessionOrigin?
+        var backedUpVersion: String?
     }
 
     public init(
@@ -174,6 +181,14 @@ public actor RoomCrypto {
     /// Set the local user (own sends never trigger key requests).
     public func setLocalUserId(_ userId: UserId?) {
         localUserId = userId
+    }
+
+    /// Install the handler fired when a stored session may need backing
+    /// up (see `sessionsPendingBackup`).
+    public func setSessionsChangedHandler(
+        _ handler: (@Sendable () -> Void)?
+    ) {
+        onSessionsChanged = handler
     }
 
     /// Install the unknown-session handler (see `onUnknownSession`).
@@ -300,6 +315,7 @@ public actor RoomCrypto {
             else { continue }
             inbound[key] = session
             origins[key] = entry.origin
+            backedUpVersions[key] = entry.backedUpVersion
         }
     }
 
@@ -311,7 +327,7 @@ public actor RoomCrypto {
         for (key, session) in inbound {
             stored[key] = StoredSession(
                 export: Primitives.base64UnpaddedEncode(session.export()),
-                origin: origins[key])
+                origin: origins[key], backedUpVersion: backedUpVersions[key])
         }
         guard let data = try? JSONEncoder().encode(stored) else { return }
         do {
@@ -371,6 +387,7 @@ public actor RoomCrypto {
                 {
                     origins[inboundKey] = SessionOrigin(
                         senderKey: senderKey, claimedEd25519: claimed)
+                    onSessionsChanged?()
                 }
                 // Stash the signed blob at its pre-encrypt position: the
                 // earliest signed state of this outbound session, used to
@@ -638,11 +655,13 @@ public actor RoomCrypto {
     /// position are ignored so a late share never regresses history.
     /// Returns true when stored.
     ///
-    /// `origin` is what the source recorded for the session.
+    /// `origin` is what the source recorded for the session;
+    /// `backedUpVersion` is the backup version the export came from,
+    /// so it is not uploaded straight back.
     @discardableResult
     public func importSession(
         roomId: RoomId, sessionId: String, export: Data,
-        origin: SessionOrigin? = nil
+        origin: SessionOrigin? = nil, backedUpVersion: String? = nil
     ) async throws(MatrixError) -> Bool {
         guard let session = try? MegolmSession.importSessionKey(export) else {
             throw .encodingError("Cannot import session export for \(roomId.value)")
@@ -654,8 +673,9 @@ public actor RoomCrypto {
             )
             return false
         }
-        store(session, for: key, origin: origin)
+        store(session, for: key, origin: origin, backedUpVersion: backedUpVersion)
         await markPersistDirty()
+        if backedUpVersion == nil { onSessionsChanged?() }
         return true
     }
 
@@ -663,10 +683,44 @@ public actor RoomCrypto {
     /// missing origin keeps the one already known for the session.
     private func store(
         _ session: MegolmSession, for key: String,
-        origin: SessionOrigin?
+        origin: SessionOrigin?, backedUpVersion: String?
     ) {
         inbound[key] = session
         if let origin { origins[key] = origin }
+        backedUpVersions[key] = backedUpVersion
+    }
+
+    /// Held sessions with a known origin that are not stored in
+    /// backup `version`, oldest-first order unspecified. Sessions
+    /// without an origin never qualify (see `BackedUpSession`).
+    public func sessionsPendingBackup(
+        version: String, limit: Int
+    ) -> [BackedUpSession] {
+        var out: [BackedUpSession] = []
+        for (key, session) in inbound {
+            guard
+                out.count < limit, let origin = origins[key],
+                backedUpVersions[key] != version
+            else { continue }
+            let parts = key.split(separator: "|", maxSplits: 1).map(String.init)
+            guard parts.count == 2 else { continue }
+            out.append(BackedUpSession(
+                roomId: RoomId(unchecked: parts[0]), sessionId: parts[1],
+                export: session.export(), origin: origin))
+        }
+        return out
+    }
+
+    /// Record that `sessions` are stored in backup `version`. A session
+    /// replaced by an earlier state since it was exported is left
+    /// pending.
+    public func markBackedUp(_ sessions: [BackedUpSession], version: String) async {
+        for uploaded in sessions {
+            let key = "\(uploaded.roomId.value)|\(uploaded.sessionId)"
+            guard inbound[key]?.export() == uploaded.export else { continue }
+            backedUpVersions[key] = version
+        }
+        await markPersistDirty()
     }
 
     /// Whether an arriving session state decrypts strictly more history
@@ -724,13 +778,14 @@ public actor RoomCrypto {
             if origins[mapKey] == nil, let origin {
                 origins[mapKey] = origin
                 await markPersistDirty()
+                onSessionsChanged?()
             }
             MatrixKitLog.crypto.debug(
                 "RoomCrypto ignoring superseded room key sender=\(event.sender?.value ?? "?", privacy: .private(mask: .hash)) session=\(String(sessionId.prefix(8)), privacy: .private(mask: .hash)) type=\(event.type, privacy: .public)"
             )
             return nil
         }
-        store(session, for: mapKey, origin: origin)
+        store(session, for: mapKey, origin: origin, backedUpVersion: nil)
         receivedBlobs[mapKey] = ReceivedShare(
             blob: blob,
             chain: event.content["forwarding_curve25519_key_chain"]?
@@ -739,6 +794,7 @@ public actor RoomCrypto {
                 .stringValue,
             senderKey: event.content["sender_key"]?.stringValue)
         await markPersistDirty()
+        onSessionsChanged?()
         return RoomId(unchecked: roomId)
     }
 
