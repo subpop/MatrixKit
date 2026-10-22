@@ -322,6 +322,38 @@ struct MessageSenderTests {
         }
     }
 
+    @Test("Encrypted poll votes and ends keep their event types")
+    func encryptedPollTypes() async throws {
+        try await withHarness { harness in
+            let (sender, writer, sharer, cryptoSender) = try await sender(harness)
+            // A second device of ours receives the session and decrypts.
+            await sharer.setDevices(["@alice:test": ["ALICEDEVICE", "OTHER"]])
+            let room = try await encryptedRoom(harness, writer: writer, name: "E2EE polls")
+            let poll = EventId(unchecked: "$poll:test")
+            await sender.vote(room, poll: poll, answers: ["a1"])
+            try await sender.endPoll(room, poll: poll)
+
+            let shares = await sharer.shares
+            let receiver = RoomCrypto(sharer: FakeSharer(), sender: FakeRoomSender())
+            await receiver.receiveRoomKey(BasicEvent(
+                type: "m.room_key", sender: UserId(unchecked: "@alice:test"),
+                content: try #require(shares.first).content))
+            let sent = await cryptoSender.sent
+            #expect(sent.count == 2)
+            var types: [String] = []
+            for (index, event) in sent.enumerated() {
+                let decrypted = await receiver.decryptRoomEvent(
+                    MessageEvent(
+                        type: event.type, eventId: EventId(unchecked: "$e\(index)"),
+                        sender: UserId(unchecked: "@alice:test"), roomId: room,
+                        originServerTs: index, content: event.content),
+                    in: room)
+                types.append(decrypted?.type ?? "undecryptable")
+            }
+            #expect(types == ["m.poll.response", "m.poll.end"])
+        }
+    }
+
     @Test("Encrypted rooms encrypt replies, thread replies, and edits")
     func encryptedVerbs() async throws {
         try await withHarness { harness in

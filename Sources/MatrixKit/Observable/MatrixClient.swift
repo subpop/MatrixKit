@@ -1246,9 +1246,12 @@ public final class MatrixClient {
     /// Shares include our own other devices (they need the session to
     /// read what we send); only our current device is skipped. Pass the
     /// staged local-echo transaction ID so sync confirms the echo.
+    /// `eventType` is the inner event type recipients decrypt: a message
+    /// unless the content is another kind of event, such as a poll.
     @discardableResult
     public func sendEncryptedContent(
         _ roomId: RoomId, _ content: any Encodable & Sendable,
+        eventType: String = EventType.roomMessage.rawValue,
         transactionId: TransactionId = .random()
     ) async throws -> EventId {
         let members = try await rooms.joinedMembers(roomId)
@@ -1257,7 +1260,7 @@ public final class MatrixClient {
             roomId: roomId, users: Array(members.keys),
             excludingDevice: ownDevice)
         return try await roomCrypto.sendEncryptedContent(
-            roomId, content, deviceId: ownDevice,
+            roomId, content, eventType: eventType, deviceId: ownDevice,
             transactionId: transactionId)
     }
 

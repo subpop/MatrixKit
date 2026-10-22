@@ -410,9 +410,11 @@ public actor RoomCrypto {
 
     // MARK: - Send
 
-    /// Encrypt `content` as `m.room.message` under the room's outbound
-    /// session (created on first use) and send it as
-    /// `m.room.encrypted`. Call `ensureShared(roomId:users:)` first so
+    /// Encrypt `content` as an event of `eventType` (a message unless
+    /// told otherwise) under the room's outbound session (created on
+    /// first use) and send it as `m.room.encrypted`. The inner type is
+    /// what recipients decrypt, so events that are not messages — polls,
+    /// reactions — must name theirs. Call `ensureShared(roomId:users:)` first so
     /// recipients hold the session. The outbound session is also
     /// registered for self-decryption: the sender never receives its own
     /// `m.room_key`, so without this the sync echo of sent events would
@@ -421,6 +423,7 @@ public actor RoomCrypto {
     @discardableResult
     public func sendEncryptedContent(
         _ roomId: RoomId, _ content: any Encodable & Sendable,
+        eventType: String = EventType.roomMessage.rawValue,
         deviceId: DeviceId? = nil,
         transactionId: TransactionId = .random()
     ) async throws(MatrixError) -> EventId {
@@ -471,7 +474,7 @@ public actor RoomCrypto {
             plaintext = try JSONSerialization.data(
                 withJSONObject: [
                     "room_id": roomId.value,
-                    "type": EventType.roomMessage.rawValue,
+                    "type": eventType,
                     "content": content,
                 ])
         } catch let error as MatrixError {

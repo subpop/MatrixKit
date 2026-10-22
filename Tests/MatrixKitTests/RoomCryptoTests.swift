@@ -602,6 +602,37 @@ struct RoomCryptoTests {
         #expect(await crypto.backupExports().count == 1)
     }
 
+    @Test("encrypted events decrypt with the type they were sent as")
+    func innerEventType() async throws {
+        let (room, aliceUser, bobUser) = try roomFixture()
+        let (alice, bob, aliceSharer, aliceSender) = try wirePair()
+        await aliceSharer.setDevices([bobUser.value: ["BOB"]])
+        try await alice.shareRoomKey(roomId: room, users: [bobUser])
+        let shares = await aliceSharer.shares
+        await bob.receiveRoomKey(BasicEvent(
+            type: "m.room_key", sender: aliceUser,
+            content: try #require(shares.first).content))
+
+        let poll = PollStartContent(
+            question: "Lunch?", kind: .disclosed, maxSelections: 1,
+            answers: [.init(id: "0", text: "Pizza")])
+        _ = try await alice.sendEncryptedContent(room, MessageContent.markdown("hi"))
+        _ = try await alice.sendEncryptedContent(
+            room, poll, eventType: EventType.pollStart.rawValue)
+        let sent = await aliceSender.sent
+        var types: [String] = []
+        for (index, event) in sent.enumerated() {
+            let decrypted = await bob.decryptRoomEvent(
+                MessageEvent(
+                    type: event.type, eventId: EventId(unchecked: "$t\(index)"),
+                    sender: aliceUser, roomId: room, originServerTs: index,
+                    content: event.content),
+                in: room)
+            types.append(decrypted?.type ?? "undecryptable")
+        }
+        #expect(types == ["m.room.message", "m.poll.start"])
+    }
+
     @Test("own sessions are attributed to this device")
     func ownSessionOrigin() async throws {
         let (room, _, _) = try roomFixture()

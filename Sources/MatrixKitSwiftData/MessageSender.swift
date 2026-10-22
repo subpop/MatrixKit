@@ -380,8 +380,8 @@ public actor MessageSender {
             if isEncrypted(roomId) {
                 try await ensureShared(roomId)
                 try await roomCrypto.sendEncryptedContent(
-                    roomId, content, deviceId: ownDeviceId,
-                    transactionId: transactionId)
+                    roomId, content, eventType: EventType.pollResponse.rawValue,
+                    deviceId: ownDeviceId, transactionId: transactionId)
             } else {
                 try await messages.sendEvent(
                     roomId, eventType: EventType.pollResponse.rawValue,
@@ -401,7 +401,8 @@ public actor MessageSender {
         if isEncrypted(roomId) {
             try await ensureShared(roomId)
             try await roomCrypto.sendEncryptedContent(
-                roomId, content, deviceId: ownDeviceId)
+                roomId, content, eventType: EventType.pollEnd.rawValue,
+                deviceId: ownDeviceId)
         } else {
             try await messages.sendEvent(
                 roomId, eventType: EventType.pollEnd.rawValue, content: content)
