@@ -633,6 +633,46 @@ struct RoomCryptoTests {
         #expect(types == ["m.room.message", "m.poll.start"])
     }
 
+    @Test("a relation is repeated in the clear for the server")
+    func relationRepeatedInClear() async throws {
+        let (room, aliceUser, bobUser) = try roomFixture()
+        let (alice, bob, aliceSharer, aliceSender) = try wirePair()
+        await aliceSharer.setDevices([bobUser.value: ["BOB"]])
+        try await alice.shareRoomKey(roomId: room, users: [bobUser])
+        let shares = await aliceSharer.shares
+        await bob.receiveRoomKey(BasicEvent(
+            type: "m.room_key", sender: aliceUser,
+            content: try #require(shares.first).content))
+        let target = EventId(unchecked: "$target:x")
+
+        _ = try await alice.sendEncryptedContent(room, MessageContent.markdown("plain"))
+        _ = try await alice.sendEncryptedContent(
+            room, MessageContent.markdown("in thread", relatesTo: .thread(root: target)))
+        _ = try await alice.sendEncryptedContent(
+            room, EditContent.markdown(editing: target, "edited"))
+        let sent = await aliceSender.sent
+        #expect(sent.count == 3)
+        // No relation, nothing extra in the clear.
+        #expect(sent[0].content["m.relates_to"] == nil)
+        // Relations name their kind and target.
+        let thread = try #require(sent[1].content["m.relates_to"]?.objectValue)
+        #expect(thread["rel_type"]?.stringValue == "m.thread")
+        #expect(thread["event_id"]?.stringValue == target.value)
+        let edit = try #require(sent[2].content["m.relates_to"]?.objectValue)
+        #expect(edit["rel_type"]?.stringValue == "m.replace")
+        #expect(edit["event_id"]?.stringValue == target.value)
+
+        // The payload still carries the relation for recipients.
+        let decrypted = await bob.decryptRoomEvent(
+            MessageEvent(
+                type: sent[1].type, eventId: EventId(unchecked: "$thread"),
+                sender: aliceUser, roomId: room, originServerTs: 1,
+                content: sent[1].content),
+            in: room)
+        #expect(decrypted?.content["m.relates_to"]?.objectValue?["rel_type"]?.stringValue
+            == "m.thread")
+    }
+
     @Test("own sessions are attributed to this device")
     func ownSessionOrigin() async throws {
         let (room, _, _) = try roomFixture()

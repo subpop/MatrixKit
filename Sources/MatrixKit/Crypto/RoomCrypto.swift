@@ -459,6 +459,7 @@ public actor RoomCrypto {
             }
         }
         let plaintext: Data
+        var relation: AnyCodable?
         do {
             // Encode the caller's content as-is so the encrypted payload
             // matches plaintext wire shape (msgtype/body plus formatted
@@ -470,6 +471,11 @@ public actor RoomCrypto {
             else {
                 throw MatrixError.encodingError(
                     "Cannot encode encrypted payload")
+            }
+            if let value = content["m.relates_to"] {
+                relation = try? JSONDecoder().decode(
+                    AnyCodable.self,
+                    from: JSONSerialization.data(withJSONObject: value))
             }
             plaintext = try JSONSerialization.data(
                 withJSONObject: [
@@ -498,6 +504,13 @@ public actor RoomCrypto {
         ]
         if let senderKey = try? await sharer.identityKey() {
             content["sender_key"] = .string(senderKey)
+        }
+        // The server cannot read the payload, but it aggregates edits and
+        // threads, and counts thread notifications, from the relation, so
+        // it is repeated in the clear as other clients do. Recipients
+        // read the relation inside the payload.
+        if let relation {
+            content["m.relates_to"] = relation
         }
         // `device_id` is required on `m.room.encrypted` Megolm events:
         // without it recipients cannot parse the envelope.
