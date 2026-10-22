@@ -694,6 +694,13 @@ public final class MatrixClient {
         await roomCrypto.setUnknownSessionHandler({ [recover] unknown in
             recover(unknown)
         })
+        let roomState = self.roomState
+        await roomCrypto.setRotationPolicyProvider { roomId in
+            guard let content = try? await roomState.getStateEvent(
+                roomId, type: EventType.roomEncryption.rawValue)
+            else { return nil }
+            return RoomCrypto.RotationPolicy(content: content)
+        }
         await roomCrypto.setSessionsChangedHandler { [weak self] in
             Task { @MainActor in self?.scheduleBackupUpload() }
         }
@@ -1232,8 +1239,10 @@ public final class MatrixClient {
         }
     }
 
-    /// Send encrypted content: share the room's Megolm session
-    /// with joined members (once per session), then send ciphertext.
+    /// Send encrypted content: retire the room's Megolm session when a
+    /// member has left or it reached the room's rotation limits, share
+    /// the session with joined members who lack it, then send
+    /// ciphertext.
     /// Shares include our own other devices (they need the session to
     /// read what we send); only our current device is skipped. Pass the
     /// staged local-echo transaction ID so sync confirms the echo.
@@ -1252,9 +1261,10 @@ public final class MatrixClient {
             transactionId: transactionId)
     }
 
-    /// (Re-)share the room's Megolm session with all joined members,
-    /// including our own other devices (e.g. after a membership change).
-    /// Call `rotateOutbound` first (via `roomCrypto`) when a member leaves.
+    /// Force re-sharing the room's current Megolm session with all
+    /// joined members, including our own other devices. Membership
+    /// changes and rotation limits are handled on the next send (see
+    /// `sendEncryptedContent`).
     public func shareRoomKey(_ roomId: RoomId) async throws {
         let members = try await rooms.joinedMembers(roomId)
         let ownDevice = deviceId

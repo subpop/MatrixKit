@@ -31,6 +31,36 @@ public actor RoomCrypto {
     /// `onUnknownSession`, and `shareCurrentSession`.
     public static let keyRequestType = "m.room_key_request"
 
+    /// When a room's outbound session is retired, from `m.room.encryption`
+    /// (`rotation_period_ms`, `rotation_period_msgs`).
+    public struct RotationPolicy: Hashable, Sendable {
+        /// Maximum session age in milliseconds.
+        public var periodMs: Int
+        /// Maximum messages sent under one session.
+        public var messages: Int
+
+        /// The spec defaults: one week, 100 messages.
+        public static let `default` = RotationPolicy(
+            periodMs: 604_800_000, messages: 100)
+
+        public init(periodMs: Int, messages: Int) {
+            self.periodMs = periodMs
+            self.messages = messages
+        }
+
+        /// Read `m.room.encryption` content; absent or non-positive
+        /// values fall back to the defaults.
+        public init(content: [String: AnyCodable]) {
+            let period = content["rotation_period_ms"]?.intValue
+            let messages = content["rotation_period_msgs"]?.intValue
+            self.init(
+                periodMs: period.flatMap { $0 > 0 ? $0 : nil }
+                    ?? Self.default.periodMs,
+                messages: messages.flatMap { $0 > 0 ? $0 : nil }
+                    ?? Self.default.messages)
+        }
+    }
+
     /// An undecryptable session sighting: room, session, and sender to
     /// request the key from.
     public struct UnknownSession: Sendable {
@@ -103,15 +133,19 @@ public actor RoomCrypto {
     /// `shareRequestedSession`). In-memory only: after a restart the
     /// export fallback applies.
     private var receivedBlobs: [String: ReceivedShare] = [:]
-    /// Signed sharing blobs at each outbound session's first-send
-    /// position, by room ID. Key requests for our own sessions are
-    /// answered from here (see `shareRequestedSession`) so old history
-    /// stays decryptable for requesters instead of failing with
-    /// `indexTooOld` against the current ratchet position.
-    /// Room IDs whose current outbound session has been shared.
-    /// Cleared by `rotateOutbound(_:)`; empty after launch (fresh
-    /// outbound), so the first `ensureShared` re-shares post-restart.
-    private var shared: Set<String> = []
+    /// User IDs each room's current outbound session has been shared
+    /// with, by room ID. Cleared by `rotateOutbound(_:)`; empty after
+    /// launch (fresh outbound), so the first `ensureShared` re-shares
+    /// post-restart.
+    private var sharedWith: [String: Set<String>] = [:]
+    /// When each room's current outbound session was created.
+    private var outboundCreated: [String: Date] = [:]
+    /// Rotation limits per room ID, loaded on first use.
+    private var rotationPolicies: [String: RotationPolicy] = [:]
+    /// Fetches a room's rotation limits (nil when unavailable, which
+    /// applies the defaults and retries on the next send).
+    private var rotationPolicyProvider:
+        (@Sendable (RoomId) async -> RotationPolicy?)?
     private struct KeyRequestState {
         var attempts: Int
         var lastRequestedAt: Date?
@@ -189,6 +223,14 @@ public actor RoomCrypto {
         _ handler: (@Sendable () -> Void)?
     ) {
         onSessionsChanged = handler
+    }
+
+    /// Install the source of per-room rotation limits (see
+    /// `RotationPolicy`).
+    public func setRotationPolicyProvider(
+        _ provider: (@Sendable (RoomId) async -> RotationPolicy?)?
+    ) {
+        rotationPolicyProvider = provider
     }
 
     /// Install the unknown-session handler (see `onUnknownSession`).
@@ -370,7 +412,7 @@ public actor RoomCrypto {
         deviceId: DeviceId? = nil,
         transactionId: TransactionId = .random()
     ) async throws(MatrixError) -> EventId {
-        var session = outbound[roomId.value] ?? MegolmSession.create()
+        var session = outboundSession(for: roomId)
         let inboundKey = "\(roomId.value)|\(session.id)"
         if inbound[inboundKey] == nil {
             // Capture the pre-encrypt session state for self-decryption:
@@ -462,13 +504,11 @@ public actor RoomCrypto {
     public func shareRoomKey(
         roomId: RoomId, users: [UserId], excludingDevice: DeviceId? = nil
     ) async throws(MatrixError) {
-        var deviceQueryFailed = false
         for user in users {
             let ids: [String]
             do {
                 ids = try await sharer.deviceIds(for: user)
             } catch {
-                deviceQueryFailed = true
                 MatrixKitLog.crypto.warning(
                     "RoomCrypto skipping key share: device query failed user=\(user.value, privacy: .private(mask: .hash)) error=\(error, privacy: .public)"
                 )
@@ -481,13 +521,12 @@ public actor RoomCrypto {
                 MatrixKitLog.crypto.warning(
                     "RoomCrypto skipping key share: no devices user=\(user.value, privacy: .private(mask: .hash))"
                 )
+                sharedWith[roomId.value, default: []].insert(user.value)
                 continue
             }
             try await shareCurrentSession(
                 roomId: roomId, to: user, devices: devices)
-        }
-        if !deviceQueryFailed {
-            shared.insert(roomId.value)
+            sharedWith[roomId.value, default: []].insert(user.value)
         }
     }
 
@@ -498,8 +537,7 @@ public actor RoomCrypto {
     public func shareCurrentSession(
         roomId: RoomId, to user: UserId, devices: [DeviceId]
     ) async throws(MatrixError) {
-        let session = outbound[roomId.value] ?? MegolmSession.create()
-        outbound[roomId.value] = session
+        let session = outboundSession(for: roomId)
         let keyBlob: Data
         do {
             keyBlob = try session.sessionKey()
@@ -612,15 +650,27 @@ public actor RoomCrypto {
         return true
     }
 
-    /// Share only when the current outbound session hasn't been shared
-    /// yet (first send per room/session). Backs the
-    /// `MatrixClient.sendEncryptedContent` convenience.
+    /// Prepare the room's outbound session for the next send: retire it
+    /// when a user it was shared with is no longer in `users` or it has
+    /// reached the room's rotation limits, then share the (possibly new)
+    /// session with every user in `users` it has not reached. Call
+    /// before every send: a session that rotates mid-send is unshared.
+    /// Backs the `MatrixClient.sendEncryptedContent` convenience.
+    ///
+    /// A user who joined since the last send gets the session from its
+    /// current position, so earlier messages stay unreadable to them.
     public func ensureShared(
         roomId: RoomId, users: [UserId], excludingDevice: DeviceId? = nil
     ) async throws(MatrixError) {
-        guard !shared.contains(roomId.value) else { return }
+        let key = roomId.value
+        if await shouldRotate(roomId: roomId, members: Set(users.map(\.value))) {
+            rotateOutbound(roomId: roomId)
+        }
+        let reached = sharedWith[key] ?? []
+        let pending = users.filter { !reached.contains($0.value) }
+        guard !pending.isEmpty else { return }
         try await shareRoomKey(
-            roomId: roomId, users: users, excludingDevice: excludingDevice)
+            roomId: roomId, users: pending, excludingDevice: excludingDevice)
     }
 
     /// Drop the outbound session so the next send starts a fresh one
@@ -628,7 +678,41 @@ public actor RoomCrypto {
     /// unshared: the next `ensureShared` re-shares it.
     public func rotateOutbound(roomId: RoomId) {
         outbound[roomId.value] = nil
-        shared.remove(roomId.value)
+        sharedWith[roomId.value] = nil
+        outboundCreated[roomId.value] = nil
+    }
+
+    /// The room's outbound session, created and timestamped on first use.
+    private func outboundSession(for roomId: RoomId) -> MegolmSession {
+        if let existing = outbound[roomId.value] { return existing }
+        let session = MegolmSession.create()
+        outbound[roomId.value] = session
+        outboundCreated[roomId.value] = now()
+        return session
+    }
+
+    /// Whether the room's outbound session must be retired before the
+    /// next send: a user it reached has left, or it is past the room's
+    /// age or message limit.
+    private func shouldRotate(roomId: RoomId, members: Set<String>) async -> Bool {
+        let key = roomId.value
+        guard let session = outbound[key] else { return false }
+        if let reached = sharedWith[key], !reached.isSubset(of: members) {
+            return true
+        }
+        let policy = await rotationPolicy(for: roomId)
+        let age = now().timeIntervalSince(outboundCreated[key] ?? now())
+        return Int(session.counter) >= policy.messages
+            || age * 1000 >= Double(policy.periodMs)
+    }
+
+    private func rotationPolicy(for roomId: RoomId) async -> RotationPolicy {
+        if let known = rotationPolicies[roomId.value] { return known }
+        guard let fetched = await rotationPolicyProvider?(roomId) else {
+            return .default
+        }
+        rotationPolicies[roomId.value] = fetched
+        return fetched
     }
 
     // MARK: - Backup

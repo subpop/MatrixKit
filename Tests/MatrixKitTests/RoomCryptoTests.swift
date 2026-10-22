@@ -178,6 +178,101 @@ struct RoomCryptoTests {
         #expect(await aliceSharer.shares.count == 1)
     }
 
+    /// Share through `ensureShared`, send one message, and return the
+    /// session ID that encrypted it.
+    private func sendRotating(
+        _ alice: RoomCrypto, _ sender: FakeRoomSender, room: RoomId,
+        users: [UserId]
+    ) async throws -> String {
+        try await alice.ensureShared(roomId: room, users: users)
+        _ = try await alice.sendEncryptedContent(room, MessageContent.markdown("m"))
+        return try #require(await sender.sent.last?.content["session_id"]?.stringValue)
+    }
+
+    @Test("a member leaving retires the session; a joiner gets it from now on")
+    func rotatesOnMembershipChange() async throws {
+        let (room, aliceUser, bobUser) = try roomFixture()
+        let carolUser = UserId(unchecked: "@carol:x")
+        let (alice, _, aliceSharer, aliceSender) = try wirePair()
+        await aliceSharer.setDevices([
+            aliceUser.value: ["A2"], bobUser.value: ["BOB"], carolUser.value: ["CAROL"],
+        ])
+        let first = try await sendRotating(
+            alice, aliceSender, room: room, users: [aliceUser, bobUser])
+
+        // Carol joins: same session, shared with her alone.
+        let sharesBefore = await aliceSharer.shares.count
+        let afterJoin = try await sendRotating(
+            alice, aliceSender, room: room, users: [aliceUser, bobUser, carolUser])
+        #expect(afterJoin == first)
+        let joinShares = await aliceSharer.shares.dropFirst(sharesBefore)
+        #expect(joinShares.map(\.user) == [carolUser.value])
+
+        // Bob leaves: a new session reaches the remaining members only.
+        let sharesBeforeLeave = await aliceSharer.shares.count
+        let afterLeave = try await sendRotating(
+            alice, aliceSender, room: room, users: [aliceUser, carolUser])
+        #expect(afterLeave != first)
+        let leaveShares = await aliceSharer.shares.dropFirst(sharesBeforeLeave)
+        #expect(Set(leaveShares.map(\.user)) == [aliceUser.value, carolUser.value])
+        #expect(leaveShares.allSatisfy {
+            $0.content["session_id"]?.stringValue == afterLeave
+        })
+    }
+
+    @Test("sessions rotate at the default message limit")
+    func rotatesAtDefaultMessageLimit() async throws {
+        let (room, _, bobUser) = try roomFixture()
+        let (alice, _, aliceSharer, aliceSender) = try wirePair()
+        await aliceSharer.setDevices([bobUser.value: ["BOB"]])
+        let first = try await sendRotating(alice, aliceSender, room: room, users: [bobUser])
+        for _ in 1..<100 {
+            #expect(try await sendRotating(
+                alice, aliceSender, room: room, users: [bobUser]) == first)
+        }
+        #expect(try await sendRotating(
+            alice, aliceSender, room: room, users: [bobUser]) != first)
+    }
+
+    @Test("sessions rotate at the room's own limits, loaded once")
+    func rotatesAtRoomLimits() async throws {
+        let (room, _, bobUser) = try roomFixture()
+        let date = TestDate(Date(timeIntervalSince1970: 1_000))
+        let sharer = FakeSharer()
+        let sender = FakeRoomSender()
+        let alice = RoomCrypto(sharer: sharer, sender: sender, now: { date.value })
+        await sharer.setDevices([bobUser.value: ["BOB"]])
+        let lookups = SeenBox()
+        await alice.setRotationPolicyProvider { roomId in
+            lookups.append(RoomCrypto.UnknownSession(
+                roomId: roomId, sessionId: "", sender: bobUser))
+            return RoomCrypto.RotationPolicy(content: [
+                "rotation_period_ms": .int(60_000), "rotation_period_msgs": .int(3),
+            ])
+        }
+        let first = try await sendRotating(alice, sender, room: room, users: [bobUser])
+        #expect(try await sendRotating(alice, sender, room: room, users: [bobUser]) == first)
+        #expect(try await sendRotating(alice, sender, room: room, users: [bobUser]) == first)
+        // Three messages sent: the message limit retires it.
+        let second = try await sendRotating(alice, sender, room: room, users: [bobUser])
+        #expect(second != first)
+        // The age limit retires it too.
+        date.advance(by: 61)
+        #expect(try await sendRotating(alice, sender, room: room, users: [bobUser]) != second)
+        #expect(lookups.count == 1)
+    }
+
+    @Test("rotation limits default when absent or invalid")
+    func rotationPolicyParsing() {
+        #expect(RoomCrypto.RotationPolicy(content: [:]) == .default)
+        #expect(RoomCrypto.RotationPolicy(content: [
+            "rotation_period_ms": .int(0), "rotation_period_msgs": .int(-5),
+        ]) == .default)
+        #expect(RoomCrypto.RotationPolicy(content: [
+            "rotation_period_ms": .int(1_000), "rotation_period_msgs": .int(7),
+        ]) == RoomCrypto.RotationPolicy(periodMs: 1_000, messages: 7))
+    }
+
     @Test("unknown-session key requests use cooldown and per-launch cap")
     func keyRequestCooldown() async throws {
         let (room, _, _) = try roomFixture()

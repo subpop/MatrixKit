@@ -67,8 +67,9 @@ public actor MessageSender {
         (try? reader.roomDetail(roomId))?.isEncrypted ?? false
     }
 
-    /// Share the room's Megolm session with joined members (once per
-    /// session), skipping only our current device.
+    /// Prepare the room's Megolm session for a send (rotate if due,
+    /// share with joined members who lack it), skipping only our
+    /// current device.
     private func ensureShared(_ roomId: RoomId) async throws(MatrixError) {
         let members = try await rooms.joinedMembers(roomId)
         try await roomCrypto.ensureShared(
