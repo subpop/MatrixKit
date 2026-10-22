@@ -82,6 +82,79 @@ struct SecretStorageTests {
         }
     }
 
+    /// Account data held in memory, read and written through one
+    /// `SecretStorage` the way the homeserver would.
+    private actor AccountDataStore {
+        var data: [String: [String: AnyCodable]] = [:]
+        func read(_ type: String) -> [String: AnyCodable]? { data[type] }
+        func write(_ type: String, _ content: [String: AnyCodable]) { data[type] = content }
+    }
+
+    private static func writableStorage() -> (SecretStorage, AccountDataStore) {
+        let store = AccountDataStore()
+        let storage = SecretStorage(
+            reader: { await store.read($0) },
+            writer: { await store.write($0, $1) })
+        return (storage, store)
+    }
+
+    @Test("a created key unlocks, and what is stored under it reads back")
+    func createsAndStores() async throws {
+        let (s, store) = Self.writableStorage()
+        let (key, keyId) = try await s.createKey(name: "Relay")
+
+        // Described but not the default until made so.
+        #expect(try await s.defaultKeyId() == nil)
+        let description = try #require(try await s.keyDescription(keyId: keyId))
+        #expect(description.algorithm == "m.secret_storage.v1.aes-hmac-sha2")
+        #expect(description.name == "Relay")
+        let iv = try #require(Primitives.base64UnpaddedDecode(description.iv))
+        #expect(iv.count == 16 && iv[7] & 0x80 == 0)
+
+        try await s.store("backup-secret", as: SecretName.backup, keyId: keyId, storageKey: key)
+        try await s.store("master-secret", as: SecretName.master, keyId: keyId, storageKey: key)
+        try await s.makeDefault(keyId: keyId)
+        #expect(try await s.defaultKeyId() == keyId)
+
+        // Another session unlocks with the recovery key and reads the secrets.
+        let recovery = BackupCrypto.recoveryKey(privateKey: key)
+        let unlocked = try await s.unlock(recoveryKey: recovery)
+        #expect(unlocked.keyId == keyId)
+        #expect(try await s.secret(SecretName.backup, keyId: keyId, storageKey: key) == "backup-secret")
+        #expect(try await s.secret(SecretName.master, keyId: keyId, storageKey: key) == "master-secret")
+        // A different key cannot.
+        await requireRecoveryFailed("Incorrect recovery key") {
+            _ = try await s.unlock(
+                recoveryKey: BackupCrypto.recoveryKey(
+                    privateKey: BackupCrypto.generatePrivateKey()))
+        }
+        #expect(await store.data.keys.contains("m.secret_storage.default_key"))
+    }
+
+    @Test("storing a secret keeps entries for other keys")
+    func storeKeepsOtherEntries() async throws {
+        let (s, store) = Self.writableStorage()
+        await store.write(SecretName.master, [
+            "encrypted": .object(["otherkey": .object(["iv": .string("x")])])
+        ])
+        let (key, keyId) = try await s.createKey()
+        try await s.store("value", as: SecretName.master, keyId: keyId, storageKey: key)
+        let entries = try #require(await store.data[SecretName.master]?["encrypted"]?.objectValue)
+        #expect(Set(entries.keys) == ["otherkey", keyId])
+    }
+
+    @Test("existing secret storage is never replaced")
+    func createKeyRefusesWhenSetUp() async throws {
+        let (s, store) = Self.writableStorage()
+        for (type, raw) in try Self.fixtures() {
+            await store.write(type, try JSONDecoder().decode(
+                [String: AnyCodable].self, from: Data(raw.utf8)))
+        }
+        await requireRecoveryFailed("already has secret storage") {
+            _ = try await s.createKey()
+        }
+    }
+
     @Test("default key ID and description read")
     func readsKey() async throws {
         let s = Self.storage(try Self.fixtures())

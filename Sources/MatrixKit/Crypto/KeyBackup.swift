@@ -23,14 +23,21 @@ public struct EncryptionStatus: Hashable, Sendable {
 public struct NewKeyBackup: Hashable, Sendable {
     /// The backup version on the server.
     public var version: String
-    /// The backup private key as a recovery key (`Es…`), for the user to
-    /// keep. It is the only way to restore on a device that cannot ask
-    /// another device for the key.
+    /// The recovery key (`Es…`) for the user to keep. With secret
+    /// storage it unlocks the backup key and cross-signing keys in any
+    /// client; without, it is the backup key itself, the only way to
+    /// restore on a device that cannot ask another device for it.
     public var recoveryKey: String
+    /// The backup key (and cross-signing keys, when held) went into
+    /// secret storage, so the recovery key works in other clients.
+    public var storedInSecretStorage: Bool
 
-    public init(version: String, recoveryKey: String) {
+    public init(
+        version: String, recoveryKey: String, storedInSecretStorage: Bool = false
+    ) {
         self.version = version
         self.recoveryKey = recoveryKey
+        self.storedInSecretStorage = storedInSecretStorage
     }
 }
 

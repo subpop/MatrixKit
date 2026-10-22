@@ -712,7 +712,7 @@ struct FacadeComplianceTests {
 
             // The recovery key is the backup's private key, which this
             // device also holds, and the backup is one it trusts.
-            let privateKey = try BackupCrypto.parseRecoveryKey(created.recoveryKey)
+            let privateKey = try #require(await client.secrets.backupKey())
             let info = try #require(try await client.backup.backupInfo())
             #expect(info.version == created.version)
             #expect(info.accepts(privateKey: privateKey))
@@ -732,7 +732,65 @@ struct FacadeComplianceTests {
             await #expect(throws: MatrixError.self) {
                 try await client.setUpKeyBackup()
             }
+            // The test account had no secret storage, so one was created:
+            // its recovery key unlocks the backup key in another session.
+            #expect(created.storedInSecretStorage)
+            let recovered = try await client.recover(withRecoveryKey: created.recoveryKey)
+            #expect(recovered.backupPrivateKey == privateKey)
             #expect(try await client.backup.backupInfo()?.version == created.version)
+            try? await client.transport.shutdown()
+        }
+    }
+
+    @Test("Secret storage created with a backup also holds the cross-signing keys")
+    @MainActor
+    func setUpKeyBackupStoresCrossSigning() async throws {
+        try await withHarness { harness in
+            let client = await client(harness)
+            try await client.olm.configure(
+                identity: DeviceIdentityKeys.generate(),
+                userId: UserId(unchecked: "@alice:test"),
+                deviceId: DeviceId("ALICEDEVICE"))
+            try await client.olm.ensureKeys()
+            _ = await client.crossSigning.generate()
+            try await client.crossSigning.upload()
+            let before = try #require(await client.crossSigning.exportPrivateKeys())
+
+            let created = try await client.setUpKeyBackup()
+            #expect(created.storedInSecretStorage)
+
+            // The recovery key alone reads the identity back.
+            let (storageKey, keyId) = try await client.secretStorage.unlock(
+                recoveryKey: created.recoveryKey)
+            for (name, expected) in [
+                (SecretName.master, before.master),
+                (SecretName.selfSigning, before.selfSigning),
+                (SecretName.userSigning, before.userSigning),
+            ] {
+                #expect(try await client.secretStorage.secret(
+                    name, keyId: keyId, storageKey: storageKey) == expected)
+            }
+            try? await client.transport.shutdown()
+        }
+    }
+
+    @Test("An account that already has secret storage keeps it, and the backup key is the recovery key")
+    @MainActor
+    func setUpKeyBackupLeavesExistingSecretStorage() async throws {
+        try await withHarness { harness in
+            let client = await client(harness)
+            try await client.olm.configure(
+                identity: DeviceIdentityKeys.generate(),
+                userId: UserId(unchecked: "@alice:test"),
+                deviceId: DeviceId("ALICEDEVICE"))
+            try await client.accountData.put(
+                "m.secret_storage.default_key", content: ["key": .string("existing")])
+
+            let created = try await client.setUpKeyBackup()
+            #expect(!created.storedInSecretStorage)
+            #expect(try await client.secretStorage.defaultKeyId() == "existing")
+            let privateKey = try #require(await client.secrets.backupKey())
+            #expect(try BackupCrypto.parseRecoveryKey(created.recoveryKey) == privateKey)
             try? await client.transport.shutdown()
         }
     }

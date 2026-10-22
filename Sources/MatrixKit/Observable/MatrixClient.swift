@@ -1125,9 +1125,15 @@ public final class MatrixClient {
     /// signed by this device (and the master key, when held), the key
     /// kept on this device, and an upload of the sessions held. Refuses
     /// when a backup already exists, since a new version would orphan
-    /// it. The key is not stored in secret storage, so the returned
-    /// recovery key is what restores it elsewhere, unless a verified
-    /// device shares the key.
+    /// it.
+    ///
+    /// When the account has no secret storage, this also creates it and
+    /// puts the backup key (and the cross-signing keys, when held) in
+    /// it, so the returned recovery key unlocks them in any client. An
+    /// account that already has secret storage is left alone, since
+    /// writing to it needs its key, and the returned recovery key is the
+    /// backup key itself; restoring elsewhere then needs that key or a
+    /// verified device that shares it.
     public func setUpKeyBackup() async throws(MatrixError) -> NewKeyBackup {
         guard try await backup.backupInfo() == nil else {
             throw .recoveryFailed("This account already has a key backup")
@@ -1136,9 +1142,45 @@ public final class MatrixClient {
         let version = try await createKeyBackup(privateKey: privateKey)
         await secrets.cacheBackupKey(privateKey)
         scheduleBackupUpload()
+        if let storageKey = await createSecretStorage(backupKey: privateKey) {
+            return NewKeyBackup(
+                version: version,
+                recoveryKey: BackupCrypto.recoveryKey(privateKey: storageKey),
+                storedInSecretStorage: true)
+        }
         return NewKeyBackup(
             version: version,
             recoveryKey: BackupCrypto.recoveryKey(privateKey: privateKey))
+    }
+
+    /// Create secret storage holding the backup key and any cross-signing
+    /// keys, and make it the default only once everything is stored.
+    /// Returns the storage key, or nil when the account already has
+    /// secret storage or any step fails; the backup itself is unaffected.
+    private func createSecretStorage(backupKey: Data) async -> Data? {
+        do {
+            guard try await secretStorage.defaultKeyId() == nil else { return nil }
+            let (storageKey, keyId) = try await secretStorage.createKey()
+            try await secretStorage.store(
+                Primitives.base64UnpaddedEncode(backupKey), as: SecretName.backup,
+                keyId: keyId, storageKey: storageKey)
+            if let keys = await crossSigning.exportPrivateKeys() {
+                for (name, value) in [
+                    (SecretName.master, keys.master),
+                    (SecretName.selfSigning, keys.selfSigning),
+                    (SecretName.userSigning, keys.userSigning),
+                ] {
+                    try await secretStorage.store(
+                        value, as: name, keyId: keyId, storageKey: storageKey)
+                }
+            }
+            try await secretStorage.makeDefault(keyId: keyId)
+            return storageKey
+        } catch {
+            MatrixKitLog.crypto.warning(
+                "Secret storage setup failed error=\(error, privacy: .public)")
+            return nil
+        }
     }
 
     /// Where this device stands with the account's key backup. Throws

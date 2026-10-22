@@ -20,17 +20,21 @@ public actor SecretStorage {
     /// Untyped throws: closures can't preserve typed throws across the
     /// inference boundary; `get(_:)` re-narrows to `MatrixError`.
     private let read: @Sendable (String) async throws -> [String: AnyCodable]?
+    private let write: @Sendable (String, [String: AnyCodable]) async throws -> Void
 
     public init(accountData: AccountDataClient) {
         let accountData = accountData
         self.read = { try await accountData.get($0) }
+        self.write = { try await accountData.put($0, content: $1) }
     }
 
     /// Test seam: drive the actor from in-memory account data.
     init(
-        reader: @escaping @Sendable (String) async throws -> [String: AnyCodable]?
+        reader: @escaping @Sendable (String) async throws -> [String: AnyCodable]?,
+        writer: @escaping @Sendable (String, [String: AnyCodable]) async throws -> Void = { _, _ in }
     ) {
         self.read = reader
+        self.write = writer
     }
 
     // MARK: - Reads
@@ -70,6 +74,94 @@ public actor SecretStorage {
                 "Secret \(name) is not valid UTF-8 text")
         }
         return value
+    }
+
+    // MARK: - Writes
+
+    /// Create a new 4S key: 32 random bytes, described in
+    /// `m.secret_storage.key.<id>` with the zero-block key check. The key
+    /// is not the account default until `makeDefault(keyId:)`, so a setup
+    /// that fails part way leaves no half-working storage. Refuses when
+    /// the account already has a default key, which another client's
+    /// secrets may depend on.
+    public func createKey(
+        name: String? = nil
+    ) async throws(MatrixError) -> (key: Data, keyId: String) {
+        guard try await defaultKeyId() == nil else {
+            throw MatrixError.recoveryFailed(
+                "This account already has secret storage set up")
+        }
+        let key = BackupCrypto.generatePrivateKey()
+        let keyId = Self.randomHex(byteCount: 16)
+        let iv = Self.randomIv()
+        var description: [String: AnyCodable] = [
+            "algorithm": .string("m.secret_storage.v1.aes-hmac-sha2"),
+            "iv": .string(Primitives.base64UnpaddedEncode(iv)),
+        ]
+        do {
+            description["mac"] = .string(Primitives.base64UnpaddedEncode(
+                try SecretStorageCrypto.keyCheckMac(storageKey: key, iv: iv)))
+        } catch {
+            throw MatrixError.encodingError("Could not create a secret-storage key: \(error)")
+        }
+        if let name { description["name"] = .string(name) }
+        try await put("m.secret_storage.key.\(keyId)", description)
+        return (key, keyId)
+    }
+
+    /// Encrypt `value` (stored as raw UTF-8, like other clients) under
+    /// the storage key and record it in the secret's account data. Entries
+    /// for other key IDs already on the secret are kept.
+    public func store(
+        _ value: String, as name: String, keyId: String, storageKey: Data
+    ) async throws(MatrixError) {
+        let iv = Self.randomIv()
+        let encrypted: (ciphertext: Data, mac: Data)
+        do {
+            encrypted = try SecretStorageCrypto.encrypt(
+                Data(value.utf8), name: name, storageKey: storageKey, iv: iv)
+        } catch {
+            throw MatrixError.encodingError("Could not encrypt secret \(name): \(error)")
+        }
+        var entries = try await get(name)?["encrypted"]?.objectValue ?? [:]
+        entries[keyId] = .object([
+            "iv": .string(Primitives.base64UnpaddedEncode(iv)),
+            "ciphertext": .string(Primitives.base64UnpaddedEncode(encrypted.ciphertext)),
+            "mac": .string(Primitives.base64UnpaddedEncode(encrypted.mac)),
+        ])
+        try await put(name, ["encrypted": .object(entries)])
+    }
+
+    /// Make `keyId` the account's default 4S key (`m.secret_storage.default_key`).
+    public func makeDefault(keyId: String) async throws(MatrixError) {
+        try await put("m.secret_storage.default_key", ["key": .string(keyId)])
+    }
+
+    /// Fresh IV: 16 random bytes with bit 63 cleared, so the AES-CTR
+    /// counter cannot overflow into the nonce.
+    private static func randomIv() -> Data {
+        var iv = Data((0..<16).map { _ in UInt8.random(in: 0...255) })
+        iv[7] &= 0x7F
+        return iv
+    }
+
+    private static func randomHex(byteCount: Int) -> String {
+        (0..<byteCount).map { _ in
+            let byte = UInt8.random(in: 0...255)
+            let hex = String(byte, radix: 16)
+            return byte < 16 ? "0" + hex : hex
+        }.joined()
+    }
+
+    /// Single narrowing point for writes, like `get(_:)` for reads.
+    private func put(_ type: String, _ content: [String: AnyCodable]) async throws(MatrixError) {
+        do {
+            try await write(type, content)
+        } catch let matrix as MatrixError {
+            throw matrix
+        } catch {
+            throw .networkError(String(describing: error))
+        }
     }
 
     // MARK: - Unlock
