@@ -656,18 +656,29 @@ struct FacadeComplianceTests {
                 roomId: room, sessionId: session.id, export: session.export(),
                 origin: testOrigin)
 
+            // No backup yet.
+            await #expect(throws: MatrixError.self) {
+                try await client.uploadPendingSessions()
+            }
+            #expect(try await client.keyBackupStatus() == KeyBackupStatus())
+
             // An unsigned backup is not trusted: nothing uploads.
             let publicKey = try BackupCrypto.publicKey(
                 privateKey: BackupCrypto.generatePrivateKey())
             let unsigned = try await client.backup.createBackup(publicKey: publicKey)
-            await client.uploadPendingSessions()
+            await #expect(throws: MatrixError.self) {
+                try await client.uploadPendingSessions()
+            }
             #expect(try await client.backup.backupInfo()?.count == 0)
+            let untrusted = try await client.keyBackupStatus()
+            #expect(untrusted.exists && !untrusted.isTrusted && !untrusted.hasKey)
+            #expect(untrusted.pendingSessions == 1)
             try await client.backup.deleteBackup(version: unsigned)
 
             // A backup signed by this device is.
             let privateKey = BackupCrypto.generatePrivateKey()
             let version = try await client.createKeyBackup(privateKey: privateKey)
-            await client.uploadPendingSessions()
+            try await client.uploadPendingSessions()
             #expect(try await client.backup.backupInfo()?.count == 1)
             #expect(await client.roomCrypto.sessionsPendingBackup(
                 version: version, limit: 10).isEmpty)
@@ -677,6 +688,46 @@ struct FacadeComplianceTests {
                 roomId: room, sessionId: session.id, version: version,
                 privateKey: privateKey)
             #expect(restored.origin == testOrigin)
+            try? await client.transport.shutdown()
+        }
+    }
+
+    @Test("Backup status counts sessions and Back Up Now uploads them")
+    @MainActor
+    func backupStatusAndBackUpNow() async throws {
+        try await withHarness { harness in
+            let client = await client(harness)
+            try await client.olm.configure(
+                identity: DeviceIdentityKeys.generate(),
+                userId: UserId(unchecked: "@alice:test"),
+                deviceId: DeviceId("ALICEDEVICE"))
+            let room = RoomId(unchecked: "!room:test")
+            // Two sessions with an origin, one without.
+            for origin in [testOrigin, testOrigin, nil] {
+                let session = MegolmSession.create()
+                _ = try await client.roomCrypto.importSession(
+                    roomId: room, sessionId: session.id, export: session.export(),
+                    origin: origin)
+            }
+            let privateKey = BackupCrypto.generatePrivateKey()
+            _ = try await client.createKeyBackup(privateKey: privateKey)
+
+            let before = try await client.keyBackupStatus()
+            #expect(before.exists && before.isTrusted)
+            #expect(before.hasKey == false)
+            #expect((before.backedUpSessions, before.pendingSessions, before.unattributedSessions)
+                == (0, 2, 1))
+
+            let after = try await client.backUpKeysNow()
+            #expect((after.backedUpSessions, after.pendingSessions, after.unattributedSessions)
+                == (2, 0, 1))
+            #expect(try await client.backup.backupInfo()?.count == 2)
+
+            // Holding the key matters only if it belongs to this backup.
+            await client.secrets.cacheBackupKey(BackupCrypto.generatePrivateKey())
+            #expect(try await client.keyBackupStatus().hasKey == false)
+            await client.secrets.cacheBackupKey(privateKey)
+            #expect(try await client.keyBackupStatus().hasKey)
             try? await client.transport.shutdown()
         }
     }

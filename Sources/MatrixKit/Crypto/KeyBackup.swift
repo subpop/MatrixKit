@@ -19,6 +19,39 @@ public struct EncryptionStatus: Hashable, Sendable {
     }
 }
 
+/// How this device stands with the account's server-side key backup, for
+/// settings UI.
+public struct KeyBackupStatus: Hashable, Sendable {
+    /// A server-side key backup exists.
+    public var exists: Bool
+    /// This device adds keys to the backup: it is signed by this device,
+    /// or by keys of ours this verified session trusts.
+    public var isTrusted: Bool
+    /// This device holds the private key for the backup, so it can
+    /// restore from it without asking another device.
+    public var hasKey: Bool
+    /// Sessions held here that the backup already stores.
+    public var backedUpSessions: Int
+    /// Sessions held here waiting to be uploaded.
+    public var pendingSessions: Int
+    /// Sessions held here that cannot be uploaded: their origin is
+    /// unknown, which backup entries require.
+    public var unattributedSessions: Int
+
+    public init(
+        exists: Bool = false, isTrusted: Bool = false, hasKey: Bool = false,
+        backedUpSessions: Int = 0, pendingSessions: Int = 0,
+        unattributedSessions: Int = 0
+    ) {
+        self.exists = exists
+        self.isTrusted = isTrusted
+        self.hasKey = hasKey
+        self.backedUpSessions = backedUpSessions
+        self.pendingSessions = pendingSessions
+        self.unattributedSessions = unattributedSessions
+    }
+}
+
 /// `GET /room_keys/version` response body.
 public struct BackupVersionInfo: Hashable, Sendable, Codable {
     /// Version identifier, absent when no backup exists.

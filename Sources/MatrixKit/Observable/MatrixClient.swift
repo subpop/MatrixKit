@@ -1079,7 +1079,13 @@ public final class MatrixClient {
             guard !Task.isCancelled else { return }
             while let self {
                 self.backupUploadRequested = false
-                await self.uploadPendingSessions()
+                do {
+                    try await self.uploadPendingSessions()
+                } catch {
+                    MatrixKitLog.crypto.debug(
+                        "RoomCrypto backup upload skipped error=\(error, privacy: .public)"
+                    )
+                }
                 guard self.backupUploadRequested, !Task.isCancelled else { break }
             }
             self?.backupUploadTask = nil
@@ -1088,30 +1094,57 @@ public final class MatrixClient {
 
     /// Upload sessions not yet in the current backup version, in
     /// batches. Backup upload needs only the backup public key from the
-    /// server, so no private key is involved.
-    func uploadPendingSessions() async {
+    /// server, so no private key is involved. Throws when the account
+    /// has no usable, trusted backup or an upload fails; sessions stay
+    /// pending.
+    func uploadPendingSessions() async throws(MatrixError) {
+        guard let info = try await backup.backupInfo(), let version = info.version else {
+            throw .recoveryFailed("No key backup on this account")
+        }
         guard
-            let info = try? await backup.backupInfo(),
-            let version = info.version, info.algorithm == KeyBackup.algorithm,
+            info.algorithm == KeyBackup.algorithm,
             let publicKeyB64 = info.publicKey,
-            let publicKey = Primitives.base64UnpaddedDecode(publicKeyB64),
-            await isBackupTrusted(info)
-        else { return }
+            let publicKey = Primitives.base64UnpaddedDecode(publicKeyB64)
+        else {
+            throw .recoveryFailed("This key backup uses an unsupported algorithm")
+        }
+        guard await isBackupTrusted(info) else {
+            throw .recoveryFailed("This device does not trust the key backup")
+        }
         while !Task.isCancelled {
             let batch = await roomCrypto.sessionsPendingBackup(
                 version: version, limit: 200)
             guard !batch.isEmpty else { return }
-            do {
-                try await backup.uploadSessions(
-                    batch, publicKey: publicKey, version: version)
-            } catch {
-                MatrixKitLog.crypto.warning(
-                    "RoomCrypto backup upload failed error=\(error, privacy: .public)"
-                )
-                return
-            }
+            try await backup.uploadSessions(
+                batch, publicKey: publicKey, version: version)
             await roomCrypto.markBackedUp(batch, version: version)
         }
+    }
+
+    /// Where this device stands with the account's key backup. Throws
+    /// when the server cannot be reached.
+    public func keyBackupStatus() async throws(MatrixError) -> KeyBackupStatus {
+        guard let info = try await backup.backupInfo(), let version = info.version else {
+            return KeyBackupStatus()
+        }
+        var hasKey = false
+        if let key = await secrets.backupKey() {
+            hasKey = info.accepts(privateKey: key)
+        }
+        let progress = await roomCrypto.backupProgress(version: version)
+        return KeyBackupStatus(
+            exists: true, isTrusted: await isBackupTrusted(info), hasKey: hasKey,
+            backedUpSessions: progress.backedUp, pendingSessions: progress.pending,
+            unattributedSessions: progress.unattributed)
+    }
+
+    /// Upload every pending session now, instead of waiting for the next
+    /// scheduled pass, and report the resulting status. Throws when the
+    /// account has no trusted backup or an upload fails.
+    @discardableResult
+    public func backUpKeysNow() async throws(MatrixError) -> KeyBackupStatus {
+        try await uploadPendingSessions()
+        return try await keyBackupStatus()
     }
 
     /// Whether this client should upload room keys to `info`: only

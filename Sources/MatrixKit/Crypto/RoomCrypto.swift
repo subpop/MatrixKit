@@ -860,6 +860,24 @@ public actor RoomCrypto {
         return out
     }
 
+    /// How the held sessions stand against backup `version`: stored in
+    /// it, waiting to upload, or lacking the origin an upload needs.
+    public func backupProgress(
+        version: String
+    ) -> (backedUp: Int, pending: Int, unattributed: Int) {
+        var counts = (backedUp: 0, pending: 0, unattributed: 0)
+        for key in inbound.keys {
+            if origins[key] == nil {
+                counts.unattributed += 1
+            } else if backedUpVersions[key] == version {
+                counts.backedUp += 1
+            } else {
+                counts.pending += 1
+            }
+        }
+        return counts
+    }
+
     /// Record that `sessions` are stored in backup `version`. A session
     /// replaced by an earlier state since it was exported is left
     /// pending.
