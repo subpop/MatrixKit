@@ -31,6 +31,28 @@ struct OlmConnectorTests {
         return (alice, bob, keys, aliceSender, bobSender, aliceUser, bobUser)
     }
 
+    @Test("deviceKeys finds a self-signed device by either of its keys")
+    func deviceKeysLookup() async throws {
+        let (alice, bob, keys, _, _, aliceUser, _) = try await makePair()
+        try await alice.ensureKeys()
+        let curve = try await alice.identityKey()
+        let ed25519 = try await alice.signingKey()
+
+        for key in [curve, ed25519] {
+            let found = try #require(try await bob.deviceKeys(of: aliceUser, owning: key))
+            #expect(found.curve25519 == curve)
+            #expect(found.ed25519 == ed25519)
+        }
+        #expect(try await bob.deviceKeys(of: aliceUser, owning: "UNKNOWNKEY") == nil)
+
+        // A record altered after the device signed it is not believed.
+        var tampered = try #require(await keys.uploads.last?.deviceKeys)
+        tampered.keys["curve25519:ALICE"] = "tampered"
+        await keys.enqueueQueryResponse(KeyQueryResponse(
+            deviceKeys: [aliceUser.value: ["ALICE": tampered]]))
+        #expect(try await bob.deviceKeys(of: aliceUser, owning: "tampered") == nil)
+    }
+
     @Test("identityKey is the Curve25519 key, not the Ed25519 signing key")
     func identityKeyIsCurve() async throws {
         let identity = DeviceIdentityKeys.generate()

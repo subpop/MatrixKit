@@ -583,6 +583,47 @@ public actor OlmConnector {
             try requireConfigured().material.curve25519Public())
     }
 
+    /// The Curve25519 and Ed25519 keys of the device of `user` that owns
+    /// `identityKey`, which may be either of its two keys. The device
+    /// record must carry its own signature, so a record cannot be
+    /// altered in transit without the device's key. Nil when no such
+    /// device is published; throws when the key query fails. Part of
+    /// the `RoomKeySharer` seam consumed by `RoomCrypto`.
+    public func deviceKeys(
+        of user: UserId, owning identityKey: String
+    ) async throws(MatrixError) -> (curve25519: String, ed25519: String)? {
+        let response = try await keys.queryKeys(users: [user])
+        for (id, device) in response.deviceKeys[user.value] ?? [:] {
+            guard
+                device.userId == user.value, device.deviceId == id,
+                let curve = device.keys["curve25519:\(id)"],
+                let ed25519 = device.keys["ed25519:\(id)"],
+                curve == identityKey || ed25519 == identityKey,
+                Self.isSelfSigned(device, ed25519: ed25519)
+            else { continue }
+            return (curve, ed25519)
+        }
+        return nil
+    }
+
+    /// Whether `device` is signed by its own Ed25519 key.
+    private static func isSelfSigned(_ device: DeviceKeys, ed25519: String) -> Bool {
+        guard
+            let signature = device.signatures[device.userId]?["ed25519:\(device.deviceId)"]
+                .flatMap(Primitives.base64UnpaddedDecode),
+            let key = Primitives.base64UnpaddedDecode(ed25519)
+        else { return false }
+        var payload: [String: Any] = [:]
+        payload["user_id"] = device.userId
+        payload["device_id"] = device.deviceId
+        payload["algorithms"] = device.algorithms
+        payload["keys"] = device.keys
+        guard let canonical = try? CryptoPrimitives.canonicalJSON(payload) else {
+            return false
+        }
+        return SigningKey.verify(signature: signature, for: canonical, publicKey: key)
+    }
+
     /// Unpadded-base64 Ed25519 fingerprint key of the local device.
     /// Part of the `RoomKeySharer` seam consumed by `RoomCrypto`.
     public func signingKey() async throws(MatrixError) -> String {

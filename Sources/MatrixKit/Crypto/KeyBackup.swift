@@ -182,14 +182,15 @@ public struct BackupRoomSessions: Hashable, Sendable, Codable {
 public struct SessionOrigin: Hashable, Sendable, Codable {
     /// Curve25519 identity key of the device that created the session.
     public var senderKey: String
-    /// Ed25519 key that device claims.
-    public var claimedEd25519: String
+    /// Ed25519 key that device claims, when known. A session attributed
+    /// from an event's `sender_key` alone has none.
+    public var claimedEd25519: String?
     /// Curve25519 keys of the devices the session was forwarded
     /// through, oldest first. Empty when received directly.
     public var forwardingChain: [String]
 
     public init(
-        senderKey: String, claimedEd25519: String, forwardingChain: [String] = []
+        senderKey: String, claimedEd25519: String?, forwardingChain: [String] = []
     ) {
         self.senderKey = senderKey
         self.claimedEd25519 = claimedEd25519
@@ -459,7 +460,7 @@ public actor KeyBackup {
                 BackupPlaintext(
                     sessionKey: Primitives.base64UnpaddedEncode(export),
                     senderKey: origin.senderKey,
-                    senderClaimedKeys: ["ed25519": origin.claimedEd25519],
+                    senderClaimedKeys: origin.claimedEd25519.map { ["ed25519": $0] } ?? [:],
                     forwardingChain: origin.forwardingChain))
         } catch {
             throw .encodingError("Cannot encode session export: \(error.localizedDescription)")
@@ -506,11 +507,10 @@ public actor KeyBackup {
             throw .encodingError("Backed-up session has malformed plaintext")
         }
         var origin: SessionOrigin?
-        if let senderKey = json.senderKey,
-            let claimed = json.senderClaimedKeys?["ed25519"]
-        {
+        if let senderKey = json.senderKey {
             origin = SessionOrigin(
-                senderKey: senderKey, claimedEd25519: claimed,
+                senderKey: senderKey,
+                claimedEd25519: json.senderClaimedKeys?["ed25519"],
                 forwardingChain: json.forwardingChain ?? [])
         }
         return (blob, origin)

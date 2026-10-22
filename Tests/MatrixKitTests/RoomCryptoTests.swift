@@ -673,6 +673,123 @@ struct RoomCryptoTests {
             == "m.thread")
     }
 
+    /// A session received without an origin, with messages to decrypt.
+    private struct LegacySession {
+        var crypto: RoomCrypto
+        var sharer: FakeSharer
+        var id: String
+        var room: RoomId
+        var wires: [Data]
+
+        func event(_ index: Int, senderKey: String?) -> MessageEvent {
+            var content: [String: AnyCodable] = [
+                "session_id": .string(id),
+                "ciphertext": .string(Primitives.base64UnpaddedEncode(wires[index])),
+            ]
+            if let senderKey { content["sender_key"] = .string(senderKey) }
+            return MessageEvent(
+                type: "m.room.encrypted", eventId: EventId(unchecked: "$l\(index)"),
+                sender: UserId(unchecked: "@alice:x"), roomId: room,
+                originServerTs: index, content: content)
+        }
+
+        /// Wait for the background attribution to land (or give up).
+        func origin() async -> SessionOrigin? {
+            for _ in 0..<200 {
+                if let origin = await crypto.backupExports().first?.origin { return origin }
+                try? await Task.sleep(for: .milliseconds(2))
+            }
+            return nil
+        }
+    }
+
+    private func legacySession(
+        origin: SessionOrigin? = nil
+    ) async throws -> LegacySession {
+        let room = RoomId(unchecked: "!room:x")
+        var outbound = MegolmSession.create()
+        let export = outbound.export()
+        let wires = try (0..<3).map { try outbound.encrypt(megolmPayload("m\($0)", room)) }
+        let sharer = FakeSharer()
+        let crypto = RoomCrypto(sharer: sharer, sender: FakeRoomSender())
+        try await crypto.importSession(
+            roomId: room, sessionId: outbound.id, export: export, origin: origin)
+        return LegacySession(
+            crypto: crypto, sharer: sharer, id: outbound.id, room: room, wires: wires)
+    }
+
+    @Test("a held session without an origin learns it from a decrypted event")
+    func attributesLegacySession() async throws {
+        let legacy = try await legacySession()
+        await legacy.sharer.publishDevice(
+            user: "@alice:x", curve25519: "ALICECURVE", ed25519: "ALICEED")
+        #expect(await legacy.crypto.decryptRoomEvent(
+            legacy.event(0, senderKey: "ALICECURVE"), in: legacy.room) != nil)
+        #expect(await legacy.origin()
+            == SessionOrigin(senderKey: "ALICECURVE", claimedEd25519: "ALICEED"))
+        // Attributed sessions are then uploadable.
+        let progress = await legacy.crypto.backupProgress(version: "1")
+        #expect((progress.pending, progress.unattributed) == (1, 0))
+    }
+
+    @Test("events from before the Curve25519 fix attribute through their Ed25519 key")
+    func attributesThroughEd25519() async throws {
+        let legacy = try await legacySession()
+        await legacy.sharer.publishDevice(
+            user: "@alice:x", curve25519: "ALICECURVE", ed25519: "ALICEED")
+        #expect(await legacy.crypto.decryptRoomEvent(
+            legacy.event(0, senderKey: "ALICEED"), in: legacy.room) != nil)
+        #expect(await legacy.origin()
+            == SessionOrigin(senderKey: "ALICECURVE", claimedEd25519: "ALICEED"))
+    }
+
+    @Test("a sender key no published device owns is not recorded, and not asked again")
+    func unknownDeviceStaysUnattributed() async throws {
+        let legacy = try await legacySession()
+        #expect(await legacy.crypto.decryptRoomEvent(
+            legacy.event(0, senderKey: "FORGEDKEY"), in: legacy.room) != nil)
+        #expect(await legacy.crypto.decryptRoomEvent(
+            legacy.event(1, senderKey: "FORGEDKEY"), in: legacy.room) != nil)
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(await legacy.crypto.backupExports().first?.origin == nil)
+        #expect(await legacy.sharer.deviceKeyLookups == ["@alice:x|FORGEDKEY"])
+    }
+
+    @Test("a failed lookup is retried on a later event")
+    func failedLookupRetries() async throws {
+        let legacy = try await legacySession()
+        await legacy.sharer.publishDevice(
+            user: "@alice:x", curve25519: "ALICECURVE", ed25519: "ALICEED")
+        await legacy.sharer.failNextDeviceKeyLookups()
+        _ = await legacy.crypto.decryptRoomEvent(
+            legacy.event(0, senderKey: "ALICECURVE"), in: legacy.room)
+        for _ in 0..<200 where await legacy.sharer.deviceKeyLookups.isEmpty {
+            try await Task.sleep(for: .milliseconds(2))
+        }
+        try await Task.sleep(for: .milliseconds(20))
+        #expect(await legacy.crypto.backupExports().first?.origin == nil)
+        _ = await legacy.crypto.decryptRoomEvent(
+            legacy.event(1, senderKey: "ALICECURVE"), in: legacy.room)
+        #expect(await legacy.origin() != nil)
+        #expect(await legacy.sharer.deviceKeyLookups.count == 2)
+    }
+
+    @Test("no lookup happens when the origin is known or the event names no key")
+    func attributionSkipped() async throws {
+        let known = SessionOrigin(senderKey: "KNOWN", claimedEd25519: "KNOWNED")
+        let withOrigin = try await legacySession(origin: known)
+        _ = await withOrigin.crypto.decryptRoomEvent(
+            withOrigin.event(0, senderKey: "KNOWN"), in: withOrigin.room)
+        let noKey = try await legacySession()
+        _ = await noKey.crypto.decryptRoomEvent(
+            noKey.event(0, senderKey: nil), in: noKey.room)
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(await withOrigin.sharer.deviceKeyLookups.isEmpty)
+        #expect(await noKey.sharer.deviceKeyLookups.isEmpty)
+        #expect(await withOrigin.crypto.backupExports().first?.origin == known)
+        #expect(await noKey.crypto.backupExports().first?.origin == nil)
+    }
+
     @Test("own sessions are attributed to this device")
     func ownSessionOrigin() async throws {
         let (room, _, _) = try roomFixture()

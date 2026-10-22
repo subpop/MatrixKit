@@ -45,6 +45,35 @@ public actor FakeSharer: RoomKeySharer {
     public func identityKey() async throws(MatrixError) -> String { identity }
 
     public func signingKey() async throws(MatrixError) -> String { "\(identity)-ed25519" }
+
+    /// Published device keys by (user, identity key), for session
+    /// attribution lookups.
+    public var publishedDeviceKeys: [String: (curve25519: String, ed25519: String)] = [:]
+    /// Lookups made so far, as `"user|identityKey"`.
+    public var deviceKeyLookups: [String] = []
+    private var failedDeviceKeyLookups = 0
+
+    /// Publish a device for `user` reachable by either of its keys.
+    public func publishDevice(user: String, curve25519: String, ed25519: String) {
+        publishedDeviceKeys["\(user)|\(curve25519)"] = (curve25519, ed25519)
+        publishedDeviceKeys["\(user)|\(ed25519)"] = (curve25519, ed25519)
+    }
+
+    /// Fail the next device-key lookup(s).
+    public func failNextDeviceKeyLookups(_ count: Int = 1) {
+        failedDeviceKeyLookups += count
+    }
+
+    public func deviceKeys(
+        of user: UserId, owning identityKey: String
+    ) async throws(MatrixError) -> (curve25519: String, ed25519: String)? {
+        deviceKeyLookups.append("\(user.value)|\(identityKey)")
+        if failedDeviceKeyLookups > 0 {
+            failedDeviceKeyLookups -= 1
+            throw .networkError("Fake device key lookup failure")
+        }
+        return publishedDeviceKeys["\(user.value)|\(identityKey)"]
+    }
 }
 
 /// In-memory `RoomEventSender`: records sent room events.

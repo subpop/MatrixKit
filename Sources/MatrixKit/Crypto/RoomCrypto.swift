@@ -102,6 +102,7 @@ public actor RoomCrypto {
     private static let storeService = "MatrixKit.RoomCrypto"
     private static let decryptionFailureLimit = 10_000
     private static let decryptedMessageLimit = 50_000
+    private static let maxAttributionAttempts = 3
     private static let keyRequestCooldown: TimeInterval = 120
     private static let maxKeyRequestAttempts = 3
 
@@ -169,6 +170,12 @@ public actor RoomCrypto {
         var eventId: EventId
         var originServerTs: Int
     }
+    /// Sessions whose origin is being looked up, by `"roomId|sessionId"`.
+    private var attributionInFlight: Set<String> = []
+    /// Origin lookups made per session. A failed lookup is retried on a
+    /// later event, up to `maxAttributionAttempts`; a device that does
+    /// not exist ends the attempts at once.
+    private var attributionAttempts: [String: Int] = [:]
     /// `"roomId|sessionId"` keys already tried against the key backup.
     /// Never re-armed within a launch: backup content is static per
     /// version, so a miss stays a miss. Capped like `requestedSessions`.
@@ -994,6 +1001,47 @@ public actor RoomCrypto {
         )
     }
 
+    /// Learn the origin of a session persisted before origins were
+    /// recorded from the event it just decrypted. The event's cleartext
+    /// `sender_key` is only a claim, so it is checked against the
+    /// sender's published devices in the background; decryption never
+    /// waits for it.
+    private func scheduleAttribution(for key: String, from event: MessageEvent) {
+        guard
+            origins[key] == nil, !attributionInFlight.contains(key),
+            attributionAttempts[key, default: 0] < Self.maxAttributionAttempts,
+            let identityKey = event.content["sender_key"]?.stringValue
+        else { return }
+        attributionInFlight.insert(key)
+        let sender = event.sender
+        Task { await attribute(key, to: sender, owning: identityKey) }
+    }
+
+    private func attribute(
+        _ key: String, to sender: UserId, owning identityKey: String
+    ) async {
+        defer { attributionInFlight.remove(key) }
+        if attributionAttempts.count > 10_000 { attributionAttempts.removeAll() }
+        attributionAttempts[key, default: 0] += 1
+        do {
+            guard let device = try await sharer.deviceKeys(
+                of: sender, owning: identityKey)
+            else {
+                attributionAttempts[key] = Self.maxAttributionAttempts
+                return
+            }
+            guard inbound[key] != nil, origins[key] == nil else { return }
+            origins[key] = SessionOrigin(
+                senderKey: device.curve25519, claimedEd25519: device.ed25519)
+            await markPersistDirty()
+            onSessionsChanged?()
+        } catch {
+            MatrixKitLog.crypto.debug(
+                "RoomCrypto session attribution failed error=\(error, privacy: .public)"
+            )
+        }
+    }
+
     /// Origin of the session in a received room-key event, from the
     /// Olm-validated sending device. A direct `m.room_key` was created
     /// by that device; a forward names its creator in the content and
@@ -1160,6 +1208,7 @@ public actor RoomCrypto {
         }
         inbound["\(roomId.value)|\(sessionId)"] = session
         await markPersistDirty()
+        scheduleAttribution(for: "\(roomId.value)|\(sessionId)", from: event)
         return MessageEvent(
             type: type, eventId: event.eventId, sender: event.sender,
             roomId: event.roomId ?? roomId, stateKey: event.stateKey,
@@ -1185,6 +1234,13 @@ public protocol RoomKeySharer: Actor {
     /// Unpadded-base64 Ed25519 fingerprint key of the local device,
     /// claimed for sessions this device originates.
     func signingKey() async throws(MatrixError) -> String
+    /// The Curve25519 and Ed25519 keys of the device of `user` owning
+    /// `identityKey` (either of its keys), checked against the device's
+    /// own signature; nil when no such device is published. Attributes
+    /// sessions whose origin was never recorded.
+    func deviceKeys(
+        of user: UserId, owning identityKey: String
+    ) async throws(MatrixError) -> (curve25519: String, ed25519: String)?
 }
 
 extension OlmConnector: RoomKeySharer {}
