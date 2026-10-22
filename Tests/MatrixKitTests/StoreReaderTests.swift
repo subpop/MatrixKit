@@ -225,7 +225,7 @@ struct StoreReaderTests {
 
         let global = try reader.searchMessages(term: "searchable")
         #expect(global.count == 2)
-        #expect(Set(global.map(\\.roomId.value)) == [firstRoom.value, secondRoom.value])
+        #expect(Set(global.map(\.roomId.value)) == [firstRoom.value, secondRoom.value])
         #expect(try reader.searchMessages(term: "   ").isEmpty)
     }
 
