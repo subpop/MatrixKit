@@ -219,14 +219,16 @@ public actor SecretShare {
     /// Olm-encrypted to the requesting device. Cross-signing halves
     /// come from the held keys; `m.megolm_backup.v1` comes from the
     /// in-memory cache (see `cacheBackupKey`). Silent no-op without a
-    /// configured `OlmConnector`, for unknown secret names, when we
-    /// don't hold the secret, or for `request_cancellation` events.
+    /// configured `OlmConnector`, for requests from other users, for
+    /// unknown secret names, when we don't hold the secret, or for
+    /// `request_cancellation` events.
     /// Requests stay plaintext per spec; only the secret-bearing
     /// answers are encrypted.
     private func answerRequest(_ event: BasicEvent) async {
         guard
             let olm, await olm.isConfigured,
             let from = event.sender,
+            from == (await sessionUserId()),
             let data = try? JSONEncoder().encode(
                 AnyCodableDictionary(event.content)),
             let request = try? JSONDecoder().decode(

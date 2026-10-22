@@ -244,6 +244,36 @@ struct SecretShareTests {
 
     // MARK: - Responder
 
+    @Test("secret requests from other users are never answered")
+    func foreignRequestRefused() async throws {
+        let holderUser = UserId(unchecked: "@holder:x")
+        let keys = FakeKeys()
+        let holderSender = FakeSender()
+        let holderOlm = OlmConnector(keys: keys, sender: holderSender)
+        try await holderOlm.configure(
+            identity: DeviceIdentityKeys.generate(),
+            userId: holderUser, deviceId: DeviceId("HOLDER"))
+        try await holderOlm.ensureKeys()
+        // The requester has a reachable device, so only the sender
+        // check stands between it and an answer.
+        let malloryUser = UserId(unchecked: "@mallory:x")
+        let malloryOlm = OlmConnector(keys: keys, sender: FakeSender())
+        try await malloryOlm.configure(
+            identity: DeviceIdentityKeys.generate(),
+            userId: malloryUser, deviceId: DeviceId("EVIL"))
+        try await malloryOlm.ensureKeys()
+        let (share, _, holderKeys, transport) = makeShare(
+            userId: holderUser, deviceId: DeviceId("HOLDER"), olm: holderOlm)
+        _ = await holderKeys.generate()
+        await share.cacheBackupKey(Data(repeating: 1, count: 32))
+        for name in [SecretName.master, SecretName.backup] {
+            _ = await share.receive(requestEvent(
+                name: name, device: "EVIL", from: malloryUser))
+        }
+        #expect(await holderSender.sent.isEmpty)
+        try? await transport.shutdown()
+    }
+
     private func requestEvent(
         name: String, device: String = "PEER", requestId: String = "r1",
         action: String = "request",
@@ -275,7 +305,7 @@ struct SecretShareTests {
     @Test("request answers the held half, Olm-encrypted")
     func requestAnsweredEncrypted() async throws {
         let holderUser = UserId(unchecked: "@holder:x")
-        let requesterUser = UserId(unchecked: "@requester:x")
+        let requesterUser = holderUser
         let keys = FakeKeys()
         let holderSender = FakeSender()
         let requesterSender = FakeSender()
@@ -321,7 +351,7 @@ struct SecretShareTests {
     @Test("spec-shape round-trip: plaintext request → encrypted answer → completed")
     func requestEncryptedRoundTrip() async throws {
         let holderUser = UserId(unchecked: "@holder:x")
-        let requesterUser = UserId(unchecked: "@requester:x")
+        let requesterUser = holderUser
         let keys = FakeKeys()
         let holderSender = FakeSender()
         let requesterSender = FakeSender()
@@ -403,7 +433,7 @@ struct SecretShareTests {
     @Test("request for unknown secret or without keys stays silent")
     func requestUnanswerable() async throws {
         let holderUser = UserId(unchecked: "@holder:x")
-        let requesterUser = UserId(unchecked: "@requester:x")
+        let requesterUser = holderUser
         let keys = FakeKeys()
         let holderOlm = OlmConnector(keys: keys, sender: FakeSender())
         try await holderOlm.configure(
@@ -427,7 +457,7 @@ struct SecretShareTests {
     @Test("request_cancellation stays silent")
     func requestCancellation() async throws {
         let holderUser = UserId(unchecked: "@holder:x")
-        let requesterUser = UserId(unchecked: "@requester:x")
+        let requesterUser = holderUser
         let keys = FakeKeys()
         let holderOlm = OlmConnector(keys: keys, sender: FakeSender())
         try await holderOlm.configure(
@@ -452,7 +482,7 @@ struct SecretShareTests {
     @Test("backup key request → encrypted answer → backupKeyReceived")
     func backupKeyRoundTrip() async throws {
         let holderUser = UserId(unchecked: "@holder:x")
-        let requesterUser = UserId(unchecked: "@requester:x")
+        let requesterUser = holderUser
         let keys = FakeKeys()
         let holderSender = FakeSender()
         let requesterOlmSender = FakeSender()
@@ -538,7 +568,7 @@ struct SecretShareTests {
     @Test("backup request without a held key stays silent")
     func backupRequestUnheld() async throws {
         let holderUser = UserId(unchecked: "@holder:x")
-        let requesterUser = UserId(unchecked: "@requester:x")
+        let requesterUser = holderUser
         let keys = FakeKeys()
         let holderOlm = OlmConnector(keys: keys, sender: FakeSender())
         try await holderOlm.configure(
