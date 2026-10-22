@@ -35,13 +35,8 @@ struct MegolmSessionTests {
         var inbound = try MegolmSession.importSessionKey(blob)
         #expect(try inbound.decrypt(bodies[0]) == Data("m0".utf8))
         #expect(try inbound.decrypt(bodies[2]) == Data("m2".utf8))
-        // Index 1 is older than the ratchet position: unrecoverable.
-        do {
-            _ = try inbound.decrypt(bodies[1])
-            Issue.record("late message should throw")
-        } catch let error {
-            #expect(error == .indexTooOld)
-        }
+        // Index 1 arrives late but is still at or beyond the import position.
+        #expect(try inbound.decrypt(bodies[1]) == Data("m1".utf8))
         // Index 2 was already decrypted.
         do {
             _ = try inbound.decrypt(bodies[2])
@@ -117,6 +112,30 @@ struct MegolmSessionTests {
         } catch let error {
             #expect(error == expected)
         }
+    }
+
+    @Test("Out-of-order decrypt keeps earlier history readable")
+    func outOfOrderDecrypt() throws {
+        var outbound = MegolmSession.create()
+        let blob = try outbound.sessionKey()
+        let bodies = try (0..<600).map { try outbound.encrypt(Data("m\($0)".utf8)) }
+        var inbound = try MegolmSession.importSessionKey(blob)
+        // Newest first, across two reseed boundaries, then back down.
+        for i in [599, 300, 255, 256, 0, 1] {
+            #expect(try inbound.decrypt(bodies[i]) == Data("m\(i)".utf8))
+        }
+    }
+
+    @Test("Inbound export keeps the import position after decrypting")
+    func inboundExportKeepsFirstIndex() throws {
+        var outbound = MegolmSession.create()
+        _ = try outbound.encrypt(Data("m0".utf8))
+        var inbound = try MegolmSession.importSessionKey(try outbound.sessionKey())
+        let bodies = try (1..<5).map { try outbound.encrypt(Data("m\($0)".utf8)) }
+        _ = try inbound.decrypt(bodies[3])
+        #expect(inbound.firstMessageIndex == 1)
+        var restored = try MegolmSession.importSessionKey(inbound.export())
+        #expect(try restored.decrypt(bodies[0]) == Data("m1".utf8))
     }
 
     @Test("Export round-trips position through the unsigned blob")

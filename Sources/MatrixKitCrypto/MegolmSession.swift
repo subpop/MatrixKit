@@ -22,9 +22,14 @@ public struct MegolmSession: Sendable {
     /// Version byte of the unsigned export blob (local persistence).
     public static let exportVersion: UInt8 = 0x01
 
-    /// Next outbound message index / inbound ratchet position.
+    /// Next outbound message index / inbound latest-decrypted index.
     public private(set) var counter: UInt32
     private var parts: [Data]
+    /// Ratchet position this session was created or imported at. Inbound
+    /// sessions decrypt anything at or beyond it, whatever the order of
+    /// arrival, so it is what export and backup must carry.
+    private let initialCounter: UInt32
+    private let initialParts: [Data]
     private let signingKey: SigningKey?
     private let verifyKey: Data
     private var received: Set<UInt32> = []
@@ -35,6 +40,8 @@ public struct MegolmSession: Sendable {
     ) {
         self.counter = counter
         self.parts = parts
+        self.initialCounter = counter
+        self.initialParts = parts
         self.signingKey = signingKey
         self.verifyKey = verifyKey
     }
@@ -150,8 +157,10 @@ public struct MegolmSession: Sendable {
         return signed + signature
     }
 
-    /// Decrypt one wire message (payload + MAC + signature). Replays and
-    /// messages older than the ratchet position are rejected.
+    /// Decrypt one wire message (payload + MAC + signature). Any index at
+    /// or beyond the position the session was imported at decrypts, in
+    /// any order; earlier indices are rejected (`indexTooOld`), as are
+    /// replays of an already-decrypted index.
     public mutating func decrypt(
         _ message: Data
     ) throws(CryptoError) -> Data {
@@ -174,19 +183,27 @@ public struct MegolmSession: Sendable {
         guard !received.contains(index) else {
             throw .replayDetected
         }
-        guard index >= UInt64(counter) else {
+        guard index >= UInt64(initialCounter) else {
             throw .indexTooOld
         }
-        var parts = parts
-        Self.advanceParts(&parts, from: UInt64(counter), to: UInt64(index))
+        // Step forward from the latest ratchet when the index is ahead
+        // of it; otherwise rewind to the initial one (ratchets only
+        // move forward).
+        let advancing = index >= UInt64(counter)
+        var parts = advancing ? self.parts : initialParts
+        Self.advanceParts(
+            &parts, from: UInt64(advancing ? counter : initialCounter),
+            to: UInt64(index))
         let keys = Self.messageKeys(parts: parts)
         guard Primitives.constantTimeEqual(
             Self.messageMAC(keys.hmac, payload: payload), mac)
         else {
             throw .macMismatch
         }
-        self.parts = parts
-        counter = index
+        if advancing {
+            self.parts = parts
+            counter = index
+        }
         received.insert(index)
         return try AESCBC.decrypt(
             key: keys.aes, iv: keys.iv, ciphertext: ciphertext)
@@ -209,12 +226,17 @@ public struct MegolmSession: Sendable {
         return out
     }
 
-    /// Unsigned 165-byte export blob (local persistence): version
-    /// `0x01` + counter + `R₀…R₃` + public key, no signature.
+    /// Unsigned 165-byte export blob (local persistence and backup):
+    /// version `0x01` + counter + `R₀…R₃` + public key, no signature.
+    /// Inbound sessions export the position they were imported at, so
+    /// decrypting later messages never narrows what a restore covers;
+    /// outbound sessions export their current position.
     /// Re-importable via `importSessionKey`.
-    public func export() -> Data {        var out = Data([Self.exportVersion])
-        out += Self.writeCounter(counter)
-        for part in parts { out += part }
+    public func export() -> Data {
+        let atImport = signingKey == nil
+        var out = Data([Self.exportVersion])
+        out += Self.writeCounter(atImport ? initialCounter : counter)
+        for part in atImport ? initialParts : parts { out += part }
         out += verifyKey
         return out
     }
@@ -225,7 +247,7 @@ public struct MegolmSession: Sendable {
     }
 
     /// Message index embedded in the export blob: the first index this
-    /// session state can still decrypt (ratchet position at export).
+    /// session can decrypt.
     public var firstMessageIndex: UInt32? {
         let blob = export()
         guard blob.count >= 5, blob[blob.startIndex] == Self.exportVersion else {
