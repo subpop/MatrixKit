@@ -291,6 +291,10 @@ public struct MatrixStoreReader: Sendable {
             powerLevels: try room.powerLevelsContent.map {
                 try decoder.decode([String: AnyCodable].self, from: $0)
             },
+            createEventSender: room.createEventSender.map(UserId.init(unchecked:)),
+            createEventContent: try room.createEventContent.map {
+                try decoder.decode([String: AnyCodable].self, from: $0)
+            },
             hierarchyChildren: try room.hierarchyChildren.map {
                 try decoder.decode([SpaceChild].self, from: $0)
             } ?? [],

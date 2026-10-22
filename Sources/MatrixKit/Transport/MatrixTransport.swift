@@ -4,6 +4,9 @@ import NIOCore
 import NIOHTTP1
 import os
 
+private nonisolated let roomStateRequestSignposter = OSSignposter(
+    subsystem: "app.subpop.Relay.performance", category: "RoomStateRequest")
+
 /// Actor wrapping `AsyncHTTPClient` for Matrix Client-Server API calls.
 ///
 /// Single-shot requests (no automatic retry — callers own backoff). Maps
@@ -398,6 +401,21 @@ public actor MatrixTransport {
         bodyPreview: String?,
         onProgress: (@Sendable (Double) -> Void)? = nil
     ) async throws(MatrixError) -> (status: Int, data: Data) {
+        let isRoomStateRequest = method == .get
+            && pathForLog.hasPrefix("/_matrix/client/v3/rooms/")
+            && pathForLog.hasSuffix("/state")
+        let state = isRoomStateRequest
+            ? roomStateRequestSignposter.beginInterval(
+                "getRoomState", id: roomStateRequestSignposter.makeSignpostID())
+            : nil
+        var result = "failed"
+        defer {
+            if let state {
+                roomStateRequestSignposter.endInterval(
+                    "getRoomState", state, "\(result, privacy: .public)")
+            }
+        }
+
         do {
             var request = HTTPClientRequest(url: urlString)
             request.method = NIOHTTP1.HTTPMethod(rawValue: method.rawValue)
@@ -441,6 +459,7 @@ public actor MatrixTransport {
             let buffer = try await response.body.collect(upTo: maxBodyBytes)
             let data = Data(buffer.readableBytesView)
             let status = Int(response.status.code)
+            result = "status \(status), responseBytes \(data.count)"
             MatrixKitLog.transport.trace(
                 "← \(status, privacy: .public) \(method.rawValue, privacy: .public) \(pathForLog, privacy: .public) (\(data.count, privacy: .public) bytes)\(kind, privacy: .public)"
             )

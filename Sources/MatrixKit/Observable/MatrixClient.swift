@@ -544,9 +544,10 @@ public final class MatrixClient {
         ciphertextStore = store
     }
 
-    /// Set the local-state provider for `spaces` and `search`
-    /// enrichment. Nil (the default) serves everything from the network.
+    /// Set the local-state provider for room permissions, `spaces`, and
+    /// `search` enrichment. Nil (the default) serves everything from the network.
     public func setRoomStateProvider(_ provider: (any RoomStateProvider)?) async {
+        await rooms.setRoomStateProvider(provider)
         await spaces.setProvider(provider)
         await search.setProvider(provider)
     }

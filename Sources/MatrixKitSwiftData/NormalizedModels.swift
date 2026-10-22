@@ -7,7 +7,7 @@ import SwiftData
 /// (never migrated — a full sync rebuilds it), same policy as the
 /// snapshot caches.
 public enum NormalizedStoreVersion {
-    public static let current = 2
+    public static let current = 3
 }
 
 /// Single-row store metadata (`id == "meta"`).
@@ -81,6 +81,10 @@ public final class SDRoom {
     public var pinnedEventIds: Data?
     /// JSON-encoded `m.room.power_levels` content.
     public var powerLevelsContent: Data?
+    /// Sender of the current `m.room.create` event.
+    public var createEventSender: String?
+    /// JSON-encoded current `m.room.create` content.
+    public var createEventContent: Data?
     /// JSON-encoded hero user-ID strings.
     public var heroes: Data?
     /// JSON-encoded `[SpaceChild]` (MSC2946 hierarchy rows).

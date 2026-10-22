@@ -1,8 +1,11 @@
 #if canImport(SwiftData)
 import Foundation
 import MatrixKit
+import OSLog
 import SwiftData
 
+private nonisolated let storeWriteSignposter = OSSignposter(
+    subsystem: "app.subpop.Relay.performance", category: "SwiftDataWriter")
 /// Incremental write path for the normalized store.
 ///
 /// Ports the `RoomActor`/`StateStore` fold: sync deltas go in via
@@ -56,6 +59,10 @@ public actor MatrixStoreWriter {
 
     /// Apply a v2 sync delta: route per-room changes, store the cursor.
     public func apply(_ delta: SyncDelta) throws {
+        let state = storeWriteSignposter.beginInterval(
+            "applySyncDelta", id: storeWriteSignposter.makeSignpostID(),
+            "rooms \(delta.joined.count + delta.invited.count + delta.left.count + delta.knocked.count)")
+        defer { storeWriteSignposter.endInterval("applySyncDelta", state) }
         let meta = try fetchMeta()
         meta.syncToken = delta.nextBatch.value
         for (roomId, roomDelta) in delta.joined {
@@ -74,13 +81,17 @@ public actor MatrixStoreWriter {
             try upsertAccountData(type: event.type, content: event.content)
         }
         try pushDirectFlags()
-        try modelContext.save()
+        try saveSyncDelta()
     }
 
     /// Apply a sliding-sync delta. Same routing as `apply(_:)` but the v2
     /// `syncToken` is untouched — the sliding `pos` cursor is
     /// connection-scoped, so the two engines never thrash one cursor.
     public func applySliding(_ delta: SyncDelta) throws {
+        let state = storeWriteSignposter.beginInterval(
+            "applySlidingSyncDelta", id: storeWriteSignposter.makeSignpostID(),
+            "rooms \(delta.joined.count + delta.invited.count + delta.left.count + delta.knocked.count)")
+        defer { storeWriteSignposter.endInterval("applySlidingSyncDelta", state) }
         let meta = try fetchMeta()
         meta.slidingPos = delta.nextBatch.value
         for (roomId, roomDelta) in delta.joined {
@@ -99,6 +110,13 @@ public actor MatrixStoreWriter {
             try upsertAccountData(type: event.type, content: event.content)
         }
         try pushDirectFlags()
+        try saveSyncDelta()
+    }
+
+    private func saveSyncDelta() throws {
+        let state = storeWriteSignposter.beginInterval(
+            "saveSyncDelta", id: storeWriteSignposter.makeSignpostID())
+        defer { storeWriteSignposter.endInterval("saveSyncDelta", state) }
         try modelContext.save()
     }
 
@@ -206,6 +224,9 @@ public actor MatrixStoreWriter {
     public func stageEcho(
         _ event: MessageEvent, roomId: RoomId, transactionId: TransactionId
     ) throws {
+        let state = storeWriteSignposter.beginInterval(
+            "stageEcho", id: storeWriteSignposter.makeSignpostID())
+        defer { storeWriteSignposter.endInterval("stageEcho", state) }
         let room = try fetchRoom(roomId.value)
         pendingEchoes[transactionId.value] = event.eventId.value
         echoTransactions[event.eventId.value] = transactionId.value
@@ -467,6 +488,19 @@ public actor MatrixStoreWriter {
         try modelContext.save()
     }
 
+    /// Merge a homeserver member response without constructing an
+    /// intermediate profile map on the caller's actor.
+    public func mergeMemberProfiles(
+        _ profiles: [MemberInfo], roomId: RoomId
+    ) throws {
+        var profilesByUser: [UserId: MemberContent] = [:]
+        profilesByUser.reserveCapacity(profiles.count)
+        for profile in profiles {
+            profilesByUser[UserId(unchecked: profile.stateKey)] = profile.content
+        }
+        try mergeMemberProfiles(profilesByUser, roomId: roomId)
+    }
+
     /// Adopt fetched hierarchy rows for a space (overwrites), so the
     /// detail view's next open renders from the store without a network
     /// round trip. Unknown spaces are created with `.leave` membership
@@ -481,6 +515,24 @@ public actor MatrixStoreWriter {
         room.hierarchyChildren = try encoder.encode(children)
         room.hierarchyDirectChildren = try encoder.encode(directChildren)
         room.hierarchyNextBatch = nextBatch?.value
+        try modelContext.save()
+    }
+
+    /// Adopt permission-relevant state fetched after a room-state cache miss.
+    public func setRoomPermissionState(
+        _ roomId: RoomId,
+        createEventSender: UserId,
+        createEventContent: [String: AnyCodable],
+        powerLevels: [String: AnyCodable]?
+    ) throws {
+        let id = roomId.value
+        guard let room = try modelContext.fetch(
+            FetchDescriptor<SDRoom>(predicate: #Predicate { $0.roomId == id })
+        ).first else { return }
+        room.createEventSender = createEventSender.value
+        room.createEventContent = try encoder.encode(createEventContent)
+        room.powerLevelsContent = try powerLevels.map { try encoder.encode($0) }
+        room.isSpace = createEventContent["type"]?.stringValue == "m.space"
         try modelContext.save()
     }
 
@@ -565,9 +617,19 @@ public actor MatrixStoreWriter {
 
     private func eventIds(roomId: String) throws -> [String] {
         let id = roomId
-        return try modelContext.fetch(
-            FetchDescriptor<SDRoomEvent>(
-                predicate: #Predicate { $0.roomId == id })).map(\.eventId)
+        let state = storeWriteSignposter.beginInterval(
+            "fetchExistingEventIDs", id: storeWriteSignposter.makeSignpostID())
+        do {
+            let ids = try modelContext.fetch(
+                FetchDescriptor<SDRoomEvent>(
+                    predicate: #Predicate { $0.roomId == id })).map(\.eventId)
+            storeWriteSignposter.endInterval(
+                "fetchExistingEventIDs", state, "rows \(ids.count)")
+            return ids
+        } catch {
+            storeWriteSignposter.endInterval("fetchExistingEventIDs", state, "failed")
+            throw error
+        }
     }
 
     private func upsertAccountData(
@@ -852,6 +914,8 @@ public actor MatrixStoreWriter {
                 room.successorRoomId =
                     event.content["replacement_room"]?.stringValue
             case .roomCreate:
+                room.createEventSender = event.sender.value
+                room.createEventContent = try encoder.encode(event.content)
                 room.isSpace = event.content["type"]?.stringValue == "m.space"
             default:
                 break
@@ -950,6 +1014,8 @@ public actor MatrixStoreWriter {
                     }
                 }
             case .roomCreate:
+                room.createEventSender = event.sender.value
+                room.createEventContent = try encoder.encode(event.content)
                 room.isSpace = event.content["type"]?.stringValue == "m.space"
             default:
                 break

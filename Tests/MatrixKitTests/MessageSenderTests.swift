@@ -64,8 +64,16 @@ struct MessageSenderTests {
         try await withHarness { harness in
             let (sender, writer, _, _) = try await sender(harness)
             let room = RoomId(unchecked: "!room:test")
-            let echo = try #require(await sender.sendText(room, "hello"))
+            let (stagedEvents, stagedContinuation) = AsyncStream<Void>.makeStream()
+            let stagedNotification = Task {
+                for await _ in stagedEvents { return true }
+                return false
+            }
+            let echo = try #require(await sender.sendText(
+                room, "hello", onEchoStaged: { stagedContinuation.yield() }))
+            stagedContinuation.finish()
             #expect(echo.value.hasPrefix("local:"))
+            #expect(await stagedNotification.value)
             #expect(await sends(harness, containing: "/send/").count == 1)
             #expect(await writer.echoTransactionId(for: echo) != nil)
         }

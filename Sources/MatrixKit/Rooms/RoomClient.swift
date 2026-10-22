@@ -2,10 +2,16 @@
 public actor RoomClient {
     private let transport: MatrixTransport
     private let session: Session
+    private var roomStateProvider: (any RoomStateProvider)?
 
     public init(transport: MatrixTransport, session: Session) {
         self.transport = transport
         self.session = session
+    }
+
+    /// Set the local-state provider used for permission reads.
+    public func setRoomStateProvider(_ provider: (any RoomStateProvider)?) {
+        roomStateProvider = provider
     }
 
     private func token() async throws(MatrixError) -> String {
@@ -150,6 +156,10 @@ public actor RoomClient {
             .get, path: "/_matrix/client/v3/rooms/\(roomId.pathSegmentEncoded)/members",
             accessToken: try await token()
         )
+        if let roomStateProvider {
+            try? await roomStateProvider.setRoomMemberProfiles(
+                response.chunk, for: roomId)
+        }
         return response.chunk
     }
 
@@ -321,6 +331,20 @@ public actor RoomClient {
     public func roomPermissions(
         _ roomId: RoomId, localUser: UserId
     ) async throws(MatrixError) -> RoomPermissions? {
+        if let roomStateProvider,
+           let summary = await roomStateProvider.roomState(roomId),
+           let createEventSender = summary.createEventSender,
+           let createEventContent = summary.createEventContent
+        {
+            let (creators, creatorsInfinite) = RoomMemberDetails.creators(
+                sender: createEventSender, createContent: createEventContent)
+            return Self.permissions(
+                localUser: localUser,
+                powerLevels: summary.powerLevels,
+                creators: creators,
+                creatorsInfinite: creatorsInfinite)
+        }
+
         let roomState = RoomStateClient(transport: transport, session: session)
         let state = try await roomState.getState(roomId)
         let powerContent = state.first {
@@ -335,6 +359,13 @@ public actor RoomClient {
                 sender: createEvent.sender, createContent: createEvent.content)
         } else {
             (creators, creatorsInfinite) = ([], false)
+        }
+        if let roomStateProvider, let createEvent {
+            try? await roomStateProvider.setRoomPermissionState(
+                roomId,
+                createEventSender: createEvent.sender,
+                createEventContent: createEvent.content,
+                powerLevels: powerContent)
         }
         return Self.permissions(
             localUser: localUser,
@@ -450,6 +481,16 @@ public actor RoomClient {
             powerLevels: powerContent,
             creators: creators,
             creatorsInfinite: creatorsInfinite)
+        if let roomStateProvider,
+           let creatorSender,
+           let createContent
+        {
+            try? await roomStateProvider.setRoomPermissionState(
+                roomId,
+                createEventSender: creatorSender,
+                createEventContent: createContent,
+                powerLevels: powerContent)
+        }
         return RoomDetails(
             id: roomId,
             name: name,

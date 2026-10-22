@@ -30,7 +30,9 @@ struct RoomStateProviderTests {
             expected: RoomStateSummary(
                 membership: .join, isSpace: true,
                 spaceChildren: [RoomId(unchecked: "!child:x")],
-                powerLevels: ["users_default": .int(0)])),
+                powerLevels: ["users_default": .int(0)],
+                createEventSender: UserId(unchecked: "@alice:x"),
+                createEventContent: ["type": .string("m.space")])),
         SummaryCase(
             id: "leave-keeps-profile",
             expected: RoomStateSummary(membership: .join)),
@@ -201,6 +203,133 @@ struct RoomStateProviderTests {
                 $0.method == "GET" && $0.path.contains("/state")
             }
             #expect(stateFetches.isEmpty)
+        }
+    }
+
+    @Test("Room permissions use synced state without a full-state request")
+    func roomPermissionsUseSyncedState() async throws {
+        try await withHarness { harness in
+            let (rooms, _, _) = await harness.roomClient()
+            let roomId = try await rooms.create(CreateRoomRequest())
+            let container = try MatrixStore.makeInMemory()
+            let writer = MatrixStoreWriter(modelContainer: container)
+            let adapter = NormalizedRoomStateProvider(
+                modelContainer: container, writer: writer)
+            await rooms.setRoomStateProvider(adapter)
+            try await writer.apply(SyncDelta(
+                nextBatch: BatchToken("s1"),
+                joined: [roomId: JoinedRoomDelta(state: [
+                    stateEvent(
+                        type: "m.room.create", sender: "@alice:test",
+                        content: ["room_version": .string("12")]),
+                    stateEvent(
+                        type: "m.room.power_levels", sender: "@alice:test",
+                        content: ["users_default": .int(0)]),
+                ])]))
+
+            let permissions = try await rooms.roomPermissions(
+                roomId, localUser: UserId(unchecked: "@alice:test"))
+            #expect(permissions?.canRedactOther == true)
+            let stateFetches = await harness.requests.filter {
+                $0.method == "GET"
+                    && $0.path.hasPrefix("/_matrix/client/v3/rooms/")
+                    && $0.path.hasSuffix("/state")
+            }
+            #expect(stateFetches.isEmpty)
+        }
+    }
+
+    @Test("Full-state permission fallback warms the local cache")
+    func roomPermissionsFallbackWarmsCache() async throws {
+        try await withHarness { harness in
+            let (rooms, _, _) = await harness.roomClient()
+            let (roomState, _, _) = await harness.roomStateClient()
+            let roomId = try await rooms.create(CreateRoomRequest())
+            let container = try MatrixStore.makeInMemory()
+            let writer = MatrixStoreWriter(modelContainer: container)
+            let adapter = NormalizedRoomStateProvider(
+                modelContainer: container, writer: writer)
+            try await writer.apply(SyncDelta(
+                nextBatch: BatchToken("s1"),
+                joined: [roomId: JoinedRoomDelta()]))
+            await rooms.setRoomStateProvider(adapter)
+
+            try await roomState.sendStateEvent(
+                roomId, type: "m.room.create",
+                content: ["room_version": .string("12")])
+            try await roomState.sendStateEvent(
+                roomId, type: "m.room.power_levels",
+                content: ["users_default": .int(0)])
+
+            let userId = UserId(unchecked: "@alice:test")
+            let first = try await rooms.roomPermissions(roomId, localUser: userId)
+            let second = try await rooms.roomPermissions(roomId, localUser: userId)
+            #expect(first?.canRedactOther == true)
+            #expect(second == first)
+            let stateFetches = await harness.requests.filter {
+                $0.method == "GET"
+                    && $0.path.hasPrefix("/_matrix/client/v3/rooms/")
+                    && $0.path.hasSuffix("/state")
+            }
+            #expect(stateFetches.count == 1)
+        }
+    }
+
+    @Test("Room details refresh the permission cache")
+    func roomDetailsRefreshPermissionCache() async throws {
+        try await withHarness { harness in
+            let (rooms, _, _) = await harness.roomClient()
+            let (roomState, _, _) = await harness.roomStateClient()
+            let roomId = try await rooms.create(CreateRoomRequest())
+            let (writer, adapter) = try adapter()
+            try await writer.apply(SyncDelta(
+                nextBatch: BatchToken("s1"),
+                joined: [roomId: JoinedRoomDelta()]))
+            await rooms.setRoomStateProvider(adapter)
+            try await roomState.sendStateEvent(
+                roomId, type: "m.room.create",
+                content: ["room_version": .string("12")])
+            try await roomState.sendStateEvent(
+                roomId, type: "m.room.power_levels",
+                content: ["users_default": .int(0)])
+
+            let userId = UserId(unchecked: "@alice:test")
+            let details = try await rooms.roomDetails(roomId, localUser: userId)
+            #expect(details.permissions?.canRedactOther == true)
+            let cached = await adapter.roomState(roomId)
+            #expect(cached?.createEventContent?["room_version"]?.stringValue == "12")
+
+            let permissions = try await rooms.roomPermissions(roomId, localUser: userId)
+            #expect(permissions == details.permissions)
+            let stateFetches = await harness.requests.filter {
+                $0.method == "GET"
+                    && $0.path.hasPrefix("/_matrix/client/v3/rooms/")
+                    && $0.path.hasSuffix("/state")
+            }
+            #expect(stateFetches.count == 1)
+        }
+    }
+
+    @Test("Member endpoint results are stored by the provider")
+    func memberEndpointPersistsProfiles() async throws {
+        try await withHarness { harness in
+            let (rooms, _, _) = await harness.roomClient()
+            let roomId = try await rooms.create(CreateRoomRequest())
+            let (writer, adapter) = try adapter()
+            try await writer.apply(SyncDelta(
+                nextBatch: BatchToken("s1"),
+                joined: [roomId: JoinedRoomDelta()]))
+            await rooms.setRoomStateProvider(adapter)
+
+            let members = try await rooms.members(roomId)
+            #expect(!members.isEmpty)
+            let localMember = await adapter.member(
+                roomId, userId: UserId(unchecked: "@alice:test"))
+            #expect(localMember?.membership == .join)
+            let memberRequests = await harness.requests.filter {
+                $0.method == "GET" && $0.path.hasSuffix("/members")
+            }
+            #expect(memberRequests.count == 1)
         }
     }
 

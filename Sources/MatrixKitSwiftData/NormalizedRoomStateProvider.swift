@@ -23,6 +23,25 @@ public struct NormalizedRoomStateProvider: RoomStateProvider {
         try? reader.roomStateSummary(roomId)
     }
 
+    public func setRoomPermissionState(
+        _ roomId: RoomId,
+        createEventSender: UserId,
+        createEventContent: [String: AnyCodable],
+        powerLevels: [String: AnyCodable]?
+    ) async throws {
+        try await writer.setRoomPermissionState(
+            roomId,
+            createEventSender: createEventSender,
+            createEventContent: createEventContent,
+            powerLevels: powerLevels)
+    }
+
+    public func setRoomMemberProfiles(
+        _ members: [MemberInfo], for roomId: RoomId
+    ) async throws {
+        try await writer.mergeMemberProfiles(members, roomId: roomId)
+    }
+
     public func setHierarchy(
         _ children: [SpaceChild],
         directChildren: [SpaceChildEdge],

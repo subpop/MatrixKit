@@ -1,8 +1,11 @@
 #if canImport(SwiftData)
 import Foundation
 import MatrixKit
+import OSLog
 import SwiftData
 
+private nonisolated let messageSendSignposter = OSSignposter(
+    subsystem: "app.subpop.Relay.performance", category: "MessageSend")
 /// Store-backed room sends: local echoes, encrypted/plaintext dispatch,
 /// reactions, edits, redacts, pins, and read markers.
 ///
@@ -79,11 +82,13 @@ public actor MessageSender {
     /// the echo failed instead of throwing, and sync confirms the echo
     /// when the server echoes the transaction ID back. Returns the echo
     /// event ID, or nil when logged out.
+    /// `onEchoStaged` fires after the local store write and before transport.
     @discardableResult
     public func sendText(
         _ roomId: RoomId, _ body: String,
         relatesTo: RelatesTo? = nil, mentions: Mentions? = nil,
-        transactionId: TransactionId = .random()
+        transactionId: TransactionId = .random(),
+        onEchoStaged: (@Sendable () -> Void)? = nil
     ) async -> EventId? {
         guard let localUser else { return nil }
         let content = MessageContent.markdown(
@@ -92,9 +97,23 @@ public actor MessageSender {
             roomId: roomId, sender: localUser,
             type: EventType.roomMessage.rawValue, content: content,
             transactionId: transactionId)
+        let echoState = messageSendSignposter.beginInterval(
+            "stageTextEcho", id: messageSendSignposter.makeSignpostID())
         try? await writer.stageEcho(echo, roomId: roomId, transactionId: transactionId)
+        messageSendSignposter.endInterval("stageTextEcho", echoState)
+        onEchoStaged?()
+
+        let encryptionState = messageSendSignposter.beginInterval(
+            "readRoomEncryptionState", id: messageSendSignposter.makeSignpostID())
+        let encrypted = isEncrypted(roomId)
+        messageSendSignposter.endInterval("readRoomEncryptionState", encryptionState)
+
         do {
-            if isEncrypted(roomId) {
+            let transportState = messageSendSignposter.beginInterval(
+                "sendTextTransport", id: messageSendSignposter.makeSignpostID(),
+                "encrypted \(encrypted)")
+            defer { messageSendSignposter.endInterval("sendTextTransport", transportState) }
+            if encrypted {
                 try await ensureShared(roomId)
                 _ = try await roomCrypto.sendEncryptedContent(
                     roomId, content, deviceId: ownDeviceId,
@@ -117,7 +136,16 @@ public actor MessageSender {
         _ roomId: RoomId, to eventId: EventId, body: String,
         mentions: Mentions? = nil, transactionId: TransactionId = .random()
     ) async throws(MatrixError) -> EventId {
-        if isEncrypted(roomId) {
+        let encryptionState = messageSendSignposter.beginInterval(
+            "readRoomEncryptionState", id: messageSendSignposter.makeSignpostID())
+        let encrypted = isEncrypted(roomId)
+        messageSendSignposter.endInterval("readRoomEncryptionState", encryptionState)
+
+        let transportState = messageSendSignposter.beginInterval(
+            "sendReplyTransport", id: messageSendSignposter.makeSignpostID(),
+            "encrypted \(encrypted)")
+        defer { messageSendSignposter.endInterval("sendReplyTransport", transportState) }
+        if encrypted {
             try await ensureShared(roomId)
             return try await roomCrypto.sendEncryptedContent(
                 roomId,
@@ -286,11 +314,11 @@ public actor MessageSender {
             if let transactionId = await writer.echoTransactionId(for: existing) {
                 // Unconfirmed echo: drop it and suppress the in-flight
                 // send's confirmation so no zombie badge arrives later.
-                try? await writer.cancelEcho(transactionId: transactionId)
+                _ = try? await writer.cancelEcho(transactionId: transactionId)
                 await writer.suppressTransaction(transactionId)
                 return
             }
-            try? await messages.redact(roomId, eventId: existing)
+            _ = try? await messages.redact(roomId, eventId: existing)
             return
         }
         let transactionId = TransactionId.random()
@@ -306,7 +334,7 @@ public actor MessageSender {
         } catch {
             // Send failed: drop the staged badge rather than leaving a
             // zombie reaction no sync will ever confirm.
-            try? await writer.cancelEcho(transactionId: transactionId)
+            _ = try? await writer.cancelEcho(transactionId: transactionId)
         }
     }
 
@@ -359,7 +387,7 @@ public actor MessageSender {
                     content: content, transactionId: transactionId)
             }
         } catch {
-            try? await writer.cancelEcho(transactionId: transactionId)
+            _ = try? await writer.cancelEcho(transactionId: transactionId)
         }
     }
 
