@@ -19,6 +19,21 @@ public struct EncryptionStatus: Hashable, Sendable {
     }
 }
 
+/// A key backup this device just created.
+public struct NewKeyBackup: Hashable, Sendable {
+    /// The backup version on the server.
+    public var version: String
+    /// The backup private key as a recovery key (`Es…`), for the user to
+    /// keep. It is the only way to restore on a device that cannot ask
+    /// another device for the key.
+    public var recoveryKey: String
+
+    public init(version: String, recoveryKey: String) {
+        self.version = version
+        self.recoveryKey = recoveryKey
+    }
+}
+
 /// How this device stands with the account's server-side key backup, for
 /// settings UI.
 public struct KeyBackupStatus: Hashable, Sendable {

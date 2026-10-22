@@ -1121,6 +1121,26 @@ public final class MatrixClient {
         }
     }
 
+    /// Create the account's first key backup: a fresh key, a version
+    /// signed by this device (and the master key, when held), the key
+    /// kept on this device, and an upload of the sessions held. Refuses
+    /// when a backup already exists, since a new version would orphan
+    /// it. The key is not stored in secret storage, so the returned
+    /// recovery key is what restores it elsewhere, unless a verified
+    /// device shares the key.
+    public func setUpKeyBackup() async throws(MatrixError) -> NewKeyBackup {
+        guard try await backup.backupInfo() == nil else {
+            throw .recoveryFailed("This account already has a key backup")
+        }
+        let privateKey = BackupCrypto.generatePrivateKey()
+        let version = try await createKeyBackup(privateKey: privateKey)
+        await secrets.cacheBackupKey(privateKey)
+        scheduleBackupUpload()
+        return NewKeyBackup(
+            version: version,
+            recoveryKey: BackupCrypto.recoveryKey(privateKey: privateKey))
+    }
+
     /// Where this device stands with the account's key backup. Throws
     /// when the server cannot be reached.
     public func keyBackupStatus() async throws(MatrixError) -> KeyBackupStatus {

@@ -692,6 +692,51 @@ struct FacadeComplianceTests {
         }
     }
 
+    @Test("Setting up a key backup creates a trusted backup and keeps its key")
+    @MainActor
+    func setUpKeyBackup() async throws {
+        try await withHarness { harness in
+            let client = await client(harness)
+            try await client.olm.configure(
+                identity: DeviceIdentityKeys.generate(),
+                userId: UserId(unchecked: "@alice:test"),
+                deviceId: DeviceId("ALICEDEVICE"))
+            let room = RoomId(unchecked: "!room:test")
+            let session = MegolmSession.create()
+            _ = try await client.roomCrypto.importSession(
+                roomId: room, sessionId: session.id, export: session.export(),
+                origin: testOrigin)
+
+            let created = try await client.setUpKeyBackup()
+            #expect(created.recoveryKey.hasPrefix("Es"))
+
+            // The recovery key is the backup's private key, which this
+            // device also holds, and the backup is one it trusts.
+            let privateKey = try BackupCrypto.parseRecoveryKey(created.recoveryKey)
+            let info = try #require(try await client.backup.backupInfo())
+            #expect(info.version == created.version)
+            #expect(info.accepts(privateKey: privateKey))
+            #expect(await client.secrets.backupKey() == privateKey)
+            let status = try await client.keyBackupStatus()
+            #expect(status.exists && status.isTrusted && status.hasKey)
+            #expect(status.pendingSessions == 1)
+
+            // Held sessions go up and restore with the recovery key.
+            try await client.backUpKeysNow()
+            let restored = try await client.backup.downloadSession(
+                roomId: room, sessionId: session.id, version: created.version,
+                privateKey: privateKey)
+            #expect(restored.origin == testOrigin)
+
+            // A backup is never replaced.
+            await #expect(throws: MatrixError.self) {
+                try await client.setUpKeyBackup()
+            }
+            #expect(try await client.backup.backupInfo()?.version == created.version)
+            try? await client.transport.shutdown()
+        }
+    }
+
     @Test("Backup status counts sessions and Back Up Now uploads them")
     @MainActor
     func backupStatusAndBackUpNow() async throws {
