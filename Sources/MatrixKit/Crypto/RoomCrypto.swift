@@ -134,11 +134,12 @@ public actor RoomCrypto {
     /// `shareRequestedSession`). In-memory only: after a restart the
     /// export fallback applies.
     private var receivedBlobs: [String: ReceivedShare] = [:]
-    /// User IDs each room's current outbound session has been shared
-    /// with, by room ID. Cleared by `rotateOutbound(_:)`; empty after
-    /// launch (fresh outbound), so the first `ensureShared` re-shares
+    /// Device IDs each room's current outbound session has been shared
+    /// with, by room ID then user ID (a user with no devices maps to an
+    /// empty set). Cleared by `rotateOutbound(_:)`; empty after launch
+    /// (fresh outbound), so the first `ensureShared` re-shares
     /// post-restart.
-    private var sharedWith: [String: Set<String>] = [:]
+    private var sharedWith: [String: [String: Set<String>]] = [:]
     /// When each room's current outbound session was created.
     private var outboundCreated: [String: Date] = [:]
     /// Rotation limits per room ID, loaded on first use.
@@ -516,29 +517,46 @@ public actor RoomCrypto {
         roomId: RoomId, users: [UserId], excludingDevice: DeviceId? = nil
     ) async throws(MatrixError) {
         for user in users {
-            let ids: [String]
-            do {
-                ids = try await sharer.deviceIds(for: user)
-            } catch {
-                MatrixKitLog.crypto.warning(
-                    "RoomCrypto skipping key share: device query failed user=\(user.value, privacy: .private(mask: .hash)) error=\(error, privacy: .public)"
-                )
+            guard let ids = await deviceIds(of: user, excluding: excludingDevice) else {
                 continue
             }
-            let devices = ids
-                .filter { $0 != excludingDevice?.value }
-                .map { DeviceId($0) }
-            guard !devices.isEmpty else {
-                MatrixKitLog.crypto.warning(
-                    "RoomCrypto skipping key share: no devices user=\(user.value, privacy: .private(mask: .hash))"
-                )
-                sharedWith[roomId.value, default: []].insert(user.value)
-                continue
-            }
-            try await shareCurrentSession(
-                roomId: roomId, to: user, devices: devices)
-            sharedWith[roomId.value, default: []].insert(user.value)
+            try await share(roomId: roomId, to: user, devices: ids)
         }
+    }
+
+    /// Device IDs for `user` except `excluded`, or nil (logged) when the
+    /// lookup fails.
+    private func deviceIds(
+        of user: UserId, excluding excluded: DeviceId?
+    ) async -> Set<String>? {
+        do {
+            return Set(try await sharer.deviceIds(for: user))
+                .subtracting([excluded?.value].compactMap { $0 })
+        } catch {
+            MatrixKitLog.crypto.warning(
+                "RoomCrypto skipping key share: device query failed user=\(user.value, privacy: .private(mask: .hash)) error=\(error, privacy: .public)"
+            )
+            return nil
+        }
+    }
+
+    /// Share the current session with `devices` of `user` and record
+    /// them as reached. A user without devices is recorded too, so the
+    /// lookup is not repeated on every send.
+    private func share(
+        roomId: RoomId, to user: UserId, devices: Set<String>
+    ) async throws(MatrixError) {
+        guard !devices.isEmpty else {
+            MatrixKitLog.crypto.warning(
+                "RoomCrypto skipping key share: no devices user=\(user.value, privacy: .private(mask: .hash))"
+            )
+            sharedWith[roomId.value, default: [:]][user.value, default: []] = []
+            return
+        }
+        try await shareCurrentSession(
+            roomId: roomId, to: user, devices: devices.sorted().map { DeviceId($0) })
+        sharedWith[roomId.value, default: [:]][user.value, default: []]
+            .formUnion(devices)
     }
 
     /// Share the room's current outbound session (created if needed) with
@@ -662,26 +680,38 @@ public actor RoomCrypto {
     }
 
     /// Prepare the room's outbound session for the next send: retire it
-    /// when a user it was shared with is no longer in `users` or it has
-    /// reached the room's rotation limits, then share the (possibly new)
-    /// session with every user in `users` it has not reached. Call
-    /// before every send: a session that rotates mid-send is unshared.
-    /// Backs the `MatrixClient.sendEncryptedContent` convenience.
+    /// when a user or device it was shared with is gone or it has reached
+    /// the room's rotation limits, then share the (possibly new) session
+    /// with every device of `users` it has not reached. Call before
+    /// every send: a session that rotates mid-send is unshared. Backs the
+    /// `MatrixClient.sendEncryptedContent` convenience.
     ///
-    /// A user who joined since the last send gets the session from its
-    /// current position, so earlier messages stay unreadable to them.
+    /// A user or device that appeared since the last send gets the
+    /// session from its current position, so earlier messages stay
+    /// unreadable to them. A user whose device lookup fails is left
+    /// alone until the next send.
     public func ensureShared(
         roomId: RoomId, users: [UserId], excludingDevice: DeviceId? = nil
     ) async throws(MatrixError) {
         let key = roomId.value
-        if await shouldRotate(roomId: roomId, members: Set(users.map(\.value))) {
+        var current: [String: Set<String>] = [:]
+        for user in users {
+            if let ids = await deviceIds(of: user, excluding: excludingDevice) {
+                current[user.value] = ids
+            }
+        }
+        if await shouldRotate(
+            roomId: roomId, members: Set(users.map(\.value)), devices: current)
+        {
             rotateOutbound(roomId: roomId)
         }
-        let reached = sharedWith[key] ?? []
-        let pending = users.filter { !reached.contains($0.value) }
-        guard !pending.isEmpty else { return }
-        try await shareRoomKey(
-            roomId: roomId, users: pending, excludingDevice: excludingDevice)
+        for user in users {
+            guard let ids = current[user.value] else { continue }
+            let reached = sharedWith[key]?[user.value]
+            let pending = ids.subtracting(reached ?? [])
+            guard reached == nil || !pending.isEmpty else { continue }
+            try await share(roomId: roomId, to: user, devices: pending)
+        }
     }
 
     /// Drop the outbound session so the next send starts a fresh one
@@ -703,13 +733,21 @@ public actor RoomCrypto {
     }
 
     /// Whether the room's outbound session must be retired before the
-    /// next send: a user it reached has left, or it is past the room's
-    /// age or message limit.
-    private func shouldRotate(roomId: RoomId, members: Set<String>) async -> Bool {
+    /// next send: a user or device it reached is gone (`devices` holds
+    /// the current devices of users whose lookup succeeded), or it is
+    /// past the room's age or message limit.
+    private func shouldRotate(
+        roomId: RoomId, members: Set<String>, devices: [String: Set<String>]
+    ) async -> Bool {
         let key = roomId.value
         guard let session = outbound[key] else { return false }
-        if let reached = sharedWith[key], !reached.isSubset(of: members) {
-            return true
+        if let reached = sharedWith[key] {
+            if !Set(reached.keys).isSubset(of: members) { return true }
+            for (user, reachedDevices) in reached {
+                if let present = devices[user], !reachedDevices.isSubset(of: present) {
+                    return true
+                }
+            }
         }
         let policy = await rotationPolicy(for: roomId)
         let age = now().timeIntervalSince(outboundCreated[key] ?? now())

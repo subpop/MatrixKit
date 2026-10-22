@@ -220,6 +220,74 @@ struct RoomCryptoTests {
         })
     }
 
+    @Test("a new device of a member gets the current session, only once")
+    func sharesWithNewDevices() async throws {
+        let (room, aliceUser, bobUser) = try roomFixture()
+        let (alice, _, aliceSharer, aliceSender) = try wirePair()
+        await aliceSharer.setDevices([bobUser.value: ["BOB"], aliceUser.value: ["A1", "A2"]])
+        let first = try await sendRotating(
+            alice, aliceSender, room: room, users: [aliceUser, bobUser])
+        let before = await aliceSharer.shares.count
+
+        // Bob and Alice each sign in on a new device.
+        await aliceSharer.setDevices([
+            bobUser.value: ["BOB", "BOB2"], aliceUser.value: ["A1", "A2", "A3"],
+        ])
+        let second = try await sendRotating(
+            alice, aliceSender, room: room, users: [aliceUser, bobUser])
+        #expect(second == first)
+        let added = await aliceSharer.shares.dropFirst(before)
+        #expect(Set(added.map { "\($0.user)/\($0.devices.joined())" })
+            == ["\(bobUser.value)/BOB2", "\(aliceUser.value)/A3"])
+        #expect(added.allSatisfy { $0.content["session_id"]?.stringValue == first })
+
+        // The next send has nothing new to share.
+        _ = try await sendRotating(
+            alice, aliceSender, room: room, users: [aliceUser, bobUser])
+        #expect(await aliceSharer.shares.count == before + 2)
+    }
+
+    @Test("our own current device is never a share target")
+    func skipsOwnDevice() async throws {
+        let (room, aliceUser, _) = try roomFixture()
+        let (alice, _, aliceSharer, _) = try wirePair()
+        await aliceSharer.setDevices([aliceUser.value: ["A1", "A2"]])
+        try await alice.ensureShared(
+            roomId: room, users: [aliceUser], excludingDevice: DeviceId("A1"))
+        let shares = await aliceSharer.shares
+        #expect(shares.map(\.devices) == [["A2"]])
+        try await alice.ensureShared(
+            roomId: room, users: [aliceUser], excludingDevice: DeviceId("A1"))
+        #expect(await aliceSharer.shares.count == 1)
+    }
+
+    @Test("a removed device retires the session")
+    func rotatesWhenDeviceRemoved() async throws {
+        let (room, _, bobUser) = try roomFixture()
+        let (alice, _, aliceSharer, aliceSender) = try wirePair()
+        await aliceSharer.setDevices([bobUser.value: ["BOB", "BOB2"]])
+        let first = try await sendRotating(alice, aliceSender, room: room, users: [bobUser])
+        let before = await aliceSharer.shares.count
+        await aliceSharer.setDevices([bobUser.value: ["BOB"]])
+        let second = try await sendRotating(alice, aliceSender, room: room, users: [bobUser])
+        #expect(second != first)
+        let reshared = await aliceSharer.shares.dropFirst(before)
+        #expect(reshared.map(\.devices) == [["BOB"]])
+        #expect(reshared.allSatisfy { $0.content["session_id"]?.stringValue == second })
+    }
+
+    @Test("a failed device lookup neither rotates nor reshares")
+    func lookupFailureLeavesSessionAlone() async throws {
+        let (room, _, bobUser) = try roomFixture()
+        let (alice, _, aliceSharer, aliceSender) = try wirePair()
+        await aliceSharer.setDevices([bobUser.value: ["BOB"]])
+        let first = try await sendRotating(alice, aliceSender, room: room, users: [bobUser])
+        await aliceSharer.failNextDeviceQueries()
+        let second = try await sendRotating(alice, aliceSender, room: room, users: [bobUser])
+        #expect(second == first)
+        #expect(await aliceSharer.shares.count == 1)
+    }
+
     @Test("sessions rotate at the default message limit")
     func rotatesAtDefaultMessageLimit() async throws {
         let (room, _, bobUser) = try roomFixture()
