@@ -934,20 +934,70 @@ struct RoomCryptoTests {
                 "ciphertext": .string(
                     Primitives.base64UnpaddedEncode(wireData)),
             ])
-        // Twice: the second sighting proves the cooldown (or the silent
-        // paths) rather than re-firing immediately.
+        // Twice, the second time as another event carrying the same
+        // ciphertext: the second sighting proves the cooldown (or the
+        // silent paths) rather than re-firing immediately, and a held
+        // key turns it into a replay.
+        var repeated = wireEvent
+        repeated.eventId = EventId(unchecked: "$e-repeat")
         _ = await receiver.decryptRoomEvent(wireEvent, in: room)
-        _ = await receiver.decryptRoomEvent(wireEvent, in: room)
+        _ = await receiver.decryptRoomEvent(repeated, in: room)
         #expect(box.count == c.expectRequests, "row \(c.id)")
         let failure = await receiver.decryptionFailure(
             roomId: room, eventId: wireEvent.eventId)
+        let repeatFailure = await receiver.decryptionFailure(
+            roomId: room, eventId: repeated.eventId)
         if c.heldIndex == 5 && c.wireIndex == 2 {
             #expect(failure?.reason == .sessionTooOld, "row \(c.id)")
-        } else if c.heldIndex == 0 {
-            #expect(failure?.reason == .replay, "row \(c.id)")
         } else {
             #expect(failure == nil, "row \(c.id)")
+            #expect(repeatFailure?.reason == .replay, "row \(c.id)")
         }
+    }
+
+    @Test("an event claiming an index another event decrypted is a replay")
+    func replayedIndexRejected() async throws {
+        let (room, aliceUser, _) = try roomFixture()
+        var origin = MegolmSession.create()
+        let blob = try origin.sessionKey()
+        let wire = try origin.encrypt(megolmPayload("once", room))
+        let receiver = RoomCrypto(sharer: FakeSharer(), sender: FakeRoomSender())
+        await receiver.setLocalUserId(aliceUser)
+        let box = SeenBox()
+        await receiver.setUnknownSessionHandler({ box.append($0) })
+        await receiver.receiveRoomKey(BasicEvent(
+            type: RoomCrypto.roomKeyType, sender: aliceUser,
+            content: [
+                "algorithm": .string(RoomCrypto.megolmAlgorithm),
+                "room_id": .string(room.value),
+                "session_id": .string(origin.id),
+                "session_key": .string(Primitives.base64UnpaddedEncode(blob)),
+            ]))
+        func event(_ id: String, ts: Int) -> MessageEvent {
+            MessageEvent(
+                type: "m.room.encrypted", eventId: EventId(unchecked: id),
+                sender: UserId(unchecked: "@bob:x"), roomId: room, originServerTs: ts,
+                content: [
+                    "session_id": .string(origin.id),
+                    "ciphertext": .string(Primitives.base64UnpaddedEncode(wire)),
+                ])
+        }
+        let original = event("$orig", ts: 5)
+        #expect(await receiver.decryptRoomEvent(original, in: room) != nil)
+        // The same event decrypts again: refreshing a timeline is not a replay.
+        #expect(await receiver.decryptRoomEvent(original, in: room) != nil)
+        // The same ciphertext in another event, or the same event at
+        // another time, is.
+        let copy = event("$copy", ts: 5)
+        #expect(await receiver.decryptRoomEvent(copy, in: room) == nil)
+        #expect(await receiver.decryptionFailure(
+            roomId: room, eventId: copy.eventId)?.reason == .replay)
+        let retimed = event("$orig", ts: 6)
+        #expect(await receiver.decryptRoomEvent(retimed, in: room) == nil)
+        // The rejected copies left the session intact, and no key request
+        // is sent for a failure no peer can fix.
+        #expect(await receiver.decryptRoomEvent(original, in: room) != nil)
+        #expect(box.count == 0)
     }
 
     @Test("shareRequestedSession answers the requested session only")

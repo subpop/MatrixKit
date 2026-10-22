@@ -32,7 +32,6 @@ public struct MegolmSession: Sendable {
     private let initialParts: [Data]
     private let signingKey: SigningKey?
     private let verifyKey: Data
-    private var received: Set<UInt32> = []
 
     private init(
         counter: UInt32, parts: [Data], signingKey: SigningKey?,
@@ -159,11 +158,20 @@ public struct MegolmSession: Sendable {
 
     /// Decrypt one wire message (payload + MAC + signature). Any index at
     /// or beyond the position the session was imported at decrypts, in
-    /// any order; earlier indices are rejected (`indexTooOld`), as are
-    /// replays of an already-decrypted index.
+    /// any order, and as often as asked; earlier indices are rejected
+    /// (`indexTooOld`). Detecting a replayed index is the caller's job:
+    /// it needs the event the message arrived in (see `decryptMessage`).
     public mutating func decrypt(
         _ message: Data
     ) throws(CryptoError) -> Data {
+        try decryptMessage(message).plaintext
+    }
+
+    /// `decrypt(_:)` that also reports the message index the ciphertext
+    /// carries, so callers can bind it to the event it arrived in.
+    public mutating func decryptMessage(
+        _ message: Data
+    ) throws(CryptoError) -> (plaintext: Data, index: UInt32) {
         guard message.count >= 1 + 8 + 64 else {
             throw .malformedMessage("Megolm message too short")
         }
@@ -180,9 +188,6 @@ public struct MegolmSession: Sendable {
         let payload = signed.prefix(signed.count - 8)
         let mac = signed.suffix(8)
         let (index, ciphertext) = try Self.decodePayload(payload)
-        guard !received.contains(index) else {
-            throw .replayDetected
-        }
         guard index >= UInt64(initialCounter) else {
             throw .indexTooOld
         }
@@ -204,9 +209,10 @@ public struct MegolmSession: Sendable {
             self.parts = parts
             counter = index
         }
-        received.insert(index)
-        return try AESCBC.decrypt(
-            key: keys.aes, iv: keys.iv, ciphertext: ciphertext)
+        return (
+            try AESCBC.decrypt(
+                key: keys.aes, iv: keys.iv, ciphertext: ciphertext),
+            index)
     }
 
     // MARK: - Sharing / export

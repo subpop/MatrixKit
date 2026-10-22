@@ -101,6 +101,7 @@ public actor RoomCrypto {
 
     private static let storeService = "MatrixKit.RoomCrypto"
     private static let decryptionFailureLimit = 10_000
+    private static let decryptedMessageLimit = 50_000
     private static let keyRequestCooldown: TimeInterval = 120
     private static let maxKeyRequestAttempts = 3
 
@@ -157,6 +158,16 @@ public actor RoomCrypto {
     /// Decryption diagnostics keyed by `"roomId|eventId"`; a successful
     /// retry removes its prior failure. Capped for long-running syncs.
     private var decryptionFailures: [String: DecryptionFailure] = [:]
+    /// The event each Megolm message index was decrypted for, by
+    /// `"roomId|sessionId|index"`. A later event claiming an index
+    /// that decrypted for another event (or at another timestamp) is a
+    /// replay. In-memory and capped: replays of messages decrypted in an
+    /// earlier launch, or evicted since, go undetected.
+    private var decryptedMessages: [String: DecryptedMessage] = [:]
+    private struct DecryptedMessage {
+        var eventId: EventId
+        var originServerTs: Int
+    }
     /// `"roomId|sessionId"` keys already tried against the key backup.
     /// Never re-armed within a launch: backup content is static per
     /// version, so a miss stays a miss. Capped like `requestedSessions`.
@@ -980,13 +991,13 @@ public actor RoomCrypto {
             return nil
         }
         let plaintext: Data
+        let index: UInt32
         do {
-            plaintext = try session.decrypt(wire)
+            (plaintext, index) = try session.decryptMessage(wire)
         } catch {
             let reason: DecryptionFailureReason
             switch error {
             case .indexTooOld: reason = .sessionTooOld
-            case .replayDetected: reason = .replay
             default: reason = .cryptoFailure
             }
             recordDecryptionFailure(
@@ -1001,8 +1012,8 @@ public actor RoomCrypto {
             // A held-but-too-old session may still be recoverable: a
             // peer holding an earlier state (or the key backup) can
             // fill the gap, so surface one key request like an unknown
-            // session. Replays and bad crypto are local-only failures
-            // that no peer can fix — no request.
+            // session. Bad crypto is a local-only failure that no peer
+            // can fix — no request.
             if event.sender != localUserId,
                 error == .indexTooOld,
                 claimUnknownSession(roomId: roomId, sessionId: sessionId)
@@ -1011,6 +1022,22 @@ public actor RoomCrypto {
                     roomId: roomId, sessionId: sessionId,
                     sender: event.sender))
             }
+            return nil
+        }
+        // The message authenticated, so its index is trustworthy: the
+        // same index arriving in another event (or at another time) is a
+        // replay. Return before storing the advanced session copy.
+        let messageKey = "\(roomId.value)|\(sessionId)|\(index)"
+        if let seen = decryptedMessages[messageKey],
+            seen.eventId != event.eventId
+                || seen.originServerTs != event.originServerTs
+        {
+            recordDecryptionFailure(
+                DecryptionFailure(reason: .replay, sessionId: sessionId),
+                for: failureKey)
+            MatrixKitLog.crypto.debug(
+                "RoomCrypto cannot decrypt: replayed message index sender=\(event.sender.value, privacy: .private(mask: .hash)) session=\(String(sessionId.prefix(8)), privacy: .private(mask: .hash)) event=\(event.eventId.value, privacy: .private(mask: .hash)) index=\(index, privacy: .public)"
+            )
             return nil
         }
         guard
@@ -1035,6 +1062,13 @@ public actor RoomCrypto {
             return nil
         }
         decryptionFailures[failureKey] = nil
+        decryptedMessages[messageKey] = DecryptedMessage(
+            eventId: event.eventId, originServerTs: event.originServerTs)
+        if decryptedMessages.count > Self.decryptedMessageLimit,
+            let keyToEvict = decryptedMessages.keys.first(where: { $0 != messageKey })
+        {
+            decryptedMessages[keyToEvict] = nil
+        }
         inbound["\(roomId.value)|\(sessionId)"] = session
         await markPersistDirty()
         return MessageEvent(

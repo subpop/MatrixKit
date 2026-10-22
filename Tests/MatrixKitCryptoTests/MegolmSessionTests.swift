@@ -27,7 +27,7 @@ struct MegolmSessionTests {
         #expect(inbound.counter == 4)
     }
 
-    @Test("Skipped-forward then late and replayed messages")
+    @Test("Skipped-forward, late, and repeated messages")
     func gapsAndReplays() throws {
         var outbound = MegolmSession.create()
         let blob = try outbound.sessionKey()
@@ -37,13 +37,10 @@ struct MegolmSessionTests {
         #expect(try inbound.decrypt(bodies[2]) == Data("m2".utf8))
         // Index 1 arrives late but is still at or beyond the import position.
         #expect(try inbound.decrypt(bodies[1]) == Data("m1".utf8))
-        // Index 2 was already decrypted.
-        do {
-            _ = try inbound.decrypt(bodies[2])
-            Issue.record("replay should throw")
-        } catch let error {
-            #expect(error == .replayDetected)
-        }
+        // A message decrypts again: spotting a replayed index needs the
+        // event it arrived in, which the caller holds.
+        #expect(try inbound.decrypt(bodies[2]) == Data("m2".utf8))
+        #expect(try inbound.decryptMessage(bodies[2]).index == 2)
     }
 
     enum MessageTamper: Sendable {

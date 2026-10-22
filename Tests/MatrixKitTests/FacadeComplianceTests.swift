@@ -566,9 +566,6 @@ struct FacadeComplianceTests {
             #expect(await client.roomCrypto.decryptRoomEvent(wire, in: room) == nil)
             // Recovery runs async off the decrypt sighting: the backup
             // fetch imports the early state, and the wire decrypts.
-            // Capture the healed event: a successful decrypt advances
-            // the ratchet, so re-decrypting the same wire afterwards
-            // correctly reports a replay.
             final class HealedBox: @unchecked Sendable {
                 private let lock = NSLock()
                 private var event: MessageEvent?
