@@ -42,6 +42,8 @@ public actor SecretShare {
     private let store: CrossSigningStore?
     private let backupKeyStore: BackupKeyStore?
     private let olm: OlmConnector?
+    /// Our own user's published keys for one device, nil when unknown.
+    private let deviceLookup: @Sendable (UserId, String) async -> DeviceKeys?
 
     /// `requestId` → secret name for requests we sent.
     private var pending: [String: String] = [:]
@@ -59,7 +61,8 @@ public actor SecretShare {
         crossSigning: CrossSigning,
         store: CrossSigningStore?,
         backupKeyStore: BackupKeyStore? = nil,
-        olm: OlmConnector? = nil
+        olm: OlmConnector? = nil,
+        deviceLookup: (@Sendable (UserId, String) async -> DeviceKeys?)? = nil
     ) {
         self.sender = sender
         self.session = session
@@ -67,6 +70,10 @@ public actor SecretShare {
         self.store = store
         self.backupKeyStore = backupKeyStore
         self.olm = olm
+        self.deviceLookup = deviceLookup ?? { [crossSigning] user, deviceId in
+            let response = try? await crossSigning.fetchKeys(users: [user])
+            return response?.deviceKeys[user.value]?[deviceId]
+        }
     }
 
     /// Outstanding secret requests (for polling loops).
@@ -232,8 +239,9 @@ public actor SecretShare {
     /// Olm-encrypted to the requesting device. Cross-signing halves
     /// come from the held keys; `m.megolm_backup.v1` comes from the
     /// cached key (see `cacheBackupKey`). Silent no-op without a
-    /// configured `OlmConnector`, for requests from other users, for
-    /// unknown secret names, when we don't hold the secret, or for
+    /// configured `OlmConnector`, for requests from other users or from
+    /// devices our self-signing key has not verified, for unknown secret
+    /// names, when we don't hold the secret, or for
     /// `request_cancellation` events.
     /// Requests stay plaintext per spec; only the secret-bearing
     /// answers are encrypted.
@@ -258,6 +266,18 @@ public actor SecretShare {
                 let half = Self.half(named: request.name, in: keys)
             else { return }
             secret = half
+        }
+        // Only the account's own cross-signing-verified devices may
+        // receive secrets: another device of the account that nobody
+        // has verified could be an attacker's.
+        guard
+            let device = await deviceLookup(from, request.requestingDeviceId),
+            await crossSigning.isDeviceVerified(device)
+        else {
+            MatrixKitLog.crypto.debug(
+                "SecretShare ignoring request from unverified device name=\(request.name, privacy: .public)"
+            )
+            return
         }
         try? await olm.sendEncrypted(
             eventType: "m.secret.send",

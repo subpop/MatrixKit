@@ -6,6 +6,52 @@ import MatrixKitTesting
 
 @testable import MatrixKit
 
+/// Stands in for the account's published device keys: ids in `verified`
+/// carry a signature from the attached holder's self-signing key, ids in
+/// `unverified` are published without one, others are unknown.
+private final class DeviceDirectory: @unchecked Sendable {
+    private let lock = NSLock()
+    private var crossSigning: CrossSigning?
+    private let verified: Set<String>
+    private let unverified: Set<String>
+
+    init(verified: Set<String> = [], unverified: Set<String> = []) {
+        self.verified = verified
+        self.unverified = unverified
+    }
+
+    func attach(_ crossSigning: CrossSigning) {
+        lock.withLock { self.crossSigning = crossSigning }
+    }
+
+    func lookup(_ user: UserId, _ id: String) async -> DeviceKeys? {
+        guard verified.contains(id) || unverified.contains(id) else { return nil }
+        var device = DeviceKeys(
+            userId: user.value, deviceId: id,
+            keys: ["curve25519:\(id)": "curve", "ed25519:\(id)": "ed"])
+        guard verified.contains(id) else { return device }
+        let holder = lock.withLock { crossSigning }
+        guard
+            let exported = await holder?.exportPrivateKeys(),
+            let bytes = Primitives.base64UnpaddedDecode(exported.selfSigning),
+            let key = try? SigningKey.restore(privateKeyBytes: bytes)
+        else { return device }
+        var payload: [String: Any] = [:]
+        payload["user_id"] = device.userId
+        payload["device_id"] = device.deviceId
+        payload["algorithms"] = device.algorithms
+        payload["keys"] = device.keys
+        guard
+            let canonical = try? CryptoPrimitives.canonicalJSON(payload),
+            let signature = try? key.sign(canonical)
+        else { return device }
+        device.signatures[user.value] = [
+            "ed25519:\(key.publicKeyBase64)": Primitives.base64UnpaddedEncode(signature)
+        ]
+        return device
+    }
+}
+
 /// Exercise `SecretShare` request/receive/autoload against `FakeSender`.
 @Suite("SecretShare")
 struct SecretShareTests {
@@ -14,7 +60,8 @@ struct SecretShareTests {
         backupKeyStore: BackupKeyStore? = nil,
         userId: UserId = UserId(unchecked: "@a:b"),
         deviceId: DeviceId = DeviceId("D"),
-        olm: OlmConnector? = nil
+        olm: OlmConnector? = nil,
+        devices: DeviceDirectory? = nil
     ) -> (share: SecretShare, sender: FakeSender, crossSigning: CrossSigning, transport: MatrixTransport) {
         let transport = MatrixTransport(
             homeserver: URL(string: "https://example.com")!)
@@ -24,9 +71,15 @@ struct SecretShareTests {
             accessToken: "t")
         let crossSigning = CrossSigning(transport: transport, session: session)
         let sender = FakeSender()
+        var lookup: (@Sendable (UserId, String) async -> DeviceKeys?)?
+        if let devices {
+            lookup = { @Sendable user, id in await devices.lookup(user, id) }
+        }
         let share = SecretShare(
             sender: sender, session: session, crossSigning: crossSigning,
-            store: store, backupKeyStore: backupKeyStore, olm: olm)
+            store: store, backupKeyStore: backupKeyStore, olm: olm,
+            deviceLookup: lookup)
+        devices?.attach(crossSigning)
         return (share, sender, crossSigning, transport)
     }
 
@@ -365,7 +418,7 @@ struct SecretShareTests {
 
         let (share, _, holderKeys, transport) = makeShare(
             userId: holderUser, deviceId: DeviceId("HOLDER"),
-            olm: holderOlm)
+            olm: holderOlm, devices: DeviceDirectory(verified: ["REQ"]))
         _ = await holderKeys.generate()
         let exported = try #require(await holderKeys.exportPrivateKeys())
 
@@ -411,7 +464,7 @@ struct SecretShareTests {
 
         let (holderShare, _, holderKeys, holderTransport) = makeShare(
             userId: holderUser, deviceId: DeviceId("HOLDER"),
-            olm: holderOlm)
+            olm: holderOlm, devices: DeviceDirectory(verified: ["REQ"]))
         _ = await holderKeys.generate()
         let exported = try #require(await holderKeys.exportPrivateKeys())
         let (requesterShare, requesterShareSender, requesterKeys, requesterTransport) =
@@ -522,6 +575,38 @@ struct SecretShareTests {
         try? await transport.shutdown()
     }
 
+    @Test("requests from unverified or unknown own devices are never answered")
+    func unverifiedDeviceRefused() async throws {
+        let holderUser = UserId(unchecked: "@holder:x")
+        let keys = FakeKeys()
+        let holderSender = FakeSender()
+        let holderOlm = OlmConnector(keys: keys, sender: holderSender)
+        try await holderOlm.configure(
+            identity: DeviceIdentityKeys.generate(),
+            userId: holderUser, deviceId: DeviceId("HOLDER"))
+        try await holderOlm.ensureKeys()
+        for device in ["UNVERIFIED", "UNKNOWN"] {
+            let olm = OlmConnector(keys: keys, sender: FakeSender())
+            try await olm.configure(
+                identity: DeviceIdentityKeys.generate(),
+                userId: holderUser, deviceId: DeviceId(device))
+            try await olm.ensureKeys()
+        }
+        let (share, _, holderKeys, transport) = makeShare(
+            userId: holderUser, deviceId: DeviceId("HOLDER"), olm: holderOlm,
+            devices: DeviceDirectory(unverified: ["UNVERIFIED"]))
+        _ = await holderKeys.generate()
+        await share.cacheBackupKey(Data(repeating: 1, count: 32))
+        for device in ["UNVERIFIED", "UNKNOWN"] {
+            for name in [SecretName.master, SecretName.backup] {
+                _ = await share.receive(requestEvent(
+                    name: name, device: device, from: holderUser))
+            }
+        }
+        #expect(await holderSender.sent.isEmpty)
+        try? await transport.shutdown()
+    }
+
     @Test("backup key request → encrypted answer → backupKeyReceived")
     func backupKeyRoundTrip() async throws {
         let holderUser = UserId(unchecked: "@holder:x")
@@ -541,9 +626,10 @@ struct SecretShareTests {
         try await holderOlm.ensureKeys()
         try await requesterOlm.ensureKeys()
 
-        let (holderShare, _, _, holderTransport) = makeShare(
+        let (holderShare, _, holderKeys, holderTransport) = makeShare(
             userId: holderUser, deviceId: DeviceId("HOLDER"),
-            olm: holderOlm)
+            olm: holderOlm, devices: DeviceDirectory(verified: ["REQ"]))
+        _ = await holderKeys.generate()
         let backupKey = Data("backup-key-material".utf8)
         await holderShare.cacheBackupKey(backupKey)
         let (requesterShare, requesterSender, _, requesterTransport) = makeShare(
