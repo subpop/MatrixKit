@@ -380,7 +380,9 @@ struct RoomCryptoTests {
             "forwarding_curve25519_key_chain": .array([.string("HOPONE")]),
         ]) { $1 }
 
+        let sessionId = try #require(base["session_id"]?.stringValue)
         let bob = RoomCrypto(sharer: FakeSharer(), sender: FakeRoomSender())
+        _ = await bob.claimUnknownSession(roomId: room, sessionId: sessionId)
         await bob.receiveRoomKey(BasicEvent(
             type: "m.forwarded_room_key", sender: aliceUser, content: forwardedContent,
             olmOrigin: OlmOrigin(curve25519: "FORWARDERCURVE", ed25519: "FORWARDERED")))
@@ -391,10 +393,50 @@ struct RoomCryptoTests {
 
         // A forward that omits attribution cannot be backed up.
         let carol = RoomCrypto(sharer: FakeSharer(), sender: FakeRoomSender())
+        _ = await carol.claimUnknownSession(roomId: room, sessionId: sessionId)
         await carol.receiveRoomKey(BasicEvent(
             type: "m.forwarded_room_key", sender: aliceUser, content: base,
             olmOrigin: OlmOrigin(curve25519: "FORWARDERCURVE", ed25519: "FORWARDERED")))
         #expect(await carol.sessionsPendingBackup(version: "1", limit: 10).isEmpty)
+    }
+
+    @Test("room keys that are mislabeled, unsigned, or unrequested are rejected")
+    func rejectsUntrustedRoomKeys() async throws {
+        let (room, aliceUser, _) = try roomFixture()
+        var origin = MegolmSession.create()
+        let signed = try origin.sessionKey()
+        _ = try origin.encrypt(megolmPayload("x", room))
+        let export = origin.export()
+        func content(
+            sessionId: String, blob: Data
+        ) -> [String: AnyCodable] {
+            [
+                "algorithm": .string(RoomCrypto.megolmAlgorithm),
+                "room_id": .string(room.value),
+                "session_id": .string(sessionId),
+                "session_key": .string(Primitives.base64UnpaddedEncode(blob)),
+            ]
+        }
+        let crypto = RoomCrypto(sharer: FakeSharer(), sender: FakeRoomSender())
+
+        // A blob filed under another session's ID would shadow it.
+        #expect(await crypto.receiveRoomKey(BasicEvent(
+            type: RoomCrypto.roomKeyType, sender: aliceUser,
+            content: content(sessionId: MegolmSession.create().id, blob: signed))) == nil)
+        // Direct shares must be signed.
+        #expect(await crypto.receiveRoomKey(BasicEvent(
+            type: RoomCrypto.roomKeyType, sender: aliceUser,
+            content: content(sessionId: origin.id, blob: export))) == nil)
+        // Forwards are only accepted for sessions we asked about.
+        let forward = BasicEvent(
+            type: RoomCrypto.forwardedRoomKeyType, sender: aliceUser,
+            content: content(sessionId: origin.id, blob: export))
+        #expect(await crypto.receiveRoomKey(forward) == nil)
+        #expect(await crypto.backupExports().isEmpty)
+
+        _ = await crypto.claimUnknownSession(roomId: room, sessionId: origin.id)
+        #expect(await crypto.receiveRoomKey(forward) == room)
+        #expect(await crypto.backupExports().count == 1)
     }
 
     @Test("own sessions are attributed to this device")
@@ -530,19 +572,21 @@ struct RoomCryptoTests {
         let alice = RoomCrypto(
             sharer: FakeSharer(), sender: FakeRoomSender())
         await alice.setLocalUserId(aliceUser)
+        let outbound = MegolmSession.create()
+        let sessId = outbound.id
         let box = SeenBox()
         await alice.setUnknownSessionHandler({ box.append($0) })
         let wire = MessageEvent(
             type: "m.room.encrypted", eventId: EventId(unchecked: "$e"),
             sender: bobUser, roomId: room, originServerTs: 1,
             content: [
-                "session_id": .string("sess1"),
+                "session_id": .string(sessId),
                 "ciphertext": .string("AAAA"),
             ])
         #expect(await alice.decryptRoomEvent(wire, in: room) == nil)
         #expect(await alice.decryptRoomEvent(wire, in: room) == nil)
         #expect(box.count == 1)
-        #expect(box.first?.sessionId == "sess1")
+        #expect(box.first?.sessionId == sessId)
         #expect(box.first?.sender == bobUser)
         // Own sends never request (self-decrypt is registered at send).
         let ownWire = MessageEvent(
@@ -555,19 +599,18 @@ struct RoomCryptoTests {
         #expect(await alice.decryptRoomEvent(ownWire, in: room) == nil)
         #expect(box.count == 1)
         // Key arrival re-arms: a later re-loss requests again.
-        let outbound = MegolmSession.create()
         let blob = try outbound.sessionKey()
         await alice.receiveRoomKey(BasicEvent(
             type: "m.room_key", sender: bobUser,
             content: [
                 "algorithm": .string("m.megolm.v1.aes-sha2"),
                 "room_id": .string(room.value),
-                "session_id": .string("sess1"),
+                "session_id": .string(sessId),
                 "session_key": .string(
                     Primitives.base64UnpaddedEncode(blob)),
             ]))
         #expect(await alice.claimUnknownSession(
-            roomId: room, sessionId: "sess1"))
+            roomId: room, sessionId: sessId))
     }
 
     @Test("served request ids dedupe")
@@ -672,14 +715,14 @@ struct RoomCryptoTests {
         // its own index and everything after it.
         var origin = MegolmSession.create()
         let sessionId = origin.id
-        let export0 = origin.export()
+        let export0 = try origin.sessionKey()
         let wire0 = try origin.encrypt(megolmPayload("zero", room))
         _ = try origin.encrypt(megolmPayload("one", room))
-        let export2 = origin.export()
+        let export2 = try origin.sessionKey()
         _ = try origin.encrypt(megolmPayload("two", room))
         _ = try origin.encrypt(megolmPayload("three", room))
         _ = try origin.encrypt(megolmPayload("four", room))
-        let export5 = origin.export()
+        let export5 = try origin.sessionKey()
         let blobFor: (UInt32) -> Data = {
             switch $0 {
             case 0: return export0
@@ -703,6 +746,10 @@ struct RoomCryptoTests {
                 type: RoomCrypto.roomKeyType, sender: aliceUser,
                 content: shareContent(blobFor(held))))
             #expect(first != nil)
+        }
+        if c.arrivalIsForwarded {
+            // Forwards are accepted only for sessions we asked about.
+            _ = await receiver.claimUnknownSession(roomId: room, sessionId: sessionId)
         }
         var arrival = shareContent(blobFor(c.arrivalIndex))
         if c.badAlgorithm {
@@ -758,13 +805,13 @@ struct RoomCryptoTests {
         let (room, aliceUser, _) = try roomFixture()
         var origin = MegolmSession.create()
         let sessionId = origin.id
-        let export0 = origin.export()
+        let export0 = try origin.sessionKey()
         let wire0 = try origin.encrypt(megolmPayload("zero", room))
         _ = try origin.encrypt(megolmPayload("one", room))
         let wire2 = try origin.encrypt(megolmPayload("two", room))
         _ = try origin.encrypt(megolmPayload("three", room))
         _ = try origin.encrypt(megolmPayload("four", room))
-        let export5 = origin.export()
+        let export5 = try origin.sessionKey()
         let receiver = RoomCrypto(
             sharer: FakeSharer(), sender: FakeRoomSender())
         if c.localSender {
@@ -873,6 +920,7 @@ struct RoomCryptoTests {
         #expect(
             bobShares.first?.content["forwarding_curve25519_key_chain"]?.arrayValue
                 == [])
+        _ = await carol.claimUnknownSession(roomId: room, sessionId: sessionId)
         await carol.receiveRoomKey(BasicEvent(
             type: try #require(bobShares.first).eventType, sender: bobUser,
             content: try #require(bobShares.first).content))

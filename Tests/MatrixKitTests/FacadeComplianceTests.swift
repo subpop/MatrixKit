@@ -538,7 +538,7 @@ struct FacadeComplianceTests {
             _ = try origin.encrypt(payload("two"))
             _ = try origin.encrypt(payload("three"))
             _ = try origin.encrypt(payload("four"))
-            let exportLate = origin.export()
+            let exportLate = try origin.sessionKey()
             let privateKey = BackupCrypto.generatePrivateKey()
             let publicKey = try BackupCrypto.publicKey(privateKey: privateKey)
             let version = try await client.backup.createBackup(publicKey: publicKey)

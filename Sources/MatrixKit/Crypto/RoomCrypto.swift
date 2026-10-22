@@ -765,6 +765,29 @@ public actor RoomCrypto {
             return nil
         }
         let mapKey = "\(roomId)|\(sessionId)"
+        // The key must be the session it is filed under: a blob for a
+        // different session would shadow the real one and break its
+        // messages.
+        guard session.id == sessionId.replacing("=", with: "") else {
+            logRejectedRoomKey("session ID does not match key", event: event)
+            return nil
+        }
+        if event.type == Self.roomKeyType {
+            // Direct shares use the signed sharing format; the signature
+            // proves the sender holds the session's signing key.
+            guard blob.first == MegolmSession.sharingVersion else {
+                logRejectedRoomKey("unsigned session key", event: event)
+                return nil
+            }
+        } else {
+            // Forwards carry unsigned exports, so only a device we asked
+            // may supply one — anyone else could replace a held session
+            // with a corrupt earlier state.
+            guard requestedSessions[mapKey] != nil else {
+                logRejectedRoomKey("forward was not requested", event: event)
+                return nil
+            }
+        }
         // Re-arm key requests: a well-formed share answers the
         // outstanding ask whether or not it improves our position, so
         // the next undecryptable sighting asks again instead of
@@ -796,6 +819,12 @@ public actor RoomCrypto {
         await markPersistDirty()
         onSessionsChanged?()
         return RoomId(unchecked: roomId)
+    }
+
+    private func logRejectedRoomKey(_ reason: StaticString, event: BasicEvent) {
+        MatrixKitLog.crypto.debug(
+            "RoomCrypto rejecting room key: \(reason, privacy: .public) sender=\(event.sender?.value ?? "?", privacy: .private(mask: .hash)) type=\(event.type, privacy: .public)"
+        )
     }
 
     /// Origin of the session in a received room-key event, from the
