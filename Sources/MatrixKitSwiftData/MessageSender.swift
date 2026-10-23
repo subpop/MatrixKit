@@ -79,7 +79,8 @@ public actor MessageSender {
 
     // MARK: - Text
 
-    /// Send markdown text with a local echo. Transport failures mark
+    /// Send markdown text with a local echo. `msgtype` selects the
+    /// message type (`.emote` for `/me` actions). Transport failures mark
     /// the echo failed instead of throwing, and sync confirms the echo
     /// when the server echoes the transaction ID back. Returns the echo
     /// event ID, or nil when logged out.
@@ -88,12 +89,13 @@ public actor MessageSender {
     public func sendText(
         _ roomId: RoomId, _ body: String,
         relatesTo: RelatesTo? = nil, mentions: Mentions? = nil,
+        msgtype: MessageType = .text,
         transactionId: TransactionId = .random(),
         onEchoStaged: (@Sendable () -> Void)? = nil
     ) async -> EventId? {
         guard let localUser else { return nil }
         let content = MessageContent.markdown(
-            body, relatesTo: relatesTo, mentions: mentions)
+            body, relatesTo: relatesTo, mentions: mentions, msgtype: msgtype)
         let echo = stagedEcho(
             roomId: roomId, sender: localUser,
             type: EventType.roomMessage.rawValue, content: content,

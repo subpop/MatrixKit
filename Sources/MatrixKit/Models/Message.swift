@@ -149,10 +149,10 @@ public struct MessageContent: Hashable, Sendable, Codable {
     /// HTML-formatted message (with plain-text fallback).
     public static func html(
         _ body: String, formattedBody: String, relatesTo: RelatesTo? = nil,
-        mentions: Mentions? = nil
+        mentions: Mentions? = nil, msgtype: MessageType = .text
     ) -> MessageContent {
         MessageContent(
-            msgtype: .text,
+            msgtype: msgtype,
             body: body,
             formattedBody: formattedBody,
             format: "org.matrix.custom.html",
@@ -164,11 +164,12 @@ public struct MessageContent: Hashable, Sendable, Codable {
     /// Markdown message: `body` carries the raw markdown; `formatted_body`
     /// carries the generated Matrix HTML subset (always present).
     public static func markdown(
-        _ body: String, relatesTo: RelatesTo? = nil, mentions: Mentions? = nil
+        _ body: String, relatesTo: RelatesTo? = nil, mentions: Mentions? = nil,
+        msgtype: MessageType = .text
     ) -> MessageContent {
         html(
             body, formattedBody: MatrixHTMLGenerator.html(fromMarkdown: body),
-            relatesTo: relatesTo, mentions: mentions)
+            relatesTo: relatesTo, mentions: mentions, msgtype: msgtype)
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -712,17 +713,19 @@ public struct PollStartContent: Hashable, Sendable, Codable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let block = try container.decode(Block.self, forKey: .poll)
         guard let questionBody = block.question.representations.first?.body else {
-            throw DecodingError.dataCorrupted(.init(
-                codingPath: decoder.codingPath,
-                debugDescription: "Poll has no question text"))
+            throw DecodingError.dataCorrupted(
+                .init(
+                    codingPath: decoder.codingPath,
+                    debugDescription: "Poll has no question text"))
         }
         question = questionBody
         kind = block.kind == "m.disclosed" ? .disclosed : .undisclosed
         maxSelections = max(1, block.maxSelections ?? 1)
         guard !block.answers.isEmpty else {
-            throw DecodingError.dataCorrupted(.init(
-                codingPath: decoder.codingPath,
-                debugDescription: "Poll has no answers"))
+            throw DecodingError.dataCorrupted(
+                .init(
+                    codingPath: decoder.codingPath,
+                    debugDescription: "Poll has no answers"))
         }
         answers = Array(block.answers.prefix(20))
     }
