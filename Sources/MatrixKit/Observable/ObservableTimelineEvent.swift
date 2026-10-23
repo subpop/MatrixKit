@@ -261,7 +261,7 @@ public final class ObservableTimelineEvent {
     /// profile changes lose the profile fields and stay tombstoned.
     private static func survivesRedaction(_ event: MessageEvent) -> Bool {
         guard EventType(rawValue: event.type) == .roomMember,
-              let membership = event.content["membership"]?.stringValue
+            let membership = event.content["membership"]?.stringValue
         else { return false }
         let previous = event.unsigned?["prev_content"]?.objectValue?["membership"]?.stringValue
         return !(membership == "join" && previous == "join")
@@ -343,16 +343,18 @@ public final class ObservableTimelineEvent {
                 for: event, in: byId, members: members)
             wrapper.sendState = sendStates[event.eventId]
             if let localUser {
-                wrapper.ownReactions = Set(reactions.keys.filter {
-                    reactions[$0]?.contains(localUser) ?? false
-                })
+                wrapper.ownReactions = Set(
+                    reactions.keys.filter {
+                        reactions[$0]?.contains(localUser) ?? false
+                    })
                 let selfMentioned = wrapper.mentionedUserIds.contains(localUser)
                 wrapper.highlightedMentionUserId = selfMentioned ? localUser : nil
                 let matched = highlightKeywords.filter {
                     event.messageContent?.body.localizedCaseInsensitiveContains($0) ?? false
                 }
                 wrapper.highlightKeywords = matched
-                wrapper.isHighlighted = selfMentioned
+                wrapper.isHighlighted =
+                    selfMentioned
                     || mentionsRoom(in: event)
                     || !matched.isEmpty
             }
@@ -393,7 +395,8 @@ public final class ObservableTimelineEvent {
         return (
             target,
             members[target]?.displayname ?? event.content["displayname"]?.stringValue
-                ?? previousDisplayName(in: event))
+                ?? previousDisplayName(in: event)
+        )
     }
 
     /// Display name from the event's pre-transition content, when the
@@ -471,7 +474,7 @@ public final class ObservableTimelineEvent {
         kept.reserveCapacity(rendered.count)
         for (event, wrapper) in zip(events, rendered) {
             if EventType(rawValue: event.type) == .roomMember,
-               let key = event.stateKey, !key.isEmpty
+                let key = event.stateKey, !key.isEmpty
             {
                 let target = UserId(unchecked: key)
                 let membership = Membership(
@@ -578,7 +581,8 @@ public final class ObservableTimelineEvent {
             summary.ownSelections = Set(localUser.flatMap { selections[$0]?.answers } ?? [])
             summary.isEnded = endTimestamps[pollId] != nil
             let top = summary.answers.map(\.voteCount).max() ?? 0
-            summary.winningAnswerIds = summary.isEnded && top > 0
+            summary.winningAnswerIds =
+                summary.isEnded && top > 0
                 ? Set(summary.answers.filter { $0.voteCount == top }.map(\.id))
                 : []
             summaries[pollId] = summary
@@ -705,7 +709,8 @@ public final class ObservableTimelineEvent {
         // Prefer room state, then the event's own content (member
         // content always describes the state-key user), then the
         // pre-transition content (profile-less leaves/kicks), then the ID.
-        let targetName = members[target]?.displayname
+        let targetName =
+            members[target]?.displayname
             ?? event.content["displayname"]?.stringValue
             ?? previousDisplayName(in: event)
             ?? target.value
@@ -718,8 +723,9 @@ public final class ObservableTimelineEvent {
             // membership was not join) renders as a join even when it
             // sets a display name or avatar.
             if event.sender == target,
-               event.unsigned?["prev_content"]?.objectValue?["membership"]?.stringValue == "join",
-               let change = profileChange(in: event, name: targetName) {
+                event.unsigned?["prev_content"]?.objectValue?["membership"]?.stringValue == "join",
+                let change = profileChange(in: event, name: targetName)
+            {
                 return .profileChange(description: change)
             }
             return .state(type: event.type, description: "\(targetName) joined")
@@ -751,9 +757,9 @@ public final class ObservableTimelineEvent {
         var parts: [String] = []
         if oldName != newName, let newName {
             if let oldName {
-                parts.append("changed their display name from “\(oldName)” to “\(newName)”")
+                parts.append("\(oldName) is now \(newName)")
             } else {
-                parts.append("set their display name to “\(newName)”")
+                parts.append("\(newName) set their display name")
             }
         }
         if oldAvatar != newAvatar {
@@ -788,7 +794,8 @@ public final class ObservableTimelineEvent {
 
     /// User-meaningful call verb for signalling types; nil for
     /// negotiation noise (renders as `.unknown` instead).
-    private static func callVerb(for type: EventType) -> String? {        switch type {
+    private static func callVerb(for type: EventType) -> String? {
+        switch type {
         case .callInvite: "started a call"
         case .callAnswer: "answered the call"
         case .callHangup, .callReject: "ended the call"
