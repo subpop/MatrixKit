@@ -41,6 +41,46 @@ struct MediaComplianceTests {
         }
     }
 
+    @Test("Oversized upload surfaces M_TOO_LARGE")
+    func uploadTooLarge() async throws {
+        try await withHarness { harness in
+            await harness.setOverride(
+                method: "POST", path: "/_matrix/media/v3/upload",
+                response: .matrixError(code: "M_TOO_LARGE", message: "too big", status: 413))
+            let (media, _, _) = await harness.mediaClient()
+            await #expect(throws: MatrixError.serverError(code: "M_TOO_LARGE", message: "too big", retryAfter: nil)) {
+                try await media.upload(Data("x".utf8), mimeType: "image/png")
+            }
+        }
+    }
+
+    @Test("Media config decodes the upload size limit")
+    func configUploadSize() async throws {
+        try await withHarness { harness in
+            await harness.setOverride(
+                method: "GET", path: "/_matrix/client/v1/media/config",
+                response: .raw(#"{"m.upload.size": 1024}"#, status: 200))
+            let (media, _, _) = await harness.mediaClient()
+            let config = try await media.config()
+            #expect(config.uploadSize == 1024)
+        }
+    }
+
+    @Test("Media config falls back to legacy v3 on 404")
+    func configLegacyFallback() async throws {
+        try await withHarness { harness in
+            await harness.setOverride(
+                method: "GET", path: "/_matrix/client/v1/media/config",
+                response: .matrixError(code: "M_UNRECOGNIZED", message: "no", status: 404))
+            await harness.setOverride(
+                method: "GET", path: "/_matrix/media/v3/config",
+                response: .raw(#"{"m.upload.size": 2048}"#, status: 200))
+            let (media, _, _) = await harness.mediaClient()
+            let config = try await media.config()
+            #expect(config.uploadSize == 2048)
+        }
+    }
+
     @Test("Thumbnails download bytes")
     func thumbnail() async throws {
         try await withHarness { harness in

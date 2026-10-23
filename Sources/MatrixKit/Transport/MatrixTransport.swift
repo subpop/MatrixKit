@@ -532,21 +532,27 @@ public actor MatrixTransport {
                 throw .decodingError("\(path): \(detail) | body: \(snippet)")
             }
         }
-        // Non-2xx: a 401 with `flows` is a UIAA challenge, not an error.
+        throw failure(status: status, data: data, path: path)
+    }
+
+    /// Map a non-2xx response to its `MatrixError`: a UIAA challenge, a
+    /// standard Matrix error body, or a bare HTTP status.
+    public func failure(status: Int, data: Data, path: String) -> MatrixError {
+        // A 401 with `flows` is a UIAA challenge, not an error.
         if status == 401,
             let challenge = try? decoder.decode(UIAAChallenge.self, from: data)
         {
-            throw MatrixError.uiaa(challenge)
+            return .uiaa(challenge)
         }
-        // Non-2xx: try a Matrix error body first.
+        // Try a Matrix error body first.
         if let errorBody = try? decoder.decode(MatrixErrorBody.self, from: data) {
-            throw mapErrorBody(errorBody, status: status)
+            return mapErrorBody(errorBody, status: status)
         }
         let bodyString = Self.redactedPreview(data, limit: maxLogBytes)
         MatrixKitLog.transport.error(
             "✗ HTTP \(status, privacy: .public) \(path, privacy: .public): \(bodyString, privacy: .private)"
         )
-        throw MatrixError.unexpectedStatus(status, body: bodyString)
+        return .unexpectedStatus(status, body: bodyString)
     }
 
     /// Human-readable decoding failure: which key was missing/mismatched,

@@ -32,11 +32,15 @@ public actor MediaClient {
     ) async throws(MatrixError) -> MXCURI {
         var query: [String: String]? = nil
         if let filename { query = ["filename": filename] }
-        let (_, body) = try await transport.sendBytes(
+        let (status, body) = try await transport.sendBytes(
             .post, path: "/_matrix/media/v3/upload",
             query: query, bytes: data, contentType: mimeType,
             accessToken: try await token(), onProgress: onProgress
         )
+        guard (200..<300).contains(status) else {
+            throw await transport.failure(
+                status: status, data: body, path: "/_matrix/media/v3/upload")
+        }
         let response: UploadResponse
         do {
             response = try JSONDecoder().decode(UploadResponse.self, from: body)
@@ -44,6 +48,36 @@ public actor MediaClient {
             throw .decodingError("upload: \(error.localizedDescription)")
         }
         return try MXCURI(response.contentUri)
+    }
+
+    // MARK: - Config
+
+    /// Fetch the media repository's limits, preferring the authenticated
+    /// endpoint (`GET /_matrix/client/v1/media/config`) and falling back to
+    /// the legacy one on 404 (older homeservers).
+    public func config() async throws(MatrixError) -> MediaConfig {
+        let accessToken = try await token()
+        let (status, data) = try await transport.sendBytes(
+            .get, path: "/_matrix/client/v1/media/config",
+            bytes: Data(), contentType: "application/json",
+            accessToken: accessToken
+        )
+        var (finalStatus, finalData, path) = (status, data, "/_matrix/client/v1/media/config")
+        if status == 404 {
+            path = "/_matrix/media/v3/config"
+            (finalStatus, finalData) = try await transport.sendBytes(
+                .get, path: path, bytes: Data(), contentType: "application/json",
+                accessToken: accessToken
+            )
+        }
+        guard (200..<300).contains(finalStatus) else {
+            throw await transport.failure(status: finalStatus, data: finalData, path: path)
+        }
+        do {
+            return try JSONDecoder().decode(MediaConfig.self, from: finalData)
+        } catch {
+            throw .decodingError("media config: \(error.localizedDescription)")
+        }
     }
 
     // MARK: - Download
@@ -228,6 +262,20 @@ public actor MediaClient {
 public enum ThumbnailMethod: String, Hashable, Sendable {
     case crop
     case scale
+}
+
+/// `GET /media/config` response body.
+public struct MediaConfig: Hashable, Sendable, Codable {
+    /// Maximum upload size in bytes; nil when the server doesn't advertise one.
+    public var uploadSize: Int?
+
+    public init(uploadSize: Int? = nil) {
+        self.uploadSize = uploadSize
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case uploadSize = "m.upload.size"
+    }
 }
 
 /// `POST /upload` response body.
