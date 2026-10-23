@@ -240,7 +240,8 @@ public actor MessageSender {
             roomId: roomId, sender: localUser,
             type: EventType.roomMessage.rawValue,
             content: MessageContent(
-                msgtype: msgtype, body: caption ?? filename, info: info),
+                msgtype: msgtype, body: caption ?? filename,
+                filename: filename, info: info),
             transactionId: transactionId)
         try? await writer.stageEcho(echo, roomId: roomId, transactionId: transactionId)
         onEchoStaged?()
@@ -269,6 +270,7 @@ public actor MessageSender {
                     roomId,
                     MessageContent(
                         msgtype: msgtype, body: caption ?? filename,
+                        filename: filename,
                         relatesTo: inReplyTo.map(RelatesTo.reply(to:)),
                         file: file, info: encryptedInfo),
                     deviceId: ownDeviceId, transactionId: transactionId)
@@ -280,6 +282,7 @@ public actor MessageSender {
                     roomId,
                     content: MessageContent(
                         msgtype: msgtype, body: caption ?? filename,
+                        filename: filename,
                         relatesTo: inReplyTo.map(RelatesTo.reply(to:)),
                         url: mxc.value, info: info),
                     transactionId: transactionId)
