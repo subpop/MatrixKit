@@ -267,6 +267,24 @@ public actor MatrixStoreWriter {
         return true
     }
 
+    /// Delete a local echo row by event ID, including echoes that already
+    /// failed (or survived a relaunch) and no longer have a staged
+    /// transaction. Returns false when no such row exists.
+    @discardableResult
+    public func discardLocalEcho(eventId: EventId) throws -> Bool {
+        let id = eventId.value
+        guard let row = try modelContext.fetch(
+            FetchDescriptor<SDRoomEvent>(
+                predicate: #Predicate { $0.eventId == id })).first
+        else { return false }
+        if let txn = echoTransactions.removeValue(forKey: id) {
+            pendingEchoes.removeValue(forKey: txn)
+        }
+        modelContext.delete(row)
+        try modelContext.save()
+        return true
+    }
+
     /// The staged transaction behind an echo event ID, if any.
     public func echoTransactionId(for eventId: EventId) -> TransactionId? {
         echoTransactions[eventId.value].map { TransactionId($0) }

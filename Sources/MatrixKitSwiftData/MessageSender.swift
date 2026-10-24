@@ -421,8 +421,8 @@ public actor MessageSender {
 
     // MARK: - Redaction
 
-    /// Redact an event. Local (unsent) echoes are cancelled instead of
-    /// redacted on the server.
+    /// Redact an event. Local echoes (pending or failed) are removed from
+    /// the store instead of redacted on the server.
     @discardableResult
     public func redact(
         _ roomId: RoomId, eventId: EventId, reason: String? = nil,
@@ -430,6 +430,13 @@ public actor MessageSender {
     ) async throws(MatrixError) -> EventId {
         if let transactionId = await writer.echoTransactionId(for: eventId),
            (try? await writer.cancelEcho(transactionId: transactionId)) == true
+        {
+            return eventId
+        }
+        // Failed or relaunched echoes have no staged transaction but are
+        // still local-only rows.
+        if eventId.value.hasPrefix("local:"),
+           (try? await writer.discardLocalEcho(eventId: eventId)) == true
         {
             return eventId
         }
