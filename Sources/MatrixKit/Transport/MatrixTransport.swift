@@ -552,6 +552,14 @@ public actor MatrixTransport {
         MatrixKitLog.transport.error(
             "✗ HTTP \(status, privacy: .public) \(path, privacy: .public): \(bodyString, privacy: .private)"
         )
+        // A proxy in front of the homeserver (e.g. Cloudflare) rejects
+        // oversized bodies with a bare 413 and an HTML page.
+        if status == 413 {
+            return .serverError(
+                code: "M_TOO_LARGE",
+                message: "The server rejected the request because it is too large.",
+                retryAfter: nil)
+        }
         return .unexpectedStatus(status, body: bodyString)
     }
 

@@ -54,6 +54,24 @@ struct MediaComplianceTests {
         }
     }
 
+    @Test("A proxy's bare HTTP 413 surfaces as M_TOO_LARGE")
+    func uploadProxyTooLarge() async throws {
+        try await withHarness { harness in
+            await harness.setOverride(
+                method: "POST", path: "/_matrix/media/v3/upload",
+                response: .raw("<html>413 Payload Too Large</html>", status: 413))
+            let (media, _, _) = await harness.mediaClient()
+            await #expect(
+                throws: MatrixError.serverError(
+                    code: "M_TOO_LARGE",
+                    message: "The server rejected the request because it is too large.",
+                    retryAfter: nil)
+            ) {
+                try await media.upload(Data("x".utf8), mimeType: "image/png")
+            }
+        }
+    }
+
     @Test("Media config decodes the upload size limit")
     func configUploadSize() async throws {
         try await withHarness { harness in

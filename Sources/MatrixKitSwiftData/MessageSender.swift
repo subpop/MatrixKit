@@ -215,6 +215,9 @@ public actor MessageSender {
     /// store mutations (e.g. a revision counter keyed off sync deltas)
     /// need this to make the pending bubble appear immediately rather
     /// than only once the real event arrives after the upload finishes.
+    ///
+    /// `onFailure` receives the error that marked the echo failed, so
+    /// callers can react to specific causes (e.g. `M_TOO_LARGE`).
     @discardableResult
     public func sendAttachment(
         _ roomId: RoomId,
@@ -224,7 +227,8 @@ public actor MessageSender {
         thumbnailData: Data? = nil, thumbnailMimeType: String? = nil,
         inReplyTo: EventId? = nil,
         onEchoStaged: (@Sendable () -> Void)? = nil,
-        onProgress: (@Sendable (Double) -> Void)? = nil
+        onProgress: (@Sendable (Double) -> Void)? = nil,
+        onFailure: (@Sendable (any Error) -> Void)? = nil
     ) async -> EventId? {
         guard let localUser else { return nil }
         let transactionId = TransactionId.random()
@@ -290,6 +294,7 @@ public actor MessageSender {
         } catch {
             try? await writer.failEcho(
                 transactionId: transactionId, reason: error.localizedDescription)
+            onFailure?(error)
         }
         return echo.eventId
     }
