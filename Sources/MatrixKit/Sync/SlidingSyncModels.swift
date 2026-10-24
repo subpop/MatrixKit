@@ -134,8 +134,10 @@ public struct SlidingSyncRequest: Hashable, Sendable, Codable {
     /// Connection ID; stable across requests on one connection.
     public var connId: String?
     /// Position cursor from the previous response. Nil on first request.
+    /// Sent as a query parameter, not in the body.
     public var pos: String?
-    /// Long-poll duration in milliseconds.
+    /// Long-poll duration in milliseconds. Sent as a query parameter,
+    /// not in the body.
     public var timeoutMs: Int?
     /// Named sliding windows (v1 uses a single list).
     public var lists: [String: SlidingSyncList]
@@ -164,10 +166,17 @@ public struct SlidingSyncRequest: Hashable, Sendable, Codable {
         self.extensions = extensions
     }
 
+    /// `pos` and `timeout` travel as query parameters (as Synapse and
+    /// Ruma-based servers read them), not in the body.
+    var queryParameters: [String: String] {
+        var query: [String: String] = [:]
+        if let pos { query["pos"] = pos }
+        if let timeoutMs { query["timeout"] = String(timeoutMs) }
+        return query
+    }
+
     private enum CodingKeys: String, CodingKey {
         case connId = "conn_id"
-        case pos
-        case timeoutMs = "timeout"
         case lists
         case roomSubscriptions = "room_subscriptions"
         case unsubscribeRooms = "unsubscribe_rooms"

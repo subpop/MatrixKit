@@ -220,7 +220,8 @@ public actor SlidingSyncClient {
         let response: SlidingSyncResponse
         do {
             response = try await transport.send(
-                .post, path: endpointPath, body: request, accessToken: token,
+                .post, path: endpointPath, query: request.queryParameters,
+                body: request, accessToken: token,
                 timeoutSeconds: timeoutMs / 1000 + 30
             )
         } catch {
