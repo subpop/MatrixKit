@@ -43,7 +43,7 @@ public enum MatrixStore {
     /// In-memory container for tests and previews.
     public static func makeInMemory() throws -> ModelContainer {
         let configuration = ModelConfiguration(
-            schema: schema, isStoredInMemoryOnly: true)
+            schema: schema, isStoredInMemoryOnly: true, cloudKitDatabase: .none)
         return try ModelContainer(for: schema, configurations: [configuration])
     }
 
@@ -57,7 +57,8 @@ public enum MatrixStore {
     }
 
     private static func open(file: URL) throws -> ModelContainer {
-        let configuration = ModelConfiguration(schema: schema, url: file)
+        let configuration = ModelConfiguration(
+            schema: schema, url: file, cloudKitDatabase: .none)
         return try ModelContainer(for: schema, configurations: [configuration])
     }
 
