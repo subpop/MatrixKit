@@ -12,7 +12,7 @@ private nonisolated let roomStateRequestSignposter = OSSignposter(
 /// Single-shot requests (no automatic retry — callers own backoff). Maps
 /// HTTP statuses and Matrix error bodies onto `MatrixError`.
 public actor MatrixTransport {
-    private let client: HTTPClient
+    private var client: HTTPClient
     private let ownsClient: Bool
     private let homeserver: URL
     private let decoder: JSONDecoder
@@ -75,6 +75,21 @@ public actor MatrixTransport {
         if ownsClient {
             try await client.shutdown()
         }
+    }
+
+    /// Drop every pooled connection and start with a fresh pool.
+    ///
+    /// Connections can die silently while the machine sleeps or the
+    /// network changes; the pool keeps handing them out, so requests
+    /// queue behind them until `getConnectionFromPoolTimeout`.
+    /// AsyncHTTPClient has no public pool flush, so this replaces the
+    /// client and shuts the old one down, which fails its in-flight
+    /// requests. No-op for a caller-supplied client.
+    public func resetConnections() async {
+        guard ownsClient else { return }
+        let stale = client
+        client = HTTPClient(eventLoopGroupProvider: .singleton)
+        try? await stale.shutdown()
     }
 
     // MARK: - Log classification
