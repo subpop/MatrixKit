@@ -209,3 +209,21 @@ struct NotificationSettingsTests {
         #expect(NotificationSettings.pollIds(oneToOne: oneToOne) == expected)
     }
 }
+
+@Suite("Notification mode snapshot")
+struct NotificationModeSnapshotTests {
+    @Test("Snapshot resolves overrides, defaults, and keywords from one ruleset")
+    func resolvesFromOneRuleset() throws {
+        let muted = try RoomId("!muted:example.org")
+        let plain = try RoomId("!plain:example.org")
+        let snapshot = NotificationModeSnapshot(
+            ruleset: ruleset(
+                content: [rule("hello", pattern: "hello")],
+                room: [rule(muted.value, actions: [])],
+                underride: [rule(".m.rule.encrypted"), rule(".m.rule.encrypted_room_one_to_one")]))
+        #expect(snapshot.keywords == ["hello"])
+        #expect(snapshot.mode(for: muted, isOneToOne: false) == .mentionsAndKeywordsOnly)
+        #expect(snapshot.mode(for: plain, isOneToOne: false) == .allMessages)
+        #expect(snapshot.mode(for: plain, isOneToOne: true) == .allMessages)
+    }
+}

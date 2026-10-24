@@ -28,6 +28,32 @@ public enum RoomNotificationMode: Sendable, Equatable, CaseIterable, Codable {
     case mute
 }
 
+/// Notification modes and keywords derived from one `GET /pushrules/`
+/// response, so callers resolving many rooms fetch the ruleset once.
+public struct NotificationModeSnapshot: Sendable {
+    let ruleset: PushRuleset
+
+    /// Enabled highlight keywords.
+    public var keywords: [String] {
+        NotificationSettings.keywords(in: ruleset)
+    }
+
+    /// Effective mode for a room: its user-defined override when one
+    /// exists, otherwise the default for its room type.
+    public func mode(for roomId: RoomId, isOneToOne: Bool) -> RoomNotificationMode {
+        if let override = NotificationSettings.roomMode(in: ruleset, roomId: roomId) {
+            return override
+        }
+        switch NotificationSettings.defaultMode(
+            in: ruleset, encrypted: true, oneToOne: isOneToOne)
+        {
+        case .allMessages: return .allMessages
+        case .mentionsAndKeywordsOnly: return .mentionsAndKeywordsOnly
+        case .mute: return .mute
+        }
+    }
+}
+
 public actor NotificationSettings {
     // MARK: - Rule IDs
 
@@ -290,6 +316,13 @@ public actor NotificationSettings {
     /// Room IDs with enabled user-defined rules.
     public func roomsWithCustomNotificationSettings() async throws -> [RoomId] {
         Self.customRoomIds(in: try await push.getPushRules(), enabled: true)
+    }
+
+    /// Keywords and per-room modes resolved from a single push-rules
+    /// fetch. Prefer this over the per-room accessors when resolving
+    /// many rooms.
+    public func notificationModeSnapshot() async throws -> NotificationModeSnapshot {
+        NotificationModeSnapshot(ruleset: try await push.getPushRules())
     }
 
     /// Raw server ruleset (`GET /pushrules/`). Diagnostic surface for
