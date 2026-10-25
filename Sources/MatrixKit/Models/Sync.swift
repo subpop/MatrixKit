@@ -354,20 +354,22 @@ public struct StrippedStateEvent: Hashable, Sendable, Codable {
 
 /// Unread notification counts for a room.
 public struct UnreadNotifications: Hashable, Sendable, Codable {
-    /// Total unread notifications (server-computed).
-    public var notificationCount: Int
-    /// Highlighted (mention/keyword) notifications.
-    public var highlightCount: Int
+    /// Total unread notifications (server-computed); `nil` when the
+    /// server omitted the count.
+    public var notificationCount: Int?
+    /// Highlighted (mention/keyword) notifications; `nil` when the
+    /// server omitted the count.
+    public var highlightCount: Int?
 
-    public init(notificationCount: Int = 0, highlightCount: Int = 0) {
+    public init(notificationCount: Int? = nil, highlightCount: Int? = nil) {
         self.notificationCount = notificationCount
         self.highlightCount = highlightCount
     }
 
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        self.notificationCount = try container.decodeIfPresent(Int.self, forKey: .notificationCount) ?? 0
-        self.highlightCount = try container.decodeIfPresent(Int.self, forKey: .highlightCount) ?? 0
+        self.notificationCount = try container.decodeIfPresent(Int.self, forKey: .notificationCount)
+        self.highlightCount = try container.decodeIfPresent(Int.self, forKey: .highlightCount)
     }
 
     private enum CodingKeys: String, CodingKey {

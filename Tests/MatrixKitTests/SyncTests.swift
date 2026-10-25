@@ -125,6 +125,20 @@ struct SyncResponseParserTests {
         #expect(c.check(SyncResponseParser.parse(try decoded())))
     }
 
+    @Test("Absent or empty unread_notifications leaves the counts nil")
+    func omittedUnreadCounts() throws {
+        for unread in ["", "\"unread_notifications\": {},"] {
+            let json = """
+                {"next_batch": "s1", "rooms": {"join": {"!r:x": {\(unread) "timeline": {"events": []}}}}}
+                """
+            let response = try JSONDecoder().decode(SyncResponse.self, from: Data(json.utf8))
+            let joined = try #require(
+                SyncResponseParser.parse(response).joined[RoomId(unchecked: "!r:x")])
+            #expect(joined.unreadCount == nil)
+            #expect(joined.highlightCount == nil)
+        }
+    }
+
     @Test("Encodes SyncFilter as JSON for the filter query param")
     func encodeFilter() throws {
         let filter = SyncFilter(

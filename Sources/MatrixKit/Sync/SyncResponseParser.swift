@@ -19,8 +19,8 @@ public enum SyncResponseParser {
                 prevBatch: sync.timeline?.prevBatch.map { BatchToken($0) },
                 state: sync.state?.events ?? [],
                 ephemeral: sync.ephemeral?.events ?? [],
-                unreadCount: sync.unreadNotifications?.notificationCount ?? 0,
-                highlightCount: sync.unreadNotifications?.highlightCount ?? 0,
+                unreadCount: sync.unreadNotifications?.notificationCount,
+                highlightCount: sync.unreadNotifications?.highlightCount,
                 heroes: sync.summary?.heroes ?? [],
                 accountData: sync.accountData?.events ?? []
             )

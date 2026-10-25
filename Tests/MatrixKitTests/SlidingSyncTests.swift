@@ -120,7 +120,7 @@ struct SlidingSyncModelsTests {
         RoomCase(roomId: "!room2:example.com", check: { !$0.initial }),
         RoomCase(roomId: "!room2:example.com", check: { $0.requiredState.isEmpty }),
         RoomCase(roomId: "!room2:example.com", check: { $0.prevBatch == nil }),
-        RoomCase(roomId: "!room2:example.com", check: { $0.unreadCount == 0 }),
+        RoomCase(roomId: "!room2:example.com", check: { $0.unreadCount == nil }),
         RoomCase(roomId: "!room2:example.com", check: { $0.timeline.count == 1 }),
     ]
 
@@ -179,6 +179,17 @@ struct SlidingSyncResponseParserTests {
         #expect(joined.state.count == 2)
         #expect(joined.unreadCount == 3)
         #expect(joined.highlightCount == 1)
+    }
+
+    @Test("Rooms without unread counts leave them nil")
+    func parseOmittedCounts() throws {
+        let json = #"{"pos": "6", "lists": {}, "rooms": {"!r:x": {"timeline": []}}}"#
+        let response = try JSONDecoder().decode(
+            SlidingSyncResponse.self, from: Data(json.utf8))
+        let joined = try #require(
+            SlidingSyncResponseParser.parse(response).joined[RoomId(unchecked: "!r:x")])
+        #expect(joined.unreadCount == nil)
+        #expect(joined.highlightCount == nil)
     }
 
     @Test("Incremental rooms append without state")

@@ -325,10 +325,10 @@ public struct SlidingSyncRoom: Hashable, Sendable, Codable {
     public var limited: Bool
     /// Pagination cursor for older history (`GET /messages`).
     public var prevBatch: String?
-    /// Total unread notifications (server-computed).
-    public var unreadCount: Int
-    /// Highlighted (mention/keyword) notifications.
-    public var highlightCount: Int
+    /// Total unread notifications (server-computed); `nil` when omitted.
+    public var unreadCount: Int?
+    /// Highlighted (mention/keyword) notifications; `nil` when omitted.
+    public var highlightCount: Int?
     /// Hero users for display-name fallback.
     public var heroes: [SlidingSyncHero]
     /// Opaque activity stamp for client-side room ordering (larger =
@@ -343,8 +343,8 @@ public struct SlidingSyncRoom: Hashable, Sendable, Codable {
         timeline: [MessageEvent] = [],
         limited: Bool = false,
         prevBatch: String? = nil,
-        unreadCount: Int = 0,
-        highlightCount: Int = 0,
+        unreadCount: Int? = nil,
+        highlightCount: Int? = nil,
         heroes: [SlidingSyncHero] = [],
         bumpStamp: Int? = nil
     ) {
@@ -371,8 +371,8 @@ public struct SlidingSyncRoom: Hashable, Sendable, Codable {
         self.limited = try container.decodeIfPresent(Bool.self, forKey: .limited) ?? false
         self.prevBatch = try container.decodeIfPresent(String.self, forKey: .prevBatch)
         let unread = try container.decodeIfPresent(UnreadNotifications.self, forKey: .unreadNotifications)
-        self.unreadCount = unread?.notificationCount ?? 0
-        self.highlightCount = unread?.highlightCount ?? 0
+        self.unreadCount = unread?.notificationCount
+        self.highlightCount = unread?.highlightCount
         self.heroes = try container.decodeIfPresent([SlidingSyncHero].self, forKey: .heroes) ?? []
         self.bumpStamp = try container.decodeIfPresent(Int.self, forKey: .bumpStamp)
     }

@@ -166,9 +166,13 @@ public actor MatrixStoreWriter {
             try applyEphemeral(delta.ephemeral, room: room)
         }
         try applyRoomAccountData(delta.accountData, room: room)
-        if room.unread != delta.unreadCount || room.highlight != delta.highlightCount {
-            room.unread = delta.unreadCount
-            room.highlight = delta.highlightCount
+        // A nil count means the server omitted it (e.g. a receipt-only
+        // update), not that it dropped to zero.
+        if let unread = delta.unreadCount, room.unread != unread {
+            room.unread = unread
+        }
+        if let highlight = delta.highlightCount, room.highlight != highlight {
+            room.highlight = highlight
         }
         try recomputeUnread(room: room)
         if room.membership != Membership.join.rawValue {

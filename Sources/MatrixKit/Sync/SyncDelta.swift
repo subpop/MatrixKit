@@ -64,10 +64,12 @@ public struct JoinedRoomDelta: Hashable, Sendable {
     public var state: [MessageEvent]
     /// Ephemeral events (typing, receipts). Never persisted.
     public var ephemeral: [BasicEvent]
-    /// Total unread notifications (server-computed).
-    public var unreadCount: Int
-    /// Highlighted (mention/keyword) notification count.
-    public var highlightCount: Int
+    /// Total unread notifications (server-computed). `nil` when the
+    /// server omitted the count, so the stored value is left as is.
+    public var unreadCount: Int?
+    /// Highlighted (mention/keyword) notification count. `nil` when the
+    /// server omitted the count, so the stored value is left as is.
+    public var highlightCount: Int?
     /// Candidate room heroes for display-name fallback.
     public var heroes: [UserId]
     /// Room-scoped account data (tags, …).
@@ -79,8 +81,8 @@ public struct JoinedRoomDelta: Hashable, Sendable {
         prevBatch: BatchToken? = nil,
         state: [MessageEvent] = [],
         ephemeral: [BasicEvent] = [],
-        unreadCount: Int = 0,
-        highlightCount: Int = 0,
+        unreadCount: Int? = nil,
+        highlightCount: Int? = nil,
         heroes: [UserId] = [],
         accountData: [BasicEvent] = []
     ) {

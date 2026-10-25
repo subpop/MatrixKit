@@ -39,6 +39,25 @@ struct ClientUnreadTests {
                 timeline: events, unreadCount: unreadCount)]))
     }
 
+    @Test("a delta without counts keeps the stored server counts")
+    func omittedCountsKeepStored() async throws {
+        let (writer, container) = try stores()
+        let roomId = RoomId(unchecked: "!r:x")
+        try await writer.apply(SyncDelta(
+            nextBatch: BatchToken("s"),
+            joined: [roomId: JoinedRoomDelta(unreadCount: 3, highlightCount: 1)]))
+        try await writer.apply(SyncDelta(
+            nextBatch: BatchToken("s2"),
+            joined: [roomId: JoinedRoomDelta(accountData: [])]))
+        #expect(try row(container).unread == 3)
+        #expect(try row(container).highlight == 1)
+        try await writer.apply(SyncDelta(
+            nextBatch: BatchToken("s3"),
+            joined: [roomId: JoinedRoomDelta(unreadCount: 0, highlightCount: 0)]))
+        #expect(try row(container).unread == 0)
+        #expect(try row(container).highlight == 0)
+    }
+
     @Test("no marker falls back to the server count")
     func noMarkerServerFallback() async throws {
         let (writer, container) = try stores()
