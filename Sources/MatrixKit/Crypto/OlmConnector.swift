@@ -91,6 +91,9 @@ public actor OlmConnector {
     private var resolvedPeers: [String: ResolvedPeer] = [:]
     private var listedDevices: [String: [String]] = [:]
 
+    /// Devices eligible for room keys (see `deviceIds(for:)`).
+    private var roomKeySharingPolicy: RoomKeySharingPolicy = .allDevices
+
     /// Debounced crypto-state persistence (see `PersistCoalescer`),
     /// created on first mutation so `init` never captures `self`.
     private var persister: PersistCoalescer?
@@ -555,24 +558,76 @@ public actor OlmConnector {
         return peer
     }
 
-    /// Device IDs with published keys for a user, cached (see
-    /// `resolvePeer`). Backs `"*"` expansion without a query per send.
+    /// Choose which devices `deviceIds(for:)` offers for room keys.
+    /// Cached device lists are dropped so the new policy applies at once.
+    public func setRoomKeySharingPolicy(_ policy: RoomKeySharingPolicy) {
+        guard policy != roomKeySharingPolicy else { return }
+        roomKeySharingPolicy = policy
+        listedDevices = [:]
+    }
+
+    /// Whether `device` of `user` may receive room keys under the
+    /// current policy.
+    public func canShareRoomKeys(
+        with device: DeviceId, of user: UserId
+    ) async -> Bool {
+        guard roomKeySharingPolicy != .allDevices else { return true }
+        let ids = try? await deviceIds(for: user)
+        return ids?.contains(device.value) ?? false
+    }
+
+    /// Device IDs with published keys for a user that may receive room
+    /// keys under the current policy, cached (see `resolvePeer`).
+    /// Backs `"*"` expansion without a query per send.
     /// Part of the `RoomKeySharer` seam consumed by `RoomCrypto`.
     public func deviceIds(for user: UserId) async throws(MatrixError) -> [String] {
         if let cached = listedDevices[user.value] {
             return cached
         }
         let query = try await keys.queryKeys(users: [user])
-        var ids = Array((query.deviceKeys[user.value] ?? [:]).keys)
+        var ids = shareableDeviceIds(of: user, in: query)
         if ids.isEmpty {
             // An empty response can be a transient stale device-list
             // result. Evict and query once more before caching the miss.
             evictUser(user)
             let refreshed = try await keys.queryKeys(users: [user])
-            ids = Array((refreshed.deviceKeys[user.value] ?? [:]).keys)
+            ids = shareableDeviceIds(of: user, in: refreshed)
         }
         listedDevices[user.value] = ids
         return ids
+    }
+
+    private func shareableDeviceIds(
+        of user: UserId, in query: KeyQueryResponse
+    ) -> [String] {
+        let devices = query.deviceKeys[user.value] ?? [:]
+        guard roomKeySharingPolicy == .crossSignedOnly else {
+            return Array(devices.keys)
+        }
+        guard
+            let selfSigning = query.selfSigningKeys?[user.value]?.keys
+                .first(where: { $0.key.hasPrefix("ed25519:") })?.value
+        else {
+            if !devices.isEmpty {
+                MatrixKitLog.crypto.warning(
+                    "OlmConnector withholding room keys: no self-signing key user=\(user.value, privacy: .private(mask: .hash))"
+                )
+            }
+            return []
+        }
+        return devices.compactMap { id, device in
+            guard
+                device.userId == user.value, device.deviceId == id,
+                CrossSigning.deviceSignatureValid(
+                    device, selfSigningKey: selfSigning)
+            else {
+                MatrixKitLog.crypto.warning(
+                    "OlmConnector withholding room keys from unsigned device user=\(user.value, privacy: .private(mask: .hash)) device=\(id, privacy: .private(mask: .hash))"
+                )
+                return nil
+            }
+            return id
+        }
     }
 
     /// Unpadded-base64 Curve25519 identity key of the local device, sent

@@ -858,6 +858,14 @@ public final class MatrixClient {
                 )
                 return
             }
+            guard await olm.canShareRoomKeys(
+                with: DeviceId(requestingDevice), of: requester)
+            else {
+                MatrixKitLog.crypto.debug(
+                    "RoomCrypto ignoring key request from ineligible device user=\(requester.value, privacy: .private(mask: .hash))"
+                )
+                return
+            }
             let shared = try await roomCrypto.shareRequestedSession(
                 roomId: roomId, sessionId: sessionId, to: requester,
                 devices: [DeviceId(requestingDevice)])
@@ -1357,6 +1365,12 @@ public final class MatrixClient {
         return try await roomCrypto.sendEncryptedContent(
             roomId, content, eventType: eventType, deviceId: ownDevice,
             transactionId: transactionId)
+    }
+
+    /// Choose which devices receive room keys: when sending, on
+    /// `shareRoomKey(_:)`, and when answering key requests.
+    public func setRoomKeySharingPolicy(_ policy: RoomKeySharingPolicy) async {
+        await olm.setRoomKeySharingPolicy(policy)
     }
 
     /// Force re-sharing the room's current Megolm session with all
