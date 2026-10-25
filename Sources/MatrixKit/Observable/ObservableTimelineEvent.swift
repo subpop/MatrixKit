@@ -759,14 +759,14 @@ public final class ObservableTimelineEvent {
             if let oldName {
                 parts.append("\(oldName) is now \(newName)")
             } else {
-                parts.append("\(newName) set their display name")
+                parts.append("\(name) set their display name")
             }
         }
         if oldAvatar != newAvatar {
-            parts.append("changed their avatar")
+            parts.append("\(name) changed their avatar")
         }
         guard !parts.isEmpty else { return nil }
-        return "\(name) \(parts.joined(separator: " and "))"
+        return parts.joined(separator: "; ")
     }
 
     /// Human-readable server-notice description: usage-limit wording
