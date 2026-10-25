@@ -20,55 +20,95 @@ public protocol SecretItemStore: Sendable {
     func delete(service: String, account: String) throws
 }
 
-/// Keychain-backed `SecretItemStore`: generic-password items readable
-/// after first unlock. No access group is set, so items live in the
-/// host app's own keychain partition.
+/// Keychain-backed `SecretItemStore`: generic-password items in the
+/// data-protection keychain, readable after first unlock and never
+/// migrated to another device or backup. No access group is set, so
+/// items live in the host app's own keychain partition.
 public struct KeychainSecretStore: SecretItemStore, Sendable {
     public init() {}
 
-    public func save(_ data: Data, service: String, account: String) throws {
-        let query: [String: Any] = [
+    private static var accessible: CFString { kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly }
+
+    /// Identity of the item, without keychain-selection attributes, so
+    /// it matches items written by earlier versions.
+    private func identity(service: String, account: String) -> [String: Any] {
+        [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
         ]
-        var status = SecItemCopyMatching(query as CFDictionary, nil)
-        if status == errSecItemNotFound {
-            var add = query
-            add[kSecValueData as String] = data
-            add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
-            status = SecItemAdd(add as CFDictionary, nil)
-        } else if status == errSecSuccess {
-            status = SecItemUpdate(
-                query as CFDictionary,
-                [kSecValueData as String: data] as CFDictionary)
-        }
-        guard status == errSecSuccess else {
-            throw SecretItemStoreError.keychain(status)
-        }
     }
 
-    public func load(service: String, account: String) -> Data? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
+    private func query(service: String, account: String) -> [String: Any] {
+        var query = identity(service: service, account: account)
+        query[kSecUseDataProtectionKeychain as String] = true
+        return query
+    }
+
+    private func read(_ query: [String: Any]) -> Data? {
+        var query = query
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
         var item: CFTypeRef?
         guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess
         else { return nil }
         return item as? Data
     }
 
+    /// Adds or updates the item and reports whether a new item was added.
+    @discardableResult
+    private func store(_ data: Data, service: String, account: String) throws -> Bool {
+        let query = query(service: service, account: account)
+        var status = SecItemCopyMatching(query as CFDictionary, nil)
+        var added = false
+        if status == errSecItemNotFound {
+            var add = query
+            add[kSecValueData as String] = data
+            add[kSecAttrAccessible as String] = Self.accessible
+            status = SecItemAdd(add as CFDictionary, nil)
+            added = status == errSecSuccess
+        } else if status == errSecSuccess {
+            status = SecItemUpdate(
+                query as CFDictionary,
+                [
+                    kSecValueData as String: data,
+                    kSecAttrAccessible as String: Self.accessible,
+                ] as CFDictionary)
+        }
+        guard status == errSecSuccess else {
+            throw SecretItemStoreError.keychain(status)
+        }
+        return added
+    }
+
+    public func save(_ data: Data, service: String, account: String) throws {
+        try store(data, service: service, account: account)
+    }
+
+    /// Loads the item, moving one written by an earlier version (outside
+    /// the data-protection keychain, or with a syncable accessibility
+    /// class) into the current form.
+    public func load(service: String, account: String) -> Data? {
+        if let data = read(query(service: service, account: account)) {
+            return data
+        }
+        guard let legacy = read(identity(service: service, account: account))
+        else { return nil }
+        // Only a newly added item proves the legacy one lives elsewhere;
+        // otherwise the store updated it in place and deleting the
+        // legacy query would remove the migrated item.
+        if (try? store(legacy, service: service, account: account)) == true {
+            SecItemDelete(identity(service: service, account: account) as CFDictionary)
+            if read(query(service: service, account: account)) == nil {
+                try? store(legacy, service: service, account: account)
+            }
+        }
+        return legacy
+    }
+
     public func delete(service: String, account: String) throws {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-        ]
-        let status = SecItemDelete(query as CFDictionary)
+        SecItemDelete(query(service: service, account: account) as CFDictionary)
+        let status = SecItemDelete(identity(service: service, account: account) as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw SecretItemStoreError.keychain(status)
         }
