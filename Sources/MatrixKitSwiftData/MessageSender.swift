@@ -224,6 +224,7 @@ public actor MessageSender {
         data: Data, filename: String, mimeType: String,
         caption: String? = nil,
         width: Int? = nil, height: Int? = nil, duration: Int? = nil,
+        isAnimated: Bool? = nil,
         thumbnailData: Data? = nil, thumbnailMimeType: String? = nil,
         inReplyTo: EventId? = nil,
         onEchoStaged: (@Sendable () -> Void)? = nil,
@@ -239,7 +240,7 @@ public actor MessageSender {
             else { .file }
         let info = MediaInfo(
             mimeType: mimeType, size: data.count,
-            width: width, height: height, duration: duration)
+            width: width, height: height, duration: duration, isAnimated: isAnimated)
         let echo = stagedEcho(
             roomId: roomId, sender: localUser,
             type: EventType.roomMessage.rawValue,
@@ -350,6 +351,8 @@ public actor MessageSender {
         public var width: Int?
         public var height: Int?
         public var duration: Int?
+        /// Whether an image is animated; nil when it couldn't be determined.
+        public var isAnimated: Bool?
         public var thumbnailData: Data?
         public var thumbnailMimeType: String?
 
@@ -357,6 +360,7 @@ public actor MessageSender {
             data: Data, filename: String, mimeType: String,
             caption: String? = nil,
             width: Int? = nil, height: Int? = nil, duration: Int? = nil,
+            isAnimated: Bool? = nil,
             thumbnailData: Data? = nil, thumbnailMimeType: String? = nil
         ) {
             self.data = data
@@ -366,6 +370,7 @@ public actor MessageSender {
             self.width = width
             self.height = height
             self.duration = duration
+            self.isAnimated = isAnimated
             self.thumbnailData = thumbnailData
             self.thumbnailMimeType = thumbnailMimeType
         }
@@ -380,7 +385,7 @@ public actor MessageSender {
         var info: MediaInfo {
             MediaInfo(
                 mimeType: mimeType, size: data.count,
-                width: width, height: height, duration: duration)
+                width: width, height: height, duration: duration, isAnimated: isAnimated)
         }
 
         /// The item as staged in the local echo: no url or file yet.

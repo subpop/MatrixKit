@@ -456,6 +456,52 @@ struct MessageSenderTests {
         }
     }
 
+    nonisolated static let animationFlags: [Bool?] = [true, false, nil]
+
+    @Test("Attachments carry the animation flag only when known", arguments: animationFlags)
+    func attachmentAnimationFlag(_ flag: Bool?) async throws {
+        try await withHarness { harness in
+            let (sender, _, _, _) = try await sender(harness)
+            let (rooms, _, _) = await harness.roomClient()
+            let room = try await rooms.create(CreateRoomRequest(name: "Images"))
+            _ = await sender.sendAttachment(
+                room, data: Data("img".utf8), filename: "a.webp", mimeType: "image/webp",
+                isAnimated: flag)
+            let body = try #require(
+                await sends(harness, containing: "/send/m.room.message/").first?.body)
+            let sent = try JSONDecoder().decode([String: AnyCodable].self, from: body)
+            let info = try #require(sent["info"]?.objectValue)
+            #expect(info["is_animated"]?.boolValue == flag)
+            #expect(info["mimetype"]?.stringValue == "image/webp")
+        }
+    }
+
+    @Test("Gallery items carry the animation flag only when known", arguments: animationFlags)
+    func galleryAnimationFlag(_ flag: Bool?) async throws {
+        try await withHarness { harness in
+            let (sender, _, _, _) = try await sender(harness)
+            let (rooms, _, _) = await harness.roomClient()
+            let room = try await rooms.create(CreateRoomRequest(name: "Gallery"))
+            _ = await sender.sendGallery(
+                room,
+                items: [
+                    .init(
+                        data: Data("a".utf8), filename: "a.webp", mimeType: "image/webp",
+                        isAnimated: flag),
+                    .init(data: Data("b".utf8), filename: "b.png", mimeType: "image/png"),
+                ],
+                caption: "2 attachments")
+            let body = try #require(
+                await sends(harness, containing: "/send/m.room.message/").first?.body)
+            let sent = try JSONDecoder().decode([String: AnyCodable].self, from: body)
+            let items = try #require(sent.values.compactMap(\.arrayValue).first)
+            let infos = items.compactMap { $0.objectValue?["info"]?.objectValue }
+            #expect(infos.count == 2)
+            #expect(infos[0]["is_animated"]?.boolValue == flag)
+            #expect(infos[1]["is_animated"] == nil)
+        }
+    }
+
     @Test("Galleries upload every item then send one event")
     func gallery() async throws {
         try await withHarness { harness in
