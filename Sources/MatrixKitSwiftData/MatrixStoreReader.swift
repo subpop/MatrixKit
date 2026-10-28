@@ -321,6 +321,108 @@ public struct MatrixStoreReader: Sendable {
             isDirect: row.isDirect)
     }
 
+    /// The stored content of a global account-data entry, or nil when the
+    /// account has none of that type.
+    public func accountData(_ type: String) throws -> [String: AnyCodable]? {
+        let context = ModelContext(modelContainer)
+        guard let data = try context.fetch(
+            FetchDescriptor<SDAccountData>(
+                predicate: #Predicate { $0.type == type })).first?.content
+        else { return nil }
+        return try JSONDecoder().decode([String: AnyCodable].self, from: data)
+    }
+
+    /// Maximum canonical-space ancestors followed when collecting packs.
+    private static let maxImagePackSpaceDepth = 5
+
+    /// Image packs available when interacting in `roomId`, in the spec's
+    /// priority order: packs the user enabled globally, then the room's own,
+    /// then those of its canonical space ancestors the user has joined. A
+    /// pack reachable from several sources appears once, at its highest
+    /// priority.
+    public func imagePacks(for roomId: RoomId) throws -> [ImagePack] {
+        let context = ModelContext(modelContainer)
+        let decoder = JSONDecoder()
+        var packs: [ImagePack] = []
+        var seen: Set<String> = []
+
+        func append(_ row: SDRoomImagePack, source: ImagePackSource) throws {
+            guard seen.insert(row.key).inserted,
+                let content = try? decoder.decode(ImagePackContent.self, from: row.content)
+            else { return }
+            let defining = row.roomId
+            let definingRoom = try context.fetch(
+                FetchDescriptor<SDRoom>(
+                    predicate: #Predicate { $0.roomId == defining })).first
+            packs.append(
+                ImagePack(
+                    roomId: RoomId(unchecked: row.roomId), stateKey: row.stateKey,
+                    source: source, content: content,
+                    displayName: content.pack?.displayName ?? definingRoom?.name,
+                    avatarUrl: content.pack?.avatarUrl ?? definingRoom?.avatarURL))
+        }
+
+        func rows(in id: String) throws -> [SDRoomImagePack] {
+            try context.fetch(
+                FetchDescriptor<SDRoomImagePack>(
+                    predicate: #Predicate { $0.roomId == id },
+                    sortBy: [SortDescriptor(\.stateKey)]))
+        }
+
+        func isJoined(_ id: String) throws -> Bool {
+            let joined = Membership.join.rawValue
+            return try context.fetchCount(
+                FetchDescriptor<SDRoom>(
+                    predicate: #Predicate { $0.roomId == id && $0.membership == joined })) > 0
+        }
+
+        // The user's global packs. A room listed without state keys has no
+        // defined meaning, and rooms the user has left expose no images.
+        let accountType = ImagePack.userAccountDataType
+        if let data = try context.fetch(
+            FetchDescriptor<SDAccountData>(
+                predicate: #Predicate { $0.type == accountType })).first?.content,
+            let references = try? decoder.decode([String: AnyCodable].self, from: data)["rooms"]?.objectValue
+        {
+            for (referencedRoom, stateKeys) in references.sorted(by: { $0.key < $1.key }) {
+                guard try isJoined(referencedRoom) else { continue }
+                let wanted = Set((stateKeys.objectValue ?? [:]).keys)
+                for row in try rows(in: referencedRoom) where wanted.contains(row.stateKey) {
+                    try append(row, source: .user)
+                }
+            }
+        }
+
+        for row in try rows(in: roomId.value) {
+            try append(row, source: .room)
+        }
+
+        // Canonical space ancestors, nearest first. The visited set guards
+        // against cycles in the space graph.
+        let canonical = SDEdgeKind.canonicalParent.rawValue
+        var visited: Set<String> = [roomId.value]
+        var frontier = [roomId.value]
+        for _ in 0..<Self.maxImagePackSpaceDepth {
+            var next: [String] = []
+            for owner in frontier {
+                let parents = try context.fetch(
+                    FetchDescriptor<SDRoomEdge>(
+                        predicate: #Predicate { $0.ownerRoomId == owner && $0.kind == canonical },
+                        sortBy: [SortDescriptor(\.peerRoomId)]))
+                for edge in parents where visited.insert(edge.peerRoomId).inserted {
+                    guard try isJoined(edge.peerRoomId) else { continue }
+                    for row in try rows(in: edge.peerRoomId) {
+                        try append(row, source: .space)
+                    }
+                    next.append(edge.peerRoomId)
+                }
+            }
+            frontier = next
+            if frontier.isEmpty { break }
+        }
+        return packs
+    }
+
     /// Joined rooms flagged as spaces.
     public func spaceRoomIds() throws -> [RoomId] {
         let context = ModelContext(modelContainer)

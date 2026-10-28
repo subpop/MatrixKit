@@ -101,6 +101,8 @@ public final class SDRoom {
     public var edges: [SDRoomEdge] = []
     @Relationship(deleteRule: .cascade, inverse: \SDRoomAccountData.room)
     public var roomAccountData: [SDRoomAccountData] = []
+    @Relationship(deleteRule: .cascade, inverse: \SDRoomImagePack.room)
+    public var imagePacks: [SDRoomImagePack] = []
 
     public init(
         roomId: String,
@@ -276,6 +278,30 @@ public final class SDRoomEdge {
         self.ownerRoomId = ownerRoomId
         self.peerRoomId = peerRoomId
         self.kind = kind.rawValue
+    }
+}
+
+/// An `m.room.image_pack` state event, one row per room and state key.
+///
+/// Packs live in their own rows because a room can hold any number of
+/// them under arbitrary state keys, and the sync `state` section is not
+/// retained as event rows.
+@Model
+public final class SDRoomImagePack {
+    /// `"\(roomId)|\(stateKey)"`.
+    @Attribute(.unique) public var key: String
+    public var roomId: String
+    public var stateKey: String
+    /// JSON-encoded ``ImagePackContent``.
+    public var content: Data
+
+    public var room: SDRoom?
+
+    public init(roomId: String, stateKey: String, content: Data) {
+        self.key = "\(roomId)|\(stateKey)"
+        self.roomId = roomId
+        self.stateKey = stateKey
+        self.content = content
     }
 }
 

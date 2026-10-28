@@ -879,6 +879,13 @@ public actor MatrixStoreWriter {
                 }
                 continue
             }
+            if event.type == ImagePack.roomEventType,
+               let packKey = event.stateKey
+            {
+                try applyImagePack(
+                    stateKey: packKey, content: event.content, room: room)
+                continue
+            }
             switch EventType(rawValue: event.type) {
             case .roomMember:
                 let data = try encoder.encode(event.content)
@@ -942,6 +949,54 @@ public actor MatrixStoreWriter {
             default:
                 break
             }
+        }
+    }
+
+    /// Reconciles a room's stored image packs with its full current state,
+    /// as fetched from the server. Sync only delivers a pack when it
+    /// changes, so rooms synced before a pack existed (or before packs were
+    /// stored) hold none until this runs. Packs missing from `state` are
+    /// removed. Does nothing for rooms the store doesn't know.
+    public func refreshImagePacks(roomId: RoomId, state: [MessageEvent]) throws {
+        let id = roomId.value
+        guard let room = try modelContext.fetch(
+            FetchDescriptor<SDRoom>(predicate: #Predicate { $0.roomId == id })).first
+        else { return }
+        var current: Set<String> = []
+        for event in state where event.type == ImagePack.roomEventType {
+            guard let stateKey = event.stateKey, !event.content.isEmpty else { continue }
+            current.insert(stateKey)
+            try applyImagePack(stateKey: stateKey, content: event.content, room: room)
+        }
+        for row in try modelContext.fetch(
+            FetchDescriptor<SDRoomImagePack>(predicate: #Predicate { $0.roomId == id }))
+        where !current.contains(row.stateKey) {
+            modelContext.delete(row)
+        }
+        try modelContext.save()
+    }
+
+    /// Upserts a room's image pack, or deletes it when its content was
+    /// cleared.
+    private func applyImagePack(
+        stateKey: String, content: [String: AnyCodable], room: SDRoom
+    ) throws {
+        let key = "\(room.roomId)|\(stateKey)"
+        let existing = try modelContext.fetch(
+            FetchDescriptor<SDRoomImagePack>(
+                predicate: #Predicate { $0.key == key })).first
+        if content.isEmpty {
+            if let existing { modelContext.delete(existing) }
+            return
+        }
+        let data = try encoder.encode(content)
+        if let existing {
+            existing.content = data
+        } else {
+            let row = SDRoomImagePack(
+                roomId: room.roomId, stateKey: stateKey, content: data)
+            row.room = room
+            modelContext.insert(row)
         }
     }
 

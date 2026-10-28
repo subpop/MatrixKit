@@ -18,6 +18,7 @@ public enum MatrixStore {
             SDRoomMember.self,
             SDRoomEvent.self,
             SDRoomEdge.self,
+            SDRoomImagePack.self,
             SDAccountData.self,
             SDRoomAccountData.self,
         ])
