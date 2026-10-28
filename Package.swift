@@ -3,6 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "MatrixKit",
+    defaultLocalization: "en",
     platforms: [
         .macOS(.v26),
         .iOS(.v26),
@@ -45,7 +46,8 @@ let package = Package(
                 "MatrixKitCrypto",
                 .product(name: "AsyncHTTPClient", package: "async-http-client"),
                 .product(name: "Crypto", package: "swift-crypto"),
-            ]
+            ],
+            resources: [.process("Resources")]
         ),
         .target(
             name: "MatrixKitCrypto",

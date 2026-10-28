@@ -613,6 +613,9 @@ public final class ObservableTimelineEvent {
         func displayName(for userId: UserId) -> String {
             members[userId]?.displayname ?? userId.value
         }
+        if event.type == ImagePack.roomEventType {
+            return classifyImagePack(event, senderName: displayName(for: event.sender))
+        }
         switch EventType(rawValue: event.type) {
         case .roomMessage:
             guard let content = event.messageContent else {
@@ -640,7 +643,7 @@ public final class ObservableTimelineEvent {
                 return .gallery(body: body, items: items)
             case .keyVerificationRequest:
                 return .verificationRequest(
-                    description: "\(displayName(for: event.sender)) requested verification")
+                    description: String(localized: "\(displayName(for: event.sender)) requested verification", bundle: .module, comment: "Timeline description: a user asked to verify. The argument is the user's name."))
             case .badEncrypted:
                 return .unableToDecrypt
             case .serverNotice:
@@ -679,39 +682,38 @@ public final class ObservableTimelineEvent {
             return classifyMembership(event, members: members)
         case .roomName:
             let name = event.content["name"]?.stringValue ?? ""
-            return .state(type: event.type, description: "Room renamed to “\(name)”")
+            return .state(type: event.type, description: String(localized: "Room renamed to “\(name)”", bundle: .module, comment: "Timeline description: the room was renamed. The argument is the new name."))
         case .roomTopic:
-            return .state(type: event.type, description: "Topic changed")
+            return .state(type: event.type, description: String(localized: "Topic changed", bundle: .module, comment: "Timeline description: the room topic changed."))
         case .roomCreate:
-            return .state(type: event.type, description: "The room was created")
+            return .state(type: event.type, description: String(localized: "The room was created", bundle: .module, comment: "Timeline description: the room was created."))
         case .roomAvatar:
-            return .state(type: event.type, description: "Room avatar was updated")
+            return .state(type: event.type, description: String(localized: "Room avatar was updated", bundle: .module, comment: "Timeline description: the room's picture changed."))
         case .roomPowerLevels:
-            return .state(type: event.type, description: "Room permissions were updated")
+            return .state(type: event.type, description: String(localized: "Room permissions were updated", bundle: .module, comment: "Timeline description: the room's power levels changed."))
         case .roomEncryption:
-            return .state(type: event.type, description: "Encryption was enabled")
+            return .state(type: event.type, description: String(localized: "Encryption was enabled", bundle: .module, comment: "Timeline description: end-to-end encryption was turned on."))
         case .roomTombstone:
-            return .state(type: event.type, description: "The room was upgraded")
+            return .state(type: event.type, description: String(localized: "The room was upgraded", bundle: .module, comment: "Timeline description: the room was replaced by a newer version."))
         case .roomCanonicalAlias:
-            return .state(type: event.type, description: "Room address was updated")
+            return .state(type: event.type, description: String(localized: "Room address was updated", bundle: .module, comment: "Timeline description: the room's alias changed."))
         case .roomPinnedEvents:
-            return .state(type: event.type, description: "Pinned messages were updated")
+            return .state(type: event.type, description: String(localized: "Pinned messages were updated", bundle: .module, comment: "Timeline description: the list of pinned messages changed."))
         case .roomJoinRules:
-            return .state(type: event.type, description: "Join rules were updated")
+            return .state(type: event.type, description: String(localized: "Join rules were updated", bundle: .module, comment: "Timeline description: who may join the room changed."))
         case .roomHistoryVisibility:
-            return .state(type: event.type, description: "History visibility was updated")
+            return .state(type: event.type, description: String(localized: "History visibility was updated", bundle: .module, comment: "Timeline description: who may read earlier messages changed."))
         case .roomServerACL:
-            return .state(type: event.type, description: "Server access control was updated")
+            return .state(type: event.type, description: String(localized: "Server access control was updated", bundle: .module, comment: "Timeline description: the room's server ACL changed."))
         case .callMember:
             let name = displayName(for: event.sender)
             return .callEvent(
                 type: event.type,
-                description: "\(name) updated call participation")
+                description: String(localized: "\(name) updated call participation", bundle: .module, comment: "Timeline description: a user joined or left a call. The argument is the user's name."))
         case .callInvite, .callAnswer, .callHangup, .callReject:
-            if let verb = callVerb(for: EventType(rawValue: event.type)) {
-                return .callEvent(
-                    type: event.type,
-                    description: "\(displayName(for: event.sender)) \(verb)")
+            let name = displayName(for: event.sender)
+            if let description = callDescription(for: EventType(rawValue: event.type), name: name) {
+                return .callEvent(type: event.type, description: description)
             }
             return .unknown(type: event.type)
         case .reaction, .pollResponse, .callCandidates, .callNegotiate,
@@ -719,6 +721,32 @@ public final class ObservableTimelineEvent {
             .typing, .receipt, .presence, .fullyRead, .tag, .custom, .unknown:
             return .unknown(type: event.type)
         }
+    }
+
+    /// An `m.room.image_pack` change, as added, updated, or removed by
+    /// comparing against the pre-change content. Packs are named by their
+    /// display name, then their state key.
+    private static func classifyImagePack(
+        _ event: MessageEvent, senderName: String
+    ) -> MessageKind {
+        let previous = event.unsigned?["prev_content"]?.objectValue ?? [:]
+        func displayName(in content: [String: AnyCodable]) -> String? {
+            content["pack"]?.objectValue?["display_name"]?.stringValue.flatMap {
+                $0.isEmpty ? nil : $0
+            }
+        }
+        let stateKey = event.stateKey.flatMap { $0.isEmpty ? nil : $0 }
+        let name = displayName(in: event.content) ?? displayName(in: previous) ?? stateKey
+        let description: String
+        switch (name, event.content.isEmpty, previous.isEmpty) {
+        case (let name?, true, _): description = String(localized: "\(senderName) removed the image pack “\(name)”", bundle: .module, comment: "Timeline description: a user removed an image pack. Arguments: the user's name, the pack's name.")
+        case (let name?, false, true): description = String(localized: "\(senderName) added the image pack “\(name)”", bundle: .module, comment: "Timeline description: a user added an image pack (stickers or emoticons) to the room. Arguments: the user's name, the pack's name.")
+        case (let name?, false, false): description = String(localized: "\(senderName) updated the image pack “\(name)”", bundle: .module, comment: "Timeline description: a user changed an image pack. Arguments: the user's name, the pack's name.")
+        case (nil, true, _): description = String(localized: "\(senderName) removed an image pack", bundle: .module, comment: "Timeline description: a user removed an image pack that has no name. The argument is the user's name.")
+        case (nil, false, true): description = String(localized: "\(senderName) added an image pack", bundle: .module, comment: "Timeline description: a user added an image pack that has no name. The argument is the user's name.")
+        case (nil, false, false): description = String(localized: "\(senderName) updated an image pack", bundle: .module, comment: "Timeline description: a user changed an image pack that has no name. The argument is the user's name.")
+        }
+        return .state(type: event.type, description: description)
     }
 
     private static func classifyMembership(
@@ -750,18 +778,18 @@ public final class ObservableTimelineEvent {
             {
                 return .profileChange(description: change)
             }
-            return .state(type: event.type, description: "\(targetName) joined")
+            return .state(type: event.type, description: String(localized: "\(targetName) joined", bundle: .module, comment: "Timeline description: a user joined the room. The argument is the user's name."))
         case .invite:
-            return .state(type: event.type, description: "\(senderName) invited \(targetName)")
+            return .state(type: event.type, description: String(localized: "\(senderName) invited \(targetName)", bundle: .module, comment: "Timeline description: a user invited another. Arguments: the inviter, the invitee."))
         case .leave:
             if event.sender == target {
-                return .state(type: event.type, description: "\(targetName) left")
+                return .state(type: event.type, description: String(localized: "\(targetName) left", bundle: .module, comment: "Timeline description: a user left the room. The argument is the user's name."))
             }
-            return .state(type: event.type, description: "\(senderName) removed \(targetName)")
+            return .state(type: event.type, description: String(localized: "\(senderName) removed \(targetName)", bundle: .module, comment: "Timeline description: a user removed another from the room. Arguments: the remover, the removed user."))
         case .ban:
-            return .state(type: event.type, description: "\(senderName) banned \(targetName)")
+            return .state(type: event.type, description: String(localized: "\(senderName) banned \(targetName)", bundle: .module, comment: "Timeline description: a user banned another. Arguments: the moderator, the banned user."))
         case .knock:
-            return .state(type: event.type, description: "\(targetName) requested to join")
+            return .state(type: event.type, description: String(localized: "\(targetName) requested to join", bundle: .module, comment: "Timeline description: a user asked to join the room. The argument is the user's name."))
         case .none:
             return .state(type: event.type, description: "\(targetName) \(membership)")
         }
@@ -779,13 +807,13 @@ public final class ObservableTimelineEvent {
         var parts: [String] = []
         if oldName != newName, let newName {
             if let oldName {
-                parts.append("\(oldName) is now \(newName)")
+                parts.append(String(localized: "\(oldName) is now \(newName)", bundle: .module, comment: "Timeline description: a user changed their display name. Arguments: the old name, the new name."))
             } else {
-                parts.append("\(name) set their display name")
+                parts.append(String(localized: "\(name) set their display name", bundle: .module, comment: "Timeline description: a user set a display name for the first time. The argument is the user's name."))
             }
         }
         if oldAvatar != newAvatar {
-            parts.append("\(name) changed their avatar")
+            parts.append(String(localized: "\(name) changed their avatar", bundle: .module, comment: "Timeline description: a user changed their profile picture. The argument is the user's name."))
         }
         guard !parts.isEmpty else { return nil }
         return parts.joined(separator: "; ")
@@ -806,21 +834,21 @@ public final class ObservableTimelineEvent {
         else { return fallback }
         switch notice.limitType {
         case "monthly_active_user":
-            return "Your account has reached the monthly active user limit"
+            return String(localized: "Your account has reached the monthly active user limit", bundle: .module, comment: "Server notice shown when the homeserver's monthly active user limit is reached.")
         case "media_quota_size":
-            return "Your account has reached its media storage quota"
+            return String(localized: "Your account has reached its media storage quota", bundle: .module, comment: "Server notice shown when the account's media storage quota is reached.")
         default:
-            return "Your account has reached its resource limit"
+            return String(localized: "Your account has reached its resource limit", bundle: .module, comment: "Server notice shown when the account reaches a resource limit.")
         }
     }
 
-    /// User-meaningful call verb for signalling types; nil for
+    /// User-meaningful description for call signalling types; nil for
     /// negotiation noise (renders as `.unknown` instead).
-    private static func callVerb(for type: EventType) -> String? {
+    private static func callDescription(for type: EventType, name: String) -> String? {
         switch type {
-        case .callInvite: "started a call"
-        case .callAnswer: "answered the call"
-        case .callHangup, .callReject: "ended the call"
+        case .callInvite: String(localized: "\(name) started a call", bundle: .module, comment: "Timeline description: a user started a call. The argument is the user's name.")
+        case .callAnswer: String(localized: "\(name) answered the call", bundle: .module, comment: "Timeline description: a user answered a call. The argument is the user's name.")
+        case .callHangup, .callReject: String(localized: "\(name) ended the call", bundle: .module, comment: "Timeline description: a user ended or rejected a call. The argument is the user's name.")
         default: nil
         }
     }

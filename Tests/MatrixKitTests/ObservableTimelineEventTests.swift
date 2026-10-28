@@ -527,6 +527,63 @@ struct ObservableTimelineEventTests {
         #expect(wrapper.kind == .state(type: type, description: description))
     }
 
+    @Test("Timeline descriptions resolve through the package's string bundle")
+    func descriptionsAreLocalizable() {
+        // The package declares English as its development language. Entries
+        // with no translation are not compiled into the bundle, so lookups
+        // fall back to the English text.
+        #expect(Bundle.module.developmentLocalization == "en")
+        #expect(
+            String(localized: "\("Ana") joined", bundle: .module) == "Ana joined")
+    }
+
+    struct ImagePackCase: Sendable {
+        var id: String
+        var stateKey: String
+        var content: [String: AnyCodable]
+        var previous: [String: AnyCodable]?
+        var description: String
+    }
+
+    nonisolated static let imagePackCases: [ImagePackCase] = {
+        let images: [String: AnyCodable] = ["images": .object([:])]
+        func named(_ name: String) -> [String: AnyCodable] {
+            ["images": .object([:]), "pack": .object(["display_name": .string(name)])]
+        }
+        return [
+            ImagePackCase(
+                id: "added with a display name", stateKey: "cats", content: named("Cats"),
+                previous: nil, description: "Alice added the image pack \u{201C}Cats\u{201D}"),
+            ImagePackCase(
+                id: "added, named by its state key", stateKey: "cats", content: images,
+                previous: nil, description: "Alice added the image pack \u{201C}cats\u{201D}"),
+            ImagePackCase(
+                id: "added without any name", stateKey: "", content: images,
+                previous: nil, description: "Alice added an image pack"),
+            ImagePackCase(
+                id: "updated", stateKey: "cats", content: named("Cats"),
+                previous: named("Kittens"),
+                description: "Alice updated the image pack \u{201C}Cats\u{201D}"),
+            ImagePackCase(
+                id: "removed, named from the previous content", stateKey: "cats", content: [:],
+                previous: named("Cats"),
+                description: "Alice removed the image pack \u{201C}Cats\u{201D}"),
+            ImagePackCase(
+                id: "removed, named by its state key", stateKey: "cats", content: [:],
+                previous: nil, description: "Alice removed the image pack \u{201C}cats\u{201D}"),
+        ]
+    }()
+
+    @Test("Image pack changes read as added, updated, or removed", arguments: imagePackCases)
+    func imagePackDescriptions(_ row: ImagePackCase) {
+        let event = messageEvent(
+            type: "m.room.image_pack", stateKey: row.stateKey, content: row.content,
+            unsigned: row.previous.map { ["prev_content": .object($0)] })
+        let wrapper = ObservableTimelineEvent.make(
+            from: event, localUser: nil, members: membersFixture())
+        #expect(wrapper.kind == .state(type: "m.room.image_pack", description: row.description))
+    }
+
     private func stickerEvent(
         id: String, relatesTo: [String: AnyCodable]? = nil
     ) -> MessageEvent {

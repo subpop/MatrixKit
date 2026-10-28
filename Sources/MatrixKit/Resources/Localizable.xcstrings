@@ -1,0 +1,111 @@
+{
+  "sourceLanguage" : "en",
+  "strings" : {
+    "%@ added an image pack" : {
+      "comment" : "Timeline description: a user added an image pack that has no name. The argument is the user's name."
+    },
+    "%@ added the image pack “%@”" : {
+      "comment" : "Timeline description: a user added an image pack (stickers or emoticons) to the room. Arguments: the user's name, the pack's name."
+    },
+    "%@ answered the call" : {
+      "comment" : "Timeline description: a user answered a call. The argument is the user's name."
+    },
+    "%@ banned %@" : {
+      "comment" : "Timeline description: a user banned another. Arguments: the moderator, the banned user."
+    },
+    "%@ changed their avatar" : {
+      "comment" : "Timeline description: a user changed their profile picture. The argument is the user's name."
+    },
+    "%@ ended the call" : {
+      "comment" : "Timeline description: a user ended or rejected a call. The argument is the user's name."
+    },
+    "%@ invited %@" : {
+      "comment" : "Timeline description: a user invited another. Arguments: the inviter, the invitee."
+    },
+    "%@ is now %@" : {
+      "comment" : "Timeline description: a user changed their display name. Arguments: the old name, the new name."
+    },
+    "%@ joined" : {
+      "comment" : "Timeline description: a user joined the room. The argument is the user's name."
+    },
+    "%@ left" : {
+      "comment" : "Timeline description: a user left the room. The argument is the user's name."
+    },
+    "%@ removed %@" : {
+      "comment" : "Timeline description: a user removed another from the room. Arguments: the remover, the removed user."
+    },
+    "%@ removed an image pack" : {
+      "comment" : "Timeline description: a user removed an image pack that has no name. The argument is the user's name."
+    },
+    "%@ removed the image pack “%@”" : {
+      "comment" : "Timeline description: a user removed an image pack. Arguments: the user's name, the pack's name."
+    },
+    "%@ requested to join" : {
+      "comment" : "Timeline description: a user asked to join the room. The argument is the user's name."
+    },
+    "%@ requested verification" : {
+      "comment" : "Timeline description: a user asked to verify. The argument is the user's name."
+    },
+    "%@ set their display name" : {
+      "comment" : "Timeline description: a user set a display name for the first time. The argument is the user's name."
+    },
+    "%@ started a call" : {
+      "comment" : "Timeline description: a user started a call. The argument is the user's name."
+    },
+    "%@ updated an image pack" : {
+      "comment" : "Timeline description: a user changed an image pack that has no name. The argument is the user's name."
+    },
+    "%@ updated call participation" : {
+      "comment" : "Timeline description: a user joined or left a call. The argument is the user's name."
+    },
+    "%@ updated the image pack “%@”" : {
+      "comment" : "Timeline description: a user changed an image pack. Arguments: the user's name, the pack's name."
+    },
+    "Encryption was enabled" : {
+      "comment" : "Timeline description: end-to-end encryption was turned on."
+    },
+    "History visibility was updated" : {
+      "comment" : "Timeline description: who may read earlier messages changed."
+    },
+    "Join rules were updated" : {
+      "comment" : "Timeline description: who may join the room changed."
+    },
+    "Pinned messages were updated" : {
+      "comment" : "Timeline description: the list of pinned messages changed."
+    },
+    "Room address was updated" : {
+      "comment" : "Timeline description: the room's alias changed."
+    },
+    "Room avatar was updated" : {
+      "comment" : "Timeline description: the room's picture changed."
+    },
+    "Room permissions were updated" : {
+      "comment" : "Timeline description: the room's power levels changed."
+    },
+    "Room renamed to “%@”" : {
+      "comment" : "Timeline description: the room was renamed. The argument is the new name."
+    },
+    "Server access control was updated" : {
+      "comment" : "Timeline description: the room's server ACL changed."
+    },
+    "The room was created" : {
+      "comment" : "Timeline description: the room was created."
+    },
+    "The room was upgraded" : {
+      "comment" : "Timeline description: the room was replaced by a newer version."
+    },
+    "Topic changed" : {
+      "comment" : "Timeline description: the room topic changed."
+    },
+    "Your account has reached its media storage quota" : {
+      "comment" : "Server notice shown when the account's media storage quota is reached."
+    },
+    "Your account has reached its resource limit" : {
+      "comment" : "Server notice shown when the account reaches a resource limit."
+    },
+    "Your account has reached the monthly active user limit" : {
+      "comment" : "Server notice shown when the homeserver's monthly active user limit is reached."
+    }
+  },
+  "version" : "1.0"
+}
