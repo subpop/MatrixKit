@@ -108,6 +108,8 @@ public struct MessageContent: Hashable, Sendable, Codable {
     public var url: String?
     /// File dimensions, duration, thumbnails, … for media messages.
     public var info: MediaInfo?
+    /// Gallery items (MSC4274) for `.gallery` messages.
+    public var itemtypes: [GalleryItem]?
 
     public init(
         msgtype: MessageType = .text,
@@ -119,7 +121,8 @@ public struct MessageContent: Hashable, Sendable, Codable {
         mentions: Mentions? = nil,
         file: EncryptedFile? = nil,
         url: String? = nil,
-        info: MediaInfo? = nil
+        info: MediaInfo? = nil,
+        itemtypes: [GalleryItem]? = nil
     ) {
         self.msgtype = msgtype
         self.body = body
@@ -131,6 +134,7 @@ public struct MessageContent: Hashable, Sendable, Codable {
         self.file = file
         self.url = url
         self.info = info
+        self.itemtypes = itemtypes
     }
 
     /// Plain-text message.
@@ -183,6 +187,38 @@ public struct MessageContent: Hashable, Sendable, Codable {
         case file
         case url
         case info
+        case itemtypes
+    }
+}
+
+/// One attachment of a gallery message (MSC4274). Shares the schema of
+/// the media msgtypes, with `itemtype` in place of `msgtype`.
+public struct GalleryItem: Hashable, Sendable, Codable {
+    /// `.image`, `.video`, `.audio`, or `.file`.
+    public var itemtype: MessageType
+    /// Per-item caption or description.
+    public var body: String?
+    public var filename: String?
+    /// MXC URI for unencrypted items.
+    public var url: String?
+    /// Encrypted file reference for encrypted items.
+    public var file: EncryptedFile?
+    public var info: MediaInfo?
+
+    public init(
+        itemtype: MessageType,
+        body: String? = nil,
+        filename: String? = nil,
+        url: String? = nil,
+        file: EncryptedFile? = nil,
+        info: MediaInfo? = nil
+    ) {
+        self.itemtype = itemtype
+        self.body = body
+        self.filename = filename
+        self.url = url
+        self.file = file
+        self.info = info
     }
 }
 

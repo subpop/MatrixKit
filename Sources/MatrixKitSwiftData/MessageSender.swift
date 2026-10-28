@@ -299,6 +299,144 @@ public actor MessageSender {
         return echo.eventId
     }
 
+    // MARK: - Galleries
+
+    /// One attachment of a gallery send.
+    public struct GalleryUpload: Sendable {
+        public var data: Data
+        public var filename: String
+        public var mimeType: String
+        /// Per-item caption; becomes the item's `body` when set.
+        public var caption: String?
+        public var width: Int?
+        public var height: Int?
+        public var duration: Int?
+        public var thumbnailData: Data?
+        public var thumbnailMimeType: String?
+
+        public init(
+            data: Data, filename: String, mimeType: String,
+            caption: String? = nil,
+            width: Int? = nil, height: Int? = nil, duration: Int? = nil,
+            thumbnailData: Data? = nil, thumbnailMimeType: String? = nil
+        ) {
+            self.data = data
+            self.filename = filename
+            self.mimeType = mimeType
+            self.caption = caption
+            self.width = width
+            self.height = height
+            self.duration = duration
+            self.thumbnailData = thumbnailData
+            self.thumbnailMimeType = thumbnailMimeType
+        }
+
+        var itemtype: MessageType {
+            if mimeType.hasPrefix("image/") { .image }
+            else if mimeType.hasPrefix("video/") { .video }
+            else if mimeType.hasPrefix("audio/") { .audio }
+            else { .file }
+        }
+
+        var info: MediaInfo {
+            MediaInfo(
+                mimeType: mimeType, size: data.count,
+                width: width, height: height, duration: duration)
+        }
+
+        /// The item as staged in the local echo: no url or file yet.
+        var echoItem: GalleryItem {
+            GalleryItem(
+                itemtype: itemtype, body: caption ?? filename,
+                filename: filename, info: info)
+        }
+    }
+
+    /// Send several attachments as one gallery message (MSC4274), with a
+    /// local echo staged before any upload. Uploads run in order; if any
+    /// fails, the echo is marked failed and nothing is sent.
+    ///
+    /// `onProgress` receives the overall fraction (0 to 1), weighted by
+    /// the bytes of every file and thumbnail. `onEchoStaged` and
+    /// `onFailure` behave as in ``sendAttachment(_:data:filename:mimeType:caption:width:height:duration:thumbnailData:thumbnailMimeType:inReplyTo:onEchoStaged:onProgress:onFailure:)``.
+    @discardableResult
+    public func sendGallery(
+        _ roomId: RoomId,
+        items: [GalleryUpload],
+        caption: String,
+        inReplyTo: EventId? = nil,
+        onEchoStaged: (@Sendable () -> Void)? = nil,
+        onProgress: (@Sendable (Double) -> Void)? = nil,
+        onFailure: (@Sendable (any Error) -> Void)? = nil
+    ) async -> EventId? {
+        guard let localUser, !items.isEmpty else { return nil }
+        let transactionId = TransactionId.random()
+        let echo = stagedEcho(
+            roomId: roomId, sender: localUser,
+            type: EventType.roomMessage.rawValue,
+            content: MessageContent(
+                msgtype: .gallery, body: caption,
+                itemtypes: items.map(\.echoItem)),
+            transactionId: transactionId)
+        try? await writer.stageEcho(echo, roomId: roomId, transactionId: transactionId)
+        onEchoStaged?()
+        do {
+            let encrypted = isEncrypted(roomId)
+            let total = max(
+                items.reduce(0) { $0 + $1.data.count + ($1.thumbnailData?.count ?? 0) }, 1)
+            var uploaded = 0
+            var uploadedItems: [GalleryItem] = []
+            for item in items {
+                // Progress within this item's bytes maps onto the overall fraction.
+                let base = uploaded
+                let itemBytes = item.data.count + (item.thumbnailData?.count ?? 0)
+                let report: @Sendable (Double) -> Void = { fraction in
+                    onProgress?((Double(base) + fraction * Double(itemBytes)) / Double(total))
+                }
+                var galleryItem = GalleryItem(
+                    itemtype: item.itemtype, body: item.caption ?? item.filename,
+                    filename: item.filename, info: item.info)
+                if encrypted {
+                    let fileShare = itemBytes > 0 ? Double(item.data.count) / Double(itemBytes) : 1
+                    galleryItem.file = try await media.uploadEncrypted(
+                        item.data, mimeType: item.mimeType, filename: item.filename
+                    ) { report($0 * fileShare) }
+                    if let thumbnailData = item.thumbnailData {
+                        galleryItem.info?.thumbnailFile = try await media.uploadEncrypted(
+                            thumbnailData,
+                            mimeType: item.thumbnailMimeType ?? "image/png",
+                            filename: "\(item.filename)-thumbnail"
+                        ) { report(fileShare + $0 * (1 - fileShare)) }
+                    }
+                } else {
+                    let mxc = try await media.upload(
+                        item.data, mimeType: item.mimeType, filename: item.filename,
+                        onProgress: report)
+                    galleryItem.url = mxc.value
+                }
+                uploaded += itemBytes
+                uploadedItems.append(galleryItem)
+            }
+            let content = MessageContent(
+                msgtype: .gallery, body: caption,
+                relatesTo: inReplyTo.map(RelatesTo.reply(to:)),
+                itemtypes: uploadedItems)
+            if encrypted {
+                try await ensureShared(roomId)
+                _ = try await roomCrypto.sendEncryptedContent(
+                    roomId, content, deviceId: ownDeviceId, transactionId: transactionId)
+            } else {
+                _ = try await messages.send(
+                    roomId, content: content, transactionId: transactionId)
+            }
+        } catch {
+            try? await writer.failEcho(
+                transactionId: transactionId, reason: error.localizedDescription)
+            onFailure?(error)
+        }
+        return echo.eventId
+    }
+
     // MARK: - Reactions
 
     /// React with an emoji key (`m.reaction`).

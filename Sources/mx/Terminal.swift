@@ -51,6 +51,8 @@ func formatEvent(_ event: MessageEvent, localUser: UserId?) -> String? {
             body = content.body
         case .image, .video, .audio, .file:
             body = "[\(content.msgtype.rawValue): \(content.body)]"
+        case .gallery:
+            body = "[gallery: \(content.body) (\(content.itemtypes?.count ?? 0) items)]"
         case .location:
             body = "[location: \(content.body)]"
         case .keyVerificationRequest:

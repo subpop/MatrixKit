@@ -25,6 +25,8 @@ public enum MessageKind: Hashable, Sendable {
     case audio(body: String, url: String?, info: MediaInfo?)
     /// `m.file` with optional MXC URL and file metadata.
     case file(body: String, url: String?, info: MediaInfo?)
+    /// Media gallery (MSC4274): a shared caption and its items.
+    case gallery(body: String, items: [GalleryItem])
     /// `m.location` message.
     case location(body: String)
     /// `m.location` referencing a beacon (live location share).
@@ -616,6 +618,11 @@ public final class ObservableTimelineEvent {
                     return .liveLocation(body: body)
                 }
                 return .location(body: body)
+            case .gallery:
+                guard let items = content.itemtypes, !items.isEmpty else {
+                    return .text(body: body)
+                }
+                return .gallery(body: body, items: items)
             case .keyVerificationRequest:
                 return .verificationRequest(
                     description: "\(displayName(for: event.sender)) requested verification")

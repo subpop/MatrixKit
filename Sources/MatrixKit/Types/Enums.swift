@@ -182,6 +182,9 @@ public enum MessageType: Hashable, Sendable {
     case keyVerificationRequest
     case badEncrypted
     case serverNotice
+    /// Media gallery (MSC4274). Sent as the unstable `dm.filament.gallery`;
+    /// the stable `m.gallery` is accepted on receive.
+    case gallery
     case unknown(String)
 
     public var rawValue: String {
@@ -197,6 +200,7 @@ public enum MessageType: Hashable, Sendable {
         case .keyVerificationRequest: return "m.key.verification.request"
         case .badEncrypted: return "m.bad.encrypted"
         case .serverNotice: return "m.server_notice"
+        case .gallery: return "dm.filament.gallery"
         case .unknown(let s): return s
         }
     }
@@ -214,6 +218,7 @@ public enum MessageType: Hashable, Sendable {
         case "m.key.verification.request": self = .keyVerificationRequest
         case "m.bad.encrypted": self = .badEncrypted
         case "m.server_notice": self = .serverNotice
+        case "dm.filament.gallery", "m.gallery": self = .gallery
         default: self = .unknown(rawValue)
         }
     }

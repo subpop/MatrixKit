@@ -291,6 +291,28 @@ struct MessageSenderTests {
         }
     }
 
+    @Test("Galleries upload every item then send one event")
+    func gallery() async throws {
+        try await withHarness { harness in
+            let (sender, _, _, _) = try await sender(harness)
+            let (rooms, _, _) = await harness.roomClient()
+            let room = try await rooms.create(CreateRoomRequest(name: "Gallery"))
+            let echo = try #require(await sender.sendGallery(
+                room,
+                items: [
+                    .init(data: Data("a".utf8), filename: "a.png", mimeType: "image/png"),
+                    .init(data: Data("b".utf8), filename: "b.txt", mimeType: "text/plain"),
+                ],
+                caption: "2 attachments"))
+            #expect(echo.value.hasPrefix("local:"))
+            let uploads = await harness.requests.filter {
+                $0.method == "POST" && $0.path.contains("/upload")
+            }
+            #expect(uploads.count == 2)
+            #expect(await sends(harness, containing: "/send/m.room.message/").count == 1)
+        }
+    }
+
     // MARK: - Branch coverage
 
     /// Create a room and mark it encrypted in the store.

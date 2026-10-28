@@ -328,6 +328,44 @@ struct ObservableTimelineEventTests {
         #expect(wrapper.kind == .text(body: "hello"))
     }
 
+    @Test("Galleries classify with their items under either msgtype")
+    func gallery() {
+        for msgtype in ["dm.filament.gallery", "m.gallery"] {
+            let event = messageEvent(content: [
+                "msgtype": .string(msgtype),
+                "body": .string("two photos"),
+                "itemtypes": .array([
+                    .object([
+                        "itemtype": .string("m.image"), "body": .string("a.png"),
+                        "url": .string("mxc://x/a"),
+                    ]),
+                    .object([
+                        "itemtype": .string("m.video"), "url": .string("mxc://x/b"),
+                    ]),
+                ]),
+            ])
+            let wrapper = ObservableTimelineEvent.make(from: event, localUser: nil)
+            guard case .gallery(let body, let items) = wrapper.kind else {
+                Issue.record("expected .gallery, got \(wrapper.kind)")
+                continue
+            }
+            #expect(body == "two photos")
+            #expect(items.map(\.itemtype) == [.image, .video])
+            #expect(items[0].url == "mxc://x/a")
+            #expect(items[1].body == nil)
+        }
+    }
+
+    @Test("Galleries without items fall back to text")
+    func galleryWithoutItems() {
+        let event = messageEvent(content: [
+            "msgtype": .string("dm.filament.gallery"),
+            "body": .string("empty"),
+        ])
+        let wrapper = ObservableTimelineEvent.make(from: event, localUser: nil)
+        #expect(wrapper.kind == .text(body: "empty"))
+    }
+
     @Test("In-room verification requests classify with the sender name")
     func verificationRequest() {
         let event = messageEvent(content: [
