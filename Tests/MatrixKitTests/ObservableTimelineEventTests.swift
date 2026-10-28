@@ -527,6 +527,73 @@ struct ObservableTimelineEventTests {
         #expect(wrapper.kind == .state(type: type, description: description))
     }
 
+    private func stickerEvent(
+        id: String, relatesTo: [String: AnyCodable]? = nil
+    ) -> MessageEvent {
+        var content: [String: AnyCodable] = [
+            "body": .string("a waving cat"), "url": .string("mxc://x/cat"),
+            "info": .object([:]),
+        ]
+        if let relatesTo { content["m.relates_to"] = .object(relatesTo) }
+        return MessageEvent(
+            type: "m.sticker", eventId: EventId(unchecked: id),
+            sender: UserId(unchecked: "@alice:x"), originServerTs: 1_700_000_000_000,
+            content: content)
+    }
+
+    private func textMessage(id: String, relatesTo: [String: AnyCodable]? = nil) -> MessageEvent {
+        var content = textContent("hello")
+        if let relatesTo { content["m.relates_to"] = .object(relatesTo) }
+        return MessageEvent(
+            type: "m.room.message", eventId: EventId(unchecked: id),
+            sender: UserId(unchecked: "@bob:x"), originServerTs: 1_700_000_000_000,
+            content: content)
+    }
+
+    private func reply(to id: String) -> [String: AnyCodable] {
+        ["m.in_reply_to": .object(["event_id": .string(id)])]
+    }
+
+    @Test("A sticker sent as a reply resolves its parent")
+    func stickerReplyResolvesParent() {
+        let rendered = ObservableTimelineEvent.render(
+            [textMessage(id: "$parent"), stickerEvent(id: "$sticker", relatesTo: reply(to: "$parent"))],
+            members: membersFixture())
+        let sticker = rendered[1]
+        #expect(sticker.reply?.eventID == EventId(unchecked: "$parent"))
+        #expect(sticker.reply?.body == "hello")
+    }
+
+    @Test("A reply to a sticker quotes its description and image")
+    func replyToStickerQuotesIt() {
+        let rendered = ObservableTimelineEvent.render(
+            [stickerEvent(id: "$sticker"), textMessage(id: "$reply", relatesTo: reply(to: "$sticker"))],
+            members: membersFixture())
+        let quote = rendered[1].reply
+        #expect(quote?.eventID == EventId(unchecked: "$sticker"))
+        #expect(quote?.body == "a waving cat")
+        #expect(quote?.imageURL == "mxc://x/cat")
+        #expect(quote?.formattedBody == nil)
+    }
+
+    @Test("A sticker in a thread records its thread root")
+    func stickerThreadRoot() {
+        let relation: [String: AnyCodable] = [
+            "rel_type": .string("m.thread"), "event_id": .string("$root"),
+        ]
+        let rendered = ObservableTimelineEvent.render(
+            [stickerEvent(id: "$sticker", relatesTo: relation)], members: membersFixture())
+        #expect(rendered[0].threadRootEventId == EventId(unchecked: "$root"))
+    }
+
+    @Test("Stickers without a relation have no reply or thread")
+    func plainStickerHasNoRelation() {
+        let rendered = ObservableTimelineEvent.render(
+            [stickerEvent(id: "$sticker")], members: membersFixture())
+        #expect(rendered[0].reply == nil)
+        #expect(rendered[0].threadRootEventId == nil)
+    }
+
     @Test("Ban classifies with sender and target names")
     func banDescription() {
         let ban = messageEvent(

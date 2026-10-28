@@ -251,7 +251,7 @@ public final class ObservableTimelineEvent {
             targetUserId: target?.id,
             targetDisplayName: target?.displayName,
             mentionedUserIds: mentions(in: event),
-            threadRootEventId: content?.threadRootEventId,
+            threadRootEventId: event.threadRootEventId,
             threadReplyCount: threadSummary?["count"]?.intValue,
             threadParticipated: threadSummary?["current_user_participated"]?.boolValue ?? false
         )
@@ -447,17 +447,32 @@ public final class ObservableTimelineEvent {
         members: [UserId: MemberContent] = [:]
     ) -> ResolvedReply? {
         guard
-            let parentId = event.messageContent?.relatesTo?.inReplyTo?.eventId,
-            let parent = eventsById[parentId],
-            let content = parent.messageContent
+            let parentId = event.relatesTo?.inReplyTo?.eventId,
+            let parent = eventsById[parentId]
         else { return nil }
-        return ResolvedReply(
-            eventID: parentId,
-            senderID: parent.sender,
-            senderDisplayName: members[parent.sender]?.displayname,
-            body: content.body,
-            formattedBody: content.formattedBody,
-            imageURL: content.msgtype == .image ? content.url : nil)
+        let senderName = members[parent.sender]?.displayname
+        if let content = parent.messageContent {
+            return ResolvedReply(
+                eventID: parentId,
+                senderID: parent.sender,
+                senderDisplayName: senderName,
+                body: content.body,
+                formattedBody: content.formattedBody,
+                imageURL: content.msgtype == .image ? content.url : nil)
+        }
+        // Stickers have no `msgtype`, so they never decode as message content.
+        if EventType(rawValue: parent.type) == .sticker,
+            let body = parent.content["body"]?.stringValue
+        {
+            return ResolvedReply(
+                eventID: parentId,
+                senderID: parent.sender,
+                senderDisplayName: senderName,
+                body: body,
+                formattedBody: nil,
+                imageURL: parent.content["url"]?.stringValue)
+        }
+        return nil
     }
 
     /// Fold profile noise from fresh joins into a single "joined" row.

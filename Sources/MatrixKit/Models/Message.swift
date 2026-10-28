@@ -476,6 +476,23 @@ public struct MessageEvent: Hashable, Sendable, Codable {
         Date(timeIntervalSince1970: TimeInterval(originServerTs) / 1000)
     }
 
+    /// The event's `m.relates_to`, whatever its type. Message content only
+    /// decodes for `m.room.message`, but stickers and other events carry
+    /// reply and thread relations too.
+    public var relatesTo: RelatesTo? {
+        guard
+            let relation = content["m.relates_to"],
+            let data = try? JSONEncoder().encode(relation)
+        else { return nil }
+        return try? JSONDecoder().decode(RelatesTo.self, from: data)
+    }
+
+    /// Thread root when the event carries an `m.thread` relation.
+    public var threadRootEventId: EventId? {
+        guard relatesTo?.relType == .thread else { return nil }
+        return relatesTo?.eventId
+    }
+
     /// Decode `content` as `m.room.message`.
     public var messageContent: MessageContent? {
         // Re-encode through JSON to decode the concrete content type.

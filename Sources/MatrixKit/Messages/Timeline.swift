@@ -205,7 +205,7 @@ public actor ThreadTimeline {
         } catch let error {
             guard Self.isUnrecognized(error), let localEvents else { throw error }
             replies = await decrypted(localEvents.filter {
-                $0.messageContent?.threadRootEventId == rootEventId
+                $0.threadRootEventId == rootEventId
             })
             nextBatch = nil
         }
