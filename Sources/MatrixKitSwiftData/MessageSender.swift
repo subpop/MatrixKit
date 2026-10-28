@@ -299,6 +299,45 @@ public actor MessageSender {
         return echo.eventId
     }
 
+    // MARK: - Stickers
+
+    /// Send an `m.sticker` event with a local echo. Encrypted rooms share
+    /// the Megolm session and send the sticker as ciphertext; the image
+    /// itself is referenced by its existing `mxc://` URI, so nothing is
+    /// uploaded. Transport failures mark the echo failed instead of
+    /// throwing. Returns the echo event ID, or nil when logged out.
+    /// `onEchoStaged` fires after the local store write and before transport.
+    @discardableResult
+    public func sendSticker(
+        _ roomId: RoomId, _ content: StickerContent,
+        transactionId: TransactionId = .random(),
+        onEchoStaged: (@Sendable () -> Void)? = nil
+    ) async -> EventId? {
+        guard let localUser else { return nil }
+        let echo = stagedEcho(
+            roomId: roomId, sender: localUser,
+            type: EventType.sticker.rawValue, content: content,
+            transactionId: transactionId)
+        try? await writer.stageEcho(echo, roomId: roomId, transactionId: transactionId)
+        onEchoStaged?()
+        do {
+            if isEncrypted(roomId) {
+                try await ensureShared(roomId)
+                _ = try await roomCrypto.sendEncryptedContent(
+                    roomId, content, eventType: EventType.sticker.rawValue,
+                    deviceId: ownDeviceId, transactionId: transactionId)
+            } else {
+                _ = try await messages.sendEvent(
+                    roomId, eventType: EventType.sticker.rawValue,
+                    content: content, transactionId: transactionId)
+            }
+        } catch {
+            try? await writer.failEcho(
+                transactionId: transactionId, reason: error.localizedDescription)
+        }
+        return echo.eventId
+    }
+
     // MARK: - Galleries
 
     /// One attachment of a gallery send.

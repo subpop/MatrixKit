@@ -79,6 +79,171 @@ struct MessageSenderTests {
         }
     }
 
+    @Test("Sticker send stages an echo and PUTs an m.sticker event")
+    func sendSticker() async throws {
+        try await withHarness { harness in
+            let (sender, writer, _, _) = try await sender(harness)
+            let room = RoomId(unchecked: "!room:test")
+            let content = StickerContent(
+                body: "a waving cat", url: "mxc://test/cat",
+                info: MediaInfo(mimeType: "image/webp", width: 512, height: 512, isAnimated: true))
+            let echo = try #require(await sender.sendSticker(room, content))
+            #expect(echo.value.hasPrefix("local:"))
+            let puts = await sends(harness, containing: "/send/m.sticker/")
+            #expect(puts.count == 1)
+            let body = try #require(puts.first?.body)
+            let sent = try JSONDecoder().decode(StickerContent.self, from: body)
+            #expect(sent == content)
+            #expect(await writer.echoTransactionId(for: echo) != nil)
+        }
+    }
+
+    struct StickerRelationCase: Sendable {
+        var id: String
+        var relatesTo: RelatesTo
+        var relType: String?
+        var eventId: String?
+        var replyTo: String?
+    }
+
+    nonisolated static let stickerRelationCases: [StickerRelationCase] = [
+        StickerRelationCase(
+            id: "reply", relatesTo: .reply(to: EventId(unchecked: "$parent:test")),
+            relType: nil, eventId: nil, replyTo: "$parent:test"),
+        StickerRelationCase(
+            id: "thread", relatesTo: .thread(root: EventId(unchecked: "$root:test")),
+            relType: "m.thread", eventId: "$root:test", replyTo: nil),
+        StickerRelationCase(
+            id: "thread with reply fallback",
+            relatesTo: .thread(
+                root: EventId(unchecked: "$root:test"),
+                replyTo: EventId(unchecked: "$parent:test")),
+            relType: "m.thread", eventId: "$root:test", replyTo: "$parent:test"),
+    ]
+
+    private func relation(in content: [String: AnyCodable]) -> (
+        relType: String?, eventId: String?, replyTo: String?
+    ) {
+        let relation = content["m.relates_to"]?.objectValue
+        return (
+            relation?["rel_type"]?.stringValue,
+            relation?["event_id"]?.stringValue,
+            relation?["m.in_reply_to"]?.objectValue?["event_id"]?.stringValue)
+    }
+
+    @Test("Stickers carry reply and thread relations", arguments: stickerRelationCases)
+    func stickerRelations(_ row: StickerRelationCase) async throws {
+        try await withHarness { harness in
+            let (sender, _, _, _) = try await sender(harness)
+            let room = RoomId(unchecked: "!room:test")
+            _ = await sender.sendSticker(
+                room,
+                StickerContent(body: "cat", url: "mxc://test/cat", relatesTo: row.relatesTo))
+            let body = try #require(
+                await sends(harness, containing: "/send/m.sticker/").first?.body)
+            let sent = try JSONDecoder().decode([String: AnyCodable].self, from: body)
+            let found = relation(in: sent)
+            #expect(found.relType == row.relType)
+            #expect(found.eventId == row.eventId)
+            #expect(found.replyTo == row.replyTo)
+        }
+    }
+
+    @Test("Stickers without a relation omit m.relates_to")
+    func stickerWithoutRelation() async throws {
+        try await withHarness { harness in
+            let (sender, _, _, _) = try await sender(harness)
+            _ = await sender.sendSticker(
+                RoomId(unchecked: "!room:test"),
+                StickerContent(body: "cat", url: "mxc://test/cat"))
+            let body = try #require(
+                await sends(harness, containing: "/send/m.sticker/").first?.body)
+            let sent = try JSONDecoder().decode([String: AnyCodable].self, from: body)
+            #expect(sent["m.relates_to"] == nil)
+        }
+    }
+
+    @Test("Encrypted sticker replies repeat the relation in the clear")
+    func encryptedStickerReply() async throws {
+        try await withHarness { harness in
+            let (sender, writer, sharer, cryptoSender) = try await sender(harness)
+            await sharer.setDevices(["@alice:test": ["ALICEDEVICE", "OTHER"]])
+            let room = try await encryptedRoom(harness, writer: writer, name: "E2EE sticker reply")
+            let parent = EventId(unchecked: "$parent:test")
+            _ = await sender.sendSticker(
+                room,
+                StickerContent(body: "cat", url: "mxc://test/cat", relatesTo: .reply(to: parent)))
+
+            let sent = try #require(await cryptoSender.sent.first)
+            #expect(sent.type == "m.room.encrypted")
+            #expect(relation(in: sent.content).replyTo == "$parent:test")
+
+            let receiver = RoomCrypto(sharer: FakeSharer(), sender: FakeRoomSender())
+            await receiver.receiveRoomKey(BasicEvent(
+                type: "m.room_key", sender: UserId(unchecked: "@alice:test"),
+                content: try #require(await sharer.shares.first).content))
+            let decrypted = await receiver.decryptRoomEvent(
+                MessageEvent(
+                    type: sent.type, eventId: EventId(unchecked: "$e"),
+                    sender: UserId(unchecked: "@alice:test"), roomId: room,
+                    originServerTs: 0, content: sent.content),
+                in: room)
+            #expect(decrypted?.type == "m.sticker")
+            #expect(relation(in: try #require(decrypted).content).replyTo == "$parent:test")
+        }
+    }
+
+    @Test("Encrypted rooms send stickers as ciphertext that decrypts to m.sticker")
+    func encryptedSticker() async throws {
+        try await withHarness { harness in
+            let (sender, writer, sharer, cryptoSender) = try await sender(harness)
+            await sharer.setDevices(["@alice:test": ["ALICEDEVICE", "OTHER"]])
+            let room = try await encryptedRoom(harness, writer: writer, name: "E2EE stickers")
+            let content = StickerContent(body: "cat", url: "mxc://test/cat")
+            let echo = try #require(await sender.sendSticker(room, content))
+            #expect(await writer.echoTransactionId(for: echo) != nil)
+            #expect(await sends(harness, containing: "/send/").isEmpty)
+
+            let receiver = RoomCrypto(sharer: FakeSharer(), sender: FakeRoomSender())
+            await receiver.receiveRoomKey(BasicEvent(
+                type: "m.room_key", sender: UserId(unchecked: "@alice:test"),
+                content: try #require(await sharer.shares.first).content))
+            let sent = try #require(await cryptoSender.sent.first)
+            #expect(sent.type == "m.room.encrypted")
+            let decrypted = await receiver.decryptRoomEvent(
+                MessageEvent(
+                    type: sent.type, eventId: EventId(unchecked: "$e"),
+                    sender: UserId(unchecked: "@alice:test"), roomId: room,
+                    originServerTs: 0, content: sent.content),
+                in: room)
+            #expect(decrypted?.type == "m.sticker")
+            #expect(decrypted?.content["url"]?.stringValue == "mxc://test/cat")
+        }
+    }
+
+    @Test("Logged-out sticker sends return nil without network traffic")
+    func stickerLoggedOut() async throws {
+        try await withHarness { harness in
+            let (sender, _, _, _) = try await sender(harness, localUser: nil)
+            let room = RoomId(unchecked: "!room:test")
+            #expect(await sender.sendSticker(
+                room, StickerContent(body: "cat", url: "mxc://test/cat")) == nil)
+            #expect(await sends(harness, containing: "/send/").isEmpty)
+        }
+    }
+
+    @Test("Sticker transport failures fail the echo instead of throwing")
+    func stickerFailure() async throws {
+        try await withHarness { harness in
+            let (sender, writer, _, _) = try await sender(harness, token: nil)
+            let room = RoomId(unchecked: "!room:test")
+            let echo = try #require(await sender.sendSticker(
+                room, StickerContent(body: "cat", url: "mxc://test/cat")))
+            #expect(await sends(harness, containing: "/send/").isEmpty)
+            #expect(await writer.echoTransactionId(for: echo) == nil)
+        }
+    }
+
     @Test("Logged-out sends return nil without network traffic")
     func loggedOut() async throws {
         try await withHarness { harness in

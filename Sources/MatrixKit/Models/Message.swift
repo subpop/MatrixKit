@@ -234,6 +234,9 @@ public struct MediaInfo: Hashable, Sendable, Codable {
     public var height: Int?
     /// Audio/video duration in milliseconds.
     public var duration: Int?
+    /// Whether the original image is animated; nil when the sender could
+    /// not tell. Receivers should not trust it.
+    public var isAnimated: Bool?
     /// MXC URI of the thumbnail, if the server generated one.
     public var thumbnailUrl: String?
     /// Thumbnail dimensions and size.
@@ -247,6 +250,7 @@ public struct MediaInfo: Hashable, Sendable, Codable {
         width: Int? = nil,
         height: Int? = nil,
         duration: Int? = nil,
+        isAnimated: Bool? = nil,
         thumbnailUrl: String? = nil,
         thumbnailInfo: ThumbnailInfo? = nil,
         thumbnailFile: EncryptedFile? = nil
@@ -256,6 +260,7 @@ public struct MediaInfo: Hashable, Sendable, Codable {
         self.width = width
         self.height = height
         self.duration = duration
+        self.isAnimated = isAnimated
         self.thumbnailUrl = thumbnailUrl
         self.thumbnailInfo = thumbnailInfo
         self.thumbnailFile = thumbnailFile
@@ -267,11 +272,41 @@ public struct MediaInfo: Hashable, Sendable, Codable {
         case width = "w"
         case height = "h"
         case duration
+        case isAnimated = "is_animated"
         case thumbnailUrl = "thumbnail_url"
         case thumbnailInfo = "thumbnail_info"
         case thumbnailFile = "thumbnail_file"
     }
 }
+/// Content of an `m.sticker` event.
+public struct StickerContent: Hashable, Sendable, Codable {
+    /// Description of the sticker, shown as a tooltip.
+    public var body: String
+    /// `mxc://` URI of the sticker image.
+    public var url: String
+    /// Image metadata (display size, mimetype, thumbnail).
+    public var info: MediaInfo
+    /// Reply or thread relation to another event.
+    public var relatesTo: RelatesTo?
+
+    public init(
+        body: String, url: String, info: MediaInfo = MediaInfo(),
+        relatesTo: RelatesTo? = nil
+    ) {
+        self.body = body
+        self.url = url
+        self.info = info
+        self.relatesTo = relatesTo
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case body
+        case url
+        case info
+        case relatesTo = "m.relates_to"
+    }
+}
+
 /// Thumbnail metadata nested inside `MediaInfo`.
 public struct ThumbnailInfo: Hashable, Sendable, Codable {
 
