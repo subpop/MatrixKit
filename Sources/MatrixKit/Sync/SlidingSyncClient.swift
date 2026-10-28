@@ -18,7 +18,7 @@ public actor SlidingSyncClient {
         "/_matrix/client/unstable/org.matrix.simplified_msc3575/sync"
 
     /// Default sliding window: first 20 rooms with name/avatar/topic/
-    /// encryption/space-graph state and 10 timeline events each.
+    /// encryption/space-graph/image-pack state and 10 timeline events each.
     /// Nonisolated so any context can pass it to `start`.
     public static var defaultLists: [String: SlidingSyncList] {
         [
@@ -28,6 +28,7 @@ public actor SlidingSyncClient {
                     ["m.room.name", ""], ["m.room.avatar", ""],
                     ["m.room.topic", ""], ["m.room.encryption", ""],
                     ["m.space.child", "*"], ["m.space.parent", "*"],
+                    [ImagePack.roomEventType, "*"],
                 ],
                 timelineLimit: 10)
         ]
@@ -178,13 +179,15 @@ public actor SlidingSyncClient {
 
     /// Build the next request body from the current `pos`, lists, and
     /// subscriptions. Internal for testability (no network involved).
-    /// The typing extension (MSC4508) always rides along for v2 parity —
-    /// latest-state semantics mean no cursor hazards. E2EE/to-device
+    /// The typing (MSC4508) and account-data (MSC3959) extensions always
+    /// ride along for v2 parity — latest-state semantics mean no cursor
+    /// hazards. E2EE/to-device
     /// extensions ride along exactly when crypto hooks are installed:
     /// requesting to-device without a consumer would advance past
     /// messages the v3 loop would otherwise deliver.
     func makeRequest(timeoutMs: Int) -> SlidingSyncRequest {
-        var extensions = SlidingSyncExtensions(typing: TypingExtension())
+        var extensions = SlidingSyncExtensions(
+            typing: TypingExtension(), accountData: AccountDataExtension())
         if cryptoHooks != nil {
             extensions.e2ee = E2EEExtension()
             extensions.toDevice = ToDeviceExtension(limit: 100, since: toDeviceSince)

@@ -326,6 +326,7 @@ struct SlidingSyncClientTests {
         #expect(main.ranges == [[0, 19]])
         #expect(main.timelineLimit > 0)
         #expect(main.requiredState?.contains(["m.room.name", ""]) == true)
+        #expect(main.requiredState?.contains(["m.room.image_pack", "*"]) == true)
     }
 
     @Test("Default endpoint is the MSC4186 unstable path Synapse serves")
@@ -340,6 +341,33 @@ struct SlidingSyncClientTests {
         let request = await client.makeRequest(timeoutMs: 1000)
         #expect(request.extensions?.typing?.enabled == true)
         try? await transport.shutdown()
+    }
+
+    @Test("Requests always carry the account-data extension")
+    func accountDataExtensionDefault() async throws {
+        let (client, transport) = makeClient()
+        let request = await client.makeRequest(timeoutMs: 1000)
+        #expect(request.extensions?.accountData?.enabled == true)
+        let json = try JSONEncoder().encode(request.extensions)
+        let object = try #require(
+            try JSONSerialization.jsonObject(with: json) as? [String: Any])
+        #expect(object["account_data"] != nil)
+        try? await transport.shutdown()
+    }
+
+    @Test("Global account data lands in the delta")
+    func parseGlobalAccountData() throws {
+        let json = #"""
+            {"pos": "1", "extensions": {"account_data": {
+              "global": [{"type": "m.image_pack.rooms",
+                          "content": {"rooms": {"!r:x": {"": {}}}}}],
+              "rooms": {"!r:x": [{"type": "m.tag", "content": {}}]}}}}
+            """#
+        let response = try JSONDecoder().decode(
+            SlidingSyncResponse.self, from: Data(json.utf8))
+        let delta = SlidingSyncResponseParser.parse(response)
+        #expect(delta.accountData.map(\.type) == ["m.image_pack.rooms"])
+        #expect(delta.joined.isEmpty)
     }
 
     @Test("M_UNKNOWN_POS is classified for connection reset", arguments: [

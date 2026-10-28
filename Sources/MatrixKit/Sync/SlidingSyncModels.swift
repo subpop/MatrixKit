@@ -30,6 +30,18 @@ public struct TypingExtension: Hashable, Sendable, Codable {
     }
 }
 
+/// Account-data extension knobs (`extensions.account_data`, MSC3959).
+/// The first response carries all global account data; later responses
+/// carry only changes.
+public struct AccountDataExtension: Hashable, Sendable, Codable {
+    /// Request global account data.
+    public var enabled: Bool
+
+    public init(enabled: Bool = true) {
+        self.enabled = enabled
+    }
+}
+
 /// E2EE extension knobs (`extensions.e2ee`).
 public struct E2EEExtension: Hashable, Sendable, Codable {
     /// Request device lists and one-time-key counts.
@@ -71,21 +83,27 @@ public struct SlidingSyncExtensions: Hashable, Sendable, Codable {
     /// Typing notifications (MSC4508). Enabled by default for parity
     /// with the v2 loop, which always receives ephemeral events.
     public var typing: TypingExtension?
+    /// Global account data (MSC3959), such as the user's `m.direct` and
+    /// `m.image_pack.rooms`.
+    public var accountData: AccountDataExtension?
 
     public init(
         e2ee: E2EEExtension? = nil,
         toDevice: ToDeviceExtension? = nil,
-        typing: TypingExtension? = nil
+        typing: TypingExtension? = nil,
+        accountData: AccountDataExtension? = nil
     ) {
         self.e2ee = e2ee
         self.toDevice = toDevice
         self.typing = typing
+        self.accountData = accountData
     }
 
     private enum CodingKeys: String, CodingKey {
         case e2ee
         case toDevice = "to_device"
         case typing
+        case accountData = "account_data"
     }
 }
 
@@ -418,7 +436,9 @@ public enum SlidingSyncResponseParser {
     /// E2EE/to-device extensions land in `toDevice`/`deviceChanged`/
     /// `deviceLeft` for the shared crypto hooks. The typing extension
     /// (MSC4508) becomes one synthetic `m.typing` ephemeral event per
-    /// room for live display.
+    /// room for live display. The account-data extension (MSC3959) lands
+    /// in the delta's global `accountData`; its room-scoped entries are
+    /// not mapped.
     public static func parse(_ response: SlidingSyncResponse) -> SyncDelta {
         var joined: [RoomId: JoinedRoomDelta] = [:]
         for (roomIdString, room) in response.rooms {
@@ -444,7 +464,24 @@ public enum SlidingSyncResponseParser {
         }
         return SyncDelta(
             nextBatch: BatchToken(response.pos), joined: joined,
+            accountData: globalAccountData(in: response.extensions),
             toDevice: toDevice, deviceChanged: changed, deviceLeft: left)
+    }
+
+    /// Parse the global events of the account-data extension (MSC3959).
+    static func globalAccountData(
+        in extensions: [String: AnyCodable]?
+    ) -> [BasicEvent] {
+        guard
+            let events = extensions?["account_data"]?.objectValue?["global"]?.arrayValue
+        else { return [] }
+        return events.compactMap { event in
+            guard
+                let data = try? JSONEncoder().encode(event),
+                let decoded = try? JSONDecoder().decode(BasicEvent.self, from: data)
+            else { return nil }
+            return decoded
+        }
     }
 
     /// Parse the E2EE and to-device extensions.
