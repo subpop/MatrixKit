@@ -4,6 +4,16 @@ import Testing
 import MatrixKitTesting
 @testable import MatrixKit
 
+private actor PersistedRefreshCredentials {
+    private(set) var accessToken: String?
+    private(set) var refreshToken: String?
+
+    func save(accessToken: String, refreshToken: String?) {
+        self.accessToken = accessToken
+        self.refreshToken = refreshToken
+    }
+}
+
 /// Transport compliance suite: token-refresh retries, homeserver
 /// resolution over the network, and decoding diagnostics.
 ///
@@ -35,6 +45,38 @@ struct TransportComplianceTests {
                 $0.path == "/_matrix/client/v3/account/whoami"
             }
             #expect(requests.count == 2)
+        }
+    }
+
+    @Test("Transport refresh persists rotated credentials before retry")
+    func tokenRefreshPersistsCredentials() async throws {
+        try await withHarness { harness in
+            let (auth, session, transport) = await harness.authClient(token: "")
+            try await auth.login(user: "alice", password: "secret")
+            let persisted = PersistedRefreshCredentials()
+            await transport.setTokenRefresher {
+                do {
+                    try await auth.refresh()
+                    await persisted.save(
+                        accessToken: await session.accessToken,
+                        refreshToken: await session.refreshToken)
+                } catch {
+                    // Preserve the transport's best-effort retry behavior.
+                }
+                let token = await session.accessToken
+                return token.isEmpty ? nil : token
+            }
+            await harness.setOverride(
+                method: "GET", path: "/_matrix/client/v3/account/whoami",
+                response: .matrixError(
+                    code: "M_UNKNOWN_TOKEN", message: "expired", status: 401))
+
+            _ = try await auth.whoAmI()
+
+            let currentAccessToken = await session.accessToken
+            let currentRefreshToken = await session.refreshToken
+            #expect(await persisted.accessToken == currentAccessToken)
+            #expect(await persisted.refreshToken == currentRefreshToken)
         }
     }
 
