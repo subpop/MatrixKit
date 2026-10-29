@@ -64,4 +64,20 @@ struct MessageContentTests {
         )
         #expect(event.timestamp.timeIntervalSince1970 == 1_700_000_000)
     }
+
+    @Test("ContextResponse defaults omitted event arrays to empty")
+    func contextResponseMissingEventArrays() throws {
+        let decoder = JSONDecoder()
+        let missingAfter = try decoder.decode(
+            ContextResponse.self,
+            from: Data(#"{"events_before":[]}"#.utf8))
+        #expect(missingAfter.eventsBefore.isEmpty)
+        #expect(missingAfter.eventsAfter.isEmpty)
+
+        let missingBefore = try decoder.decode(
+            ContextResponse.self,
+            from: Data(#"{"events_after":[]}"#.utf8))
+        #expect(missingBefore.eventsBefore.isEmpty)
+        #expect(missingBefore.eventsAfter.isEmpty)
+    }
 }

@@ -285,6 +285,20 @@ public struct ContextResponse: Hashable, Sendable, Codable {
         self.state = state
     }
 
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        // The spec does not require these lists when they are empty.
+        self.init(
+            eventsBefore: try container.decodeIfPresent(
+                [MessageEvent].self, forKey: .eventsBefore) ?? [],
+            event: try container.decodeIfPresent(MessageEvent.self, forKey: .event),
+            eventsAfter: try container.decodeIfPresent(
+                [MessageEvent].self, forKey: .eventsAfter) ?? [],
+            start: try container.decodeIfPresent(String.self, forKey: .start),
+            end: try container.decodeIfPresent(String.self, forKey: .end),
+            state: try container.decodeIfPresent([MessageEvent].self, forKey: .state))
+    }
+
     private enum CodingKeys: String, CodingKey {
         case eventsBefore = "events_before"
         case event
