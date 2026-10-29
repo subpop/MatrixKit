@@ -129,6 +129,20 @@ struct StateComplianceTests {
         }
     }
 
+    @Test("Read markers reject local echo IDs")
+    func readMarkersRejectLocalEchoes() async throws {
+        try await withHarness { harness in
+            let (data, _, _) = await harness.accountDataClient()
+            let room = RoomId(unchecked: "!room:test")
+            await #expect(throws: MatrixError.invalidIdentifier("Not an event ID: local:txn")) {
+                try await data.setFullyRead(room, eventId: EventId(unchecked: "local:txn"))
+            }
+            #expect(await harness.requests.filter {
+                $0.method == "POST" && $0.path.contains("/read_markers")
+            }.isEmpty)
+        }
+    }
+
     @Test("Tags add, list, favourite, and delete")
     func tags() async throws {
         try await withHarness { harness in

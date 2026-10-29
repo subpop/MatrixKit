@@ -76,7 +76,12 @@ public actor AccountDataClient {
 
     /// Advance the room's fully-read marker via the read-markers endpoint
     /// (`m.fully_read` cannot be written through the account-data PUT API).
+    /// Throws `invalidIdentifier` for values that are not Matrix event IDs,
+    /// such as local echo IDs.
     public func setFullyRead(_ roomId: RoomId, eventId: EventId) async throws(MatrixError) {
+        guard eventId.value.hasPrefix("$") else {
+            throw .invalidIdentifier("Not an event ID: \(eventId.value)")
+        }
         let body: [String: AnyCodable] = ["m.fully_read": .string(eventId.value)]
         let _: EmptyResponse = try await transport.send(
             .post,
