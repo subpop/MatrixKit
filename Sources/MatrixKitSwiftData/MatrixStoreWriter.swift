@@ -601,6 +601,21 @@ public actor MatrixStoreWriter {
         return rows.compactMap { try? decodeEvent($0) }
     }
 
+    /// The sender's stored reaction events in a room, including staged
+    /// echoes. Decodes only reactions, so the cost doesn't grow with the
+    /// room's history.
+    public func storedReactions(roomId: RoomId, sender: UserId) throws -> [MessageEvent] {
+        let room = roomId.value
+        let from = sender.value
+        let reactionType = EventType.reaction.rawValue
+        let rows = try modelContext.fetch(
+            FetchDescriptor<SDRoomEvent>(
+                predicate: #Predicate {
+                    $0.roomId == room && $0.sender == from && $0.type == reactionType
+                }))
+        return rows.compactMap { try? decodeEvent($0) }
+    }
+
     /// IDs of all known rooms, regardless of membership. See
     /// `CiphertextStore`.
     public func roomIds() throws -> [RoomId] {

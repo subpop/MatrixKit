@@ -497,23 +497,19 @@ public actor MessageSender {
     /// immediately (staged echo on add, redaction on remove) and sync
     /// confirms it in the background. Transport failures roll the
     /// staged change back; nothing throws.
+    /// `onEchoStaged` fires after the local store write and before transport.
     public func toggleReaction(
-        _ roomId: RoomId, target: EventId, key: String
+        _ roomId: RoomId, target: EventId, key: String,
+        onEchoStaged: (@Sendable () -> Void)? = nil
     ) async {
         guard let localUser else { return }
-        if let existing = await ownReactionEvent(
+        if let existing = await storedOwnReactionEvent(
             roomId: roomId, target: target, key: key, sender: localUser)
         {
-            if let transactionId = await writer.echoTransactionId(for: existing) {
-                // Unconfirmed echo: drop it and suppress the in-flight
-                // send's confirmation so no zombie badge arrives later.
-                _ = try? await writer.cancelEcho(transactionId: transactionId)
-                await writer.suppressTransaction(transactionId)
-                return
-            }
-            _ = try? await messages.redact(roomId, eventId: existing)
+            await removeReaction(roomId, existing: existing)
             return
         }
+        // Stage before the server lookup so the badge appears at once.
         let transactionId = TransactionId.random()
         let echo = stagedEcho(
             roomId: roomId, sender: localUser,
@@ -521,6 +517,18 @@ public actor MessageSender {
             content: ReactionContent.reaction(to: target, key: key),
             transactionId: transactionId)
         try? await writer.stageEcho(echo, roomId: roomId, transactionId: transactionId)
+        onEchoStaged?()
+        if let existing = await remoteOwnReactionEvent(
+            roomId: roomId, target: target, key: key, sender: localUser)
+        {
+            // The reaction predates the stored window: swap the optimistic
+            // add for a removal.
+            _ = try? await writer.cancelEcho(transactionId: transactionId)
+            await removeReaction(roomId, existing: existing)
+            return
+        }
+        // A second toggle during the lookup already cancelled the echo.
+        guard await writer.echoTransactionId(for: echo.eventId) != nil else { return }
         do {
             try await messages.react(
                 roomId, to: target, key: key, transactionId: transactionId)
@@ -531,18 +539,35 @@ public actor MessageSender {
         }
     }
 
-    /// The local user's reaction event for a target+key: staged echoes
-    /// still awaiting confirmation first (the rendered window may omit
-    /// them), then stored and related events.
-    private func ownReactionEvent(
+    /// Removes an existing own reaction: an unconfirmed echo is dropped
+    /// (suppressing its in-flight confirmation so no zombie badge arrives
+    /// later), a confirmed event is redacted.
+    private func removeReaction(_ roomId: RoomId, existing: EventId) async {
+        if let transactionId = await writer.echoTransactionId(for: existing) {
+            _ = try? await writer.cancelEcho(transactionId: transactionId)
+            await writer.suppressTransaction(transactionId)
+            return
+        }
+        _ = try? await messages.redact(roomId, eventId: existing)
+    }
+
+    /// The local user's reaction event for a target+key in the store:
+    /// staged echoes still awaiting confirmation first (the rendered
+    /// window may omit them), then stored events.
+    private func storedOwnReactionEvent(
         roomId: RoomId, target: EventId, key: String, sender: UserId
     ) async -> EventId? {
-        if let stored = try? await writer.storedEvents(roomId: roomId),
-           let found = stored.reactionEvent(
-               target: target, key: key, sender: sender)
-        {
-            return found
+        guard let stored = try? await writer.storedReactions(roomId: roomId, sender: sender) else {
+            return nil
         }
+        return stored.reactionEvent(target: target, key: key, sender: sender)
+    }
+
+    /// The local user's reaction event for a target+key according to the
+    /// server, for reactions older than the stored events.
+    private func remoteOwnReactionEvent(
+        roomId: RoomId, target: EventId, key: String, sender: UserId
+    ) async -> EventId? {
         guard
             let relations = try? await messages.relations(
                 roomId, eventId: target, relType: "m.annotation",
@@ -554,11 +579,52 @@ public actor MessageSender {
 
     // MARK: - Polls
 
+    /// Start a poll (`m.poll.start`) with a local echo: the poll card
+    /// appears immediately and sync confirms it via the shared transaction
+    /// ID. Encrypted rooms encrypt the event. A transport failure marks
+    /// the echo failed instead of throwing. Returns the echo event ID, or
+    /// nil when logged out.
+    /// `onEchoStaged` fires after the local store write and before transport.
+    @discardableResult
+    public func startPoll(
+        _ roomId: RoomId, content: PollStartContent,
+        transactionId: TransactionId = .random(),
+        onEchoStaged: (@Sendable () -> Void)? = nil
+    ) async -> EventId? {
+        guard let localUser else { return nil }
+        let echo = stagedEcho(
+            roomId: roomId, sender: localUser,
+            type: EventType.pollStart.rawValue, content: content,
+            transactionId: transactionId)
+        try? await writer.stageEcho(echo, roomId: roomId, transactionId: transactionId)
+        onEchoStaged?()
+        do {
+            if isEncrypted(roomId) {
+                try await ensureShared(roomId)
+                try await roomCrypto.sendEncryptedContent(
+                    roomId, content, eventType: EventType.pollStart.rawValue,
+                    deviceId: ownDeviceId, transactionId: transactionId)
+            } else {
+                try await messages.sendEvent(
+                    roomId, eventType: EventType.pollStart.rawValue,
+                    content: content, transactionId: transactionId)
+            }
+        } catch {
+            try? await writer.failEcho(
+                transactionId: transactionId, reason: error.localizedDescription)
+        }
+        return echo.eventId
+    }
+
     /// Cast, change, or retract (`answers: []`) a vote on a poll
     /// (`m.poll.response`), with optimistic UI: the staged echo counts
     /// immediately and sync confirms it. Encrypted rooms encrypt the
     /// response. Transport failures cancel the echo; nothing throws.
-    public func vote(_ roomId: RoomId, poll: EventId, answers: [String]) async {
+    /// `onEchoStaged` fires after the local store write and before transport.
+    public func vote(
+        _ roomId: RoomId, poll: EventId, answers: [String],
+        onEchoStaged: (@Sendable () -> Void)? = nil
+    ) async {
         guard let localUser else { return }
         let transactionId = TransactionId.random()
         let content = PollResponseContent(
@@ -568,6 +634,7 @@ public actor MessageSender {
             type: EventType.pollResponse.rawValue, content: content,
             transactionId: transactionId)
         try? await writer.stageEcho(echo, roomId: roomId, transactionId: transactionId)
+        onEchoStaged?()
         do {
             if isEncrypted(roomId) {
                 try await ensureShared(roomId)
