@@ -179,6 +179,22 @@ struct StoreReaderTests {
             RoomId(unchecked: "!missing:x")) == nil)
     }
 
+    @Test("Event lookup and JSON round-trip a stored event")
+    func eventLookup() async throws {
+        let (writer, container) = try writer()
+        try await writer.apply(joinedTimelineDelta(
+            [unreadMessage("e1", ts: 1)]))
+        let reader = reader(container)
+        let id = EventId(unchecked: "$e1")
+        let event = try #require(try reader.event(id))
+        #expect(event.eventId == id)
+        let json = try #require(try reader.eventJSON(id))
+        let decoded = try JSONDecoder().decode(MessageEvent.self, from: json)
+        #expect(decoded == event)
+        #expect(try reader.event(EventId(unchecked: "$missing")) == nil)
+        #expect(try reader.eventJSON(EventId(unchecked: "$missing")) == nil)
+    }
+
     @Test("Timeline limit returns the newest window oldest-first")
     func timelineLimit() async throws {
         let (writer, container) = try writer()

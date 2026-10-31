@@ -208,6 +208,29 @@ public struct MatrixStoreReader: Sendable {
             .compactMap { try? Self.decodeEvent($0, decoder: decoder) }
     }
 
+    /// One stored event, or nil when it isn't in the store. Event IDs are
+    /// unique, so no room is needed to resolve it.
+    public func event(_ eventId: EventId) throws -> MessageEvent? {
+        let id = eventId.value
+        var descriptor = FetchDescriptor<SDRoomEvent>(
+            predicate: #Predicate { $0.eventId == id })
+        descriptor.fetchLimit = 1
+        let context = ModelContext(modelContainer)
+        return try context.fetch(descriptor).first.map {
+            try Self.decodeEvent($0, decoder: JSONDecoder())
+        }
+    }
+
+    /// One stored event as pretty-printed JSON with sorted keys, or nil
+    /// when it isn't in the store. Rebuilt from the normalized row, so it
+    /// matches the event's wire shape but isn't the server's exact bytes.
+    public func eventJSON(_ eventId: EventId) throws -> Data? {
+        guard let event = try event(eventId) else { return nil }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        return try encoder.encode(event)
+    }
+
     /// Search stored message text, newest first. Edit hits navigate to the
     /// original event and display the matched replacement body.
     public func searchMessages(
