@@ -37,6 +37,26 @@ public actor Session {
         self.expiresInMs = expiresInMs
     }
 
+    /// A consistent copy of the persistable credentials. Reading the
+    /// properties one `await` at a time can interleave with a token
+    /// rotation and pair an access token with a stale refresh token;
+    /// a snapshot is taken atomically on the actor.
+    public struct Credentials: Sendable, Equatable {
+        public let accessToken: String
+        public let refreshToken: String?
+        public let oidcClientId: String?
+        public let oidcTokenEndpoint: String?
+    }
+
+    /// The current credentials, read atomically.
+    public var credentials: Credentials {
+        Credentials(
+            accessToken: accessToken,
+            refreshToken: refreshToken,
+            oidcClientId: oidcClientId,
+            oidcTokenEndpoint: oidcTokenEndpoint)
+    }
+
     /// Replace tokens after login or refresh.
     public func update(
         accessToken: String,
