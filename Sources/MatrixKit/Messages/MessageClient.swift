@@ -118,6 +118,9 @@ public actor MessageClient {
         _ roomId: RoomId, eventId: EventId, newBody: String,
         mentions: Mentions? = nil
     ) async throws(MatrixError) -> EventId {
+        guard eventId.value.hasPrefix("$") else {
+            throw .invalidIdentifier("Not a server event ID: \(eventId.value)")
+        }
         let content = EditContent.markdown(
             editing: eventId, newBody, mentions: mentions)
         return try await sendEvent(roomId, content: content)

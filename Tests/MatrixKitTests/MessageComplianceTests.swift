@@ -56,6 +56,20 @@ struct MessageComplianceTests {
         }
     }
 
+    @Test("Edit rejects a local echo ID without sending")
+    func editRejectsLocalEcho() async throws {
+        try await withHarness { harness in
+            let (messages, _, _) = await harness.messageClient()
+            let room = RoomId(unchecked: "!room:test")
+            await #expect(throws: MatrixError.invalidIdentifier(
+                "Not a server event ID: local:txn")) {
+                try await messages.edit(
+                    room, eventId: EventId(unchecked: "local:txn"), newBody: "fixed")
+            }
+            #expect(await harness.requests.isEmpty)
+        }
+    }
+
     @Test("Redact prunes content, unknown events 404")
     func redact() async throws {
         try await withHarness { harness in

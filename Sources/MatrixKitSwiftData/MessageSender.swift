@@ -188,6 +188,9 @@ public actor MessageSender {
         _ roomId: RoomId, eventId: EventId, newBody: String,
         mentions: Mentions? = nil
     ) async throws(MatrixError) -> EventId {
+        guard eventId.value.hasPrefix("$") else {
+            throw .invalidIdentifier("Not a server event ID: \(eventId.value)")
+        }
         if isEncrypted(roomId) {
             try await ensureShared(roomId)
             return try await roomCrypto.sendEncryptedContent(

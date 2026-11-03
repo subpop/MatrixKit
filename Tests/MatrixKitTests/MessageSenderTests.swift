@@ -603,6 +603,21 @@ struct MessageSenderTests {
         }
     }
 
+    @Test("Edit rejects local echo IDs before encrypted or plaintext send")
+    func editRejectsLocalEcho() async throws {
+        try await withHarness { harness in
+            let (sender, writer, _, cryptoSender) = try await sender(harness)
+            let room = try await encryptedRoom(harness, writer: writer, name: "E2EE edit guard")
+            await #expect(throws: MatrixError.invalidIdentifier(
+                "Not a server event ID: local:txn")) {
+                try await sender.edit(
+                    room, eventId: EventId(unchecked: "local:txn"), newBody: "fixed")
+            }
+            #expect(await cryptoSender.sent.isEmpty)
+            #expect(await sends(harness, containing: "/send/").isEmpty)
+        }
+    }
+
     @Test("Encrypted attachments upload ciphertext and thumbnail, then send")
     func encryptedAttachment() async throws {
         try await withHarness { harness in
