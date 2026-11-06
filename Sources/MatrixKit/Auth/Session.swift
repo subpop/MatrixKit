@@ -15,6 +15,12 @@ public actor Session {
     public private(set) var refreshToken: String?
     /// Access-token lifetime in milliseconds, when advertised by the server.
     public private(set) var expiresInMs: Int?
+    /// Absolute access-token expiry, derived from `expiresInMs` at the
+    /// last token update. Persist and restore this — not the lifetime,
+    /// which goes stale while the app is not running — so the first
+    /// post-restore refresh can be scheduled from the real remaining
+    /// lifetime.
+    public private(set) var expiresAt: Date?
     /// RFC 7591 client ID for OIDC sessions (needed for refresh/revoke).
     /// Nil for legacy password/token logins.
     public private(set) var oidcClientId: String?
@@ -27,7 +33,8 @@ public actor Session {
         deviceId: DeviceId,
         accessToken: String,
         refreshToken: String? = nil,
-        expiresInMs: Int? = nil
+        expiresInMs: Int? = nil,
+        expiresAt: Date? = nil
     ) {
         self.homeserver = homeserver
         self.userId = userId
@@ -35,6 +42,7 @@ public actor Session {
         self.accessToken = accessToken
         self.refreshToken = refreshToken
         self.expiresInMs = expiresInMs
+        self.expiresAt = expiresAt
     }
 
     /// A consistent copy of the persistable credentials. Reading the
@@ -46,6 +54,7 @@ public actor Session {
         public let refreshToken: String?
         public let oidcClientId: String?
         public let oidcTokenEndpoint: String?
+        public let expiresAt: Date?
     }
 
     /// The current credentials, read atomically.
@@ -54,7 +63,8 @@ public actor Session {
             accessToken: accessToken,
             refreshToken: refreshToken,
             oidcClientId: oidcClientId,
-            oidcTokenEndpoint: oidcTokenEndpoint)
+            oidcTokenEndpoint: oidcTokenEndpoint,
+            expiresAt: expiresAt)
     }
 
     /// Replace tokens after login or refresh.
@@ -68,6 +78,9 @@ public actor Session {
             self.refreshToken = refreshToken
         }
         self.expiresInMs = expiresInMs
+        self.expiresAt = expiresInMs.map {
+            Date().addingTimeInterval(TimeInterval($0) / 1000)
+        }
     }
 
     /// Adopt the server-assigned IDs after whoami reconciliation (the

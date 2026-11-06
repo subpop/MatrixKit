@@ -282,6 +282,23 @@ struct FacadeComplianceTests {
         }
     }
 
+    @Test("Restore carries the persisted token expiry")
+    @MainActor
+    func restoreCarriesTokenExpiry() async throws {
+        try await withHarness { harness in
+            let baseURL = await harness.baseURL
+            let expiresAt = Date().addingTimeInterval(300)
+            let client = await MatrixClient.restore(
+                homeserver: baseURL,
+                userId: UserId(unchecked: "@alice:test"),
+                deviceId: DeviceId("ALICEDEVICE"),
+                accessToken: "harness-token-alice",
+                expiresAt: expiresAt)
+            #expect(await client.session.credentials.expiresAt == expiresAt)
+            try? await client.transport.shutdown()
+        }
+    }
+
     @Test("Sliding sync facade runs and stops")
     @MainActor
     func slidingFacade() async throws {

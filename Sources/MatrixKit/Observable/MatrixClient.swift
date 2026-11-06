@@ -405,6 +405,9 @@ public final class MatrixClient {
     /// Restore a client from existing tokens (e.g. Keychain).
     /// The homeserver URL is resolved through `.well-known/matrix/client`
     /// discovery first (falls back to the declared URL on any failure).
+    /// Pass `expiresAt` from the persisted credentials snapshot so token
+    /// refreshes can be scheduled from the token's real remaining
+    /// lifetime instead of a default cadence.
     public static func restore(
         homeserver: URL,
         userId: UserId,
@@ -413,6 +416,7 @@ public final class MatrixClient {
         refreshToken: String? = nil,
         oidcClientId: String? = nil,
         oidcTokenEndpoint: String? = nil,
+        expiresAt: Date? = nil,
         keystore: (any KeyStore)? = nil
     ) async -> MatrixClient {
         let homeserver = await MatrixTransport.resolveHomeserver(declared: homeserver)
@@ -422,7 +426,8 @@ public final class MatrixClient {
             userId: userId,
             deviceId: deviceId,
             accessToken: accessToken,
-            refreshToken: refreshToken
+            refreshToken: refreshToken,
+            expiresAt: expiresAt
         )
         if let oidcClientId, let oidcTokenEndpoint {
             await session.updateOIDC(clientId: oidcClientId, tokenEndpoint: oidcTokenEndpoint)
