@@ -103,6 +103,16 @@ public final class MatrixClient {
     private let keystore: (any KeyStore)?
     private var syncTask: Task<Void, Never>?
     private var slidingSyncTask: Task<Void, Never>?
+    /// Monotonic start/stop generation for the classic sync loop.
+    /// Ending a loop finishes its delta stream asynchronously
+    /// (cancelled long-poll → finished streams → consumer epilogue), so
+    /// a superseded generation's epilogue can land after a newer loop is
+    /// already running; the captured-generation checks in
+    /// `startSync`/`stopSync` keep it from resetting that loop's status
+    /// and task handle.
+    private var syncGeneration = 0
+    /// Same guard for the sliding sync loop.
+    private var slidingSyncGeneration = 0
     /// Live `deltas()` subscribers. Yielded every sync delta; never
     /// finished (subscribers survive sync restarts) or removed (the client
     /// lives for the session). Mirrors `VerificationMonitor.events()`.
@@ -501,6 +511,8 @@ public final class MatrixClient {
     /// Start the sync loop. Deltas stream to subscribers and sinks.
     public func startSync(filter: SyncFilter? = nil) async throws {
         guard syncTask == nil else { return }
+        syncGeneration &+= 1
+        let generation = syncGeneration
         syncStatus = .syncing
         do {
             let stream = try await sync.start(filter: filter)
@@ -515,6 +527,10 @@ public final class MatrixClient {
                     }
                     self.notifyDelta(delta)
                 }
+                // A superseding start/stop took over the state; this
+                // stream ending is old teardown catching up, not the
+                // current loop dying.
+                guard self.syncGeneration == generation else { return }
                 self.syncStatus = .idle
                 self.syncTask = nil
             }
@@ -526,9 +542,16 @@ public final class MatrixClient {
 
     /// Stop the sync loop.
     public func stopSync() async {
+        // Invalidate the running consumer's epilogue before releasing
+        // its handle: its stream unwinds asynchronously, after a caller
+        // may already have started a replacement loop.
+        syncGeneration &+= 1
+        let generation = syncGeneration
         syncTask?.cancel()
         syncTask = nil
         await sync.stop()
+        // A start that interleaved across the await owns the status now.
+        guard syncGeneration == generation else { return }
         if case .syncing = syncStatus {
             syncStatus = .idle
         }
@@ -642,6 +665,8 @@ public final class MatrixClient {
             )
             return
         }
+        slidingSyncGeneration &+= 1
+        let generation = slidingSyncGeneration
         slidingSyncStatus = .syncing
         do {
             let stream = try await slidingSync.start(lists: lists, subscriptions: subscriptions)
@@ -653,6 +678,10 @@ public final class MatrixClient {
                     }
                     self.notifyDelta(delta)
                 }
+                // A superseding start/stop took over the state; this
+                // stream ending is old teardown catching up, not the
+                // current loop dying.
+                guard self.slidingSyncGeneration == generation else { return }
                 self.slidingSyncStatus = .idle
                 self.slidingSyncTask = nil
             }
@@ -664,9 +693,13 @@ public final class MatrixClient {
 
     /// Stop the sliding sync loop.
     public func stopSlidingSync() async {
+        // See `stopSync` for the generation-guard rationale.
+        slidingSyncGeneration &+= 1
+        let generation = slidingSyncGeneration
         slidingSyncTask?.cancel()
         slidingSyncTask = nil
         await slidingSync.stop()
+        guard slidingSyncGeneration == generation else { return }
         if case .syncing = slidingSyncStatus {
             slidingSyncStatus = .idle
         }

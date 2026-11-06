@@ -92,6 +92,53 @@ struct FacadeComplianceTests {
         }
     }
 
+    @Test("A superseded sync generation cannot reset a running loop's status")
+    @MainActor
+    func supersededSyncGenerationLeavesRestartAlone() async throws {
+        try await withHarness { harness in
+            let world = await harness.world
+            let roomId = RoomId(unchecked: "!zombie:test")
+            await world.stageMessage(roomId: roomId.value, body: "hello")
+            let client = await client(harness)
+            // Room account data rides in every harness sync response, so
+            // the consumer runs `resolveReadMarkers()` on each delta. The
+            // parked healer suspends generation 1's consumer mid-loop at a
+            // test-controlled point.
+            try await client.accountData.setFullyRead(
+                roomId, eventId: EventId(unchecked: "$marker:test"))
+            let healer = ParkedMarkerHealer()
+            client.setMarkerHealer(healer)
+            try await client.startSync()
+            await healer.waitForFirstPark()
+            // Restart while generation 1's consumer is still parked.
+            await client.stopSync()
+            try await client.startSync()
+            #expect(client.syncStatus == .syncing)
+            // Unpark generation 1: its epilogue turn is queued on the main
+            // actor now, ahead of everything below. Delivery of the staged
+            // message requires a full sync round-trip through generation
+            // 2's consumer, so gating on it also guarantees the superseded
+            // epilogue has landed — where the generation guard must leave
+            // the running loop's status alone.
+            await healer.release()
+            let deltas = client.deltas()
+            let after = await world.stageMessage(
+                roomId: roomId.value, body: "after restart")
+            var delivered = false
+            for await delta in deltas {
+                if delta.joined[roomId]?.timeline.contains(
+                    where: { $0.eventId == after.eventId }) == true {
+                    delivered = true
+                    break
+                }
+            }
+            #expect(delivered)
+            #expect(client.syncStatus == .syncing)
+            await client.stopSync()
+            try? await client.transport.shutdown()
+        }
+    }
+
     @Test("Logout invalidates the session")
     @MainActor
     func logout() async throws {
