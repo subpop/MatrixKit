@@ -132,9 +132,17 @@ public final class MatrixClient {
         let connection = SyncConnection(transport: transport, session: session)
         self.auth = AuthClient(transport: transport, session: session)
         await transport.setTokenRefresher({ [auth, session] in
-            try? await auth.refresh()
+            do {
+                try await auth.refresh()
+            } catch MatrixError.unknownToken {
+                // The refresh token is rejected: the session is dead
+                // server-side, so callers fail fast instead of waiting.
+                return .rejected
+            } catch {
+                return .transient
+            }
             let token = await session.accessToken
-            return token.isEmpty ? nil : token
+            return token.isEmpty ? .rejected : .refreshed(token)
         })
         self.sync = SyncClient(connection: connection, session: session)
         self.slidingSync = SlidingSyncClient(

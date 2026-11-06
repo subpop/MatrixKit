@@ -28,16 +28,17 @@ public actor MatrixTransport {
     private let maxLogBytes = 2048
 
     /// Token refresher consulted when a homeserver API call fails with
-    /// an unknown/expired token. Returns the current access token,
-    /// refreshing first on a best-effort basis (failures are swallowed:
-    /// a concurrent rotation may already have refreshed). Homeserver
-    /// endpoints only — auth endpoints (`postForm`, `postJSON`) never
-    /// retry, since refresh itself flows through them.
-    private var tokenRefresher: (@Sendable () async -> String?)?
+    /// an unknown/expired token. Reports whether a rotation landed, the
+    /// refresh token was rejected (the session is dead server-side, so
+    /// the request fails fast), or the attempt failed transiently (one
+    /// re-check after a beat). Homeserver endpoints only — auth
+    /// endpoints (`postForm`, `postJSON`) never retry, since refresh
+    /// itself flows through them.
+    private var tokenRefresher: TokenRefresher?
 
     /// Install the token refresher (wired by `MatrixClient` to
     /// `auth.refresh` plus the session token read).
-    public func setTokenRefresher(_ refresher: (@Sendable () async -> String?)?) {
+    public func setTokenRefresher(_ refresher: TokenRefresher?) {
         tokenRefresher = refresher
     }
 
@@ -152,19 +153,7 @@ public actor MatrixTransport {
             return try decodeResponse(status: status, data: data, path: path)
         } catch let error {
             guard case .unknownToken = error else { throw error }
-            // A concurrent rotation may still be in flight: one re-read
-            // after a beat before concluding the session is dead.
-            var freshToken: String?
-            if let tokenRefresher {
-                freshToken = await tokenRefresher()
-                if freshToken == accessToken {
-                    try? await Task.sleep(for: .milliseconds(500))
-                    freshToken = await tokenRefresher()
-                }
-            }
-            guard
-                let freshToken, !freshToken.isEmpty, freshToken != accessToken
-            else {
+            guard let freshToken = await refreshedToken(previous: accessToken) else {
                 throw error
             }
             MatrixKitLog.transport.debug(
@@ -203,15 +192,7 @@ public actor MatrixTransport {
         if status == 401,
            let errorBody = try? decoder.decode(MatrixErrorBody.self, from: data),
            case .unknownToken = mapErrorBody(errorBody, status: status) {
-            var freshToken: String?
-            if let tokenRefresher {
-                freshToken = await tokenRefresher()
-                if freshToken == accessToken {
-                    try? await Task.sleep(for: .milliseconds(500))
-                    freshToken = await tokenRefresher()
-                }
-            }
-            if let freshToken, !freshToken.isEmpty, freshToken != accessToken {
+            if let freshToken = await refreshedToken(previous: accessToken) {
                 MatrixKitLog.transport.debug(
                     "Retrying \(method.rawValue, privacy: .public) \(path, privacy: .public) after token refresh"
                 )
@@ -226,6 +207,25 @@ public actor MatrixTransport {
     }
 
     // MARK: - Internals
+
+    /// Consult the token refresher after an unknown-token failure and
+    /// return the access token to retry with, or nil to surface the
+    /// original error. A rejected refresh token fails fast — the
+    /// session is dead server-side, so neither a retry nor a beat can
+    /// help. A transient failure gets one re-check after a beat,
+    /// covering a concurrent rotation that is still landing.
+    private func refreshedToken(previous: String?) async -> String? {
+        guard let refresher = tokenRefresher else { return nil }
+        var outcome = await refresher()
+        if case .transient = outcome {
+            try? await Task.sleep(for: .milliseconds(500))
+            outcome = await refresher()
+        }
+        guard case .refreshed(let token) = outcome, !token.isEmpty, token != previous else {
+            return nil
+        }
+        return token
+    }
 
     private func sendRaw(
         _ method: HTTPMethod,
@@ -719,6 +719,24 @@ private struct UploadProgressSequence: AsyncSequence, Sendable {
         AsyncIterator(data: data, total: data.count, onProgress: onProgress)
     }
 }
+
+/// What a token refresher did, reported to the transport so it can
+/// pick between retrying the request, waiting out a transient failure,
+/// and failing fast. Wired by `MatrixClient` to `auth.refresh`.
+public enum TokenRefreshOutcome: Sendable {
+    /// A rotation landed; the payload is the current access token.
+    case refreshed(String)
+    /// The refresh token was rejected — the session is dead
+    /// server-side. Retrying or waiting cannot help.
+    case rejected
+    /// The refresh could not complete (e.g. a network failure); a
+    /// later attempt may succeed.
+    case transient
+}
+
+/// The transport's token refresher: consulted when a homeserver API
+/// call fails with an unknown/expired token.
+public typealias TokenRefresher = @Sendable () async -> TokenRefreshOutcome
 
 /// Decodes `{}`. Used for endpoints with empty JSON responses.
 public struct EmptyResponse: Hashable, Sendable, Codable {

@@ -14,6 +14,16 @@ private actor PersistedRefreshCredentials {
     }
 }
 
+/// Counts token-refresher consultations, so tests can pin how many
+/// attempts a recovery made.
+private actor RefresherCallLog {
+    private(set) var count = 0
+
+    func record() {
+        count += 1
+    }
+}
+
 /// Transport compliance suite: token-refresh retries, homeserver
 /// resolution over the network, and decoding diagnostics.
 ///
@@ -31,7 +41,7 @@ struct TransportComplianceTests {
             let (fresh, _) = await world.mintTokens(
                 userId: UserId(unchecked: "@alice:test"),
                 deviceId: DeviceId("ALICEDEVICE"))
-            await transport.setTokenRefresher { fresh }
+            await transport.setTokenRefresher { .refreshed(fresh) }
             await harness.setOverride(
                 method: "GET", path: "/_matrix/client/v3/account/whoami",
                 response: .matrixError(
@@ -61,10 +71,12 @@ struct TransportComplianceTests {
                         accessToken: await session.accessToken,
                         refreshToken: await session.refreshToken)
                 } catch {
-                    // Preserve the transport's best-effort retry behavior.
+                    // A failed refresh is transient from the transport's
+                    // perspective: it keeps its one-beat re-check.
+                    return .transient
                 }
                 let token = await session.accessToken
-                return token.isEmpty ? nil : token
+                return .refreshed(token)
             }
             await harness.setOverride(
                 method: "GET", path: "/_matrix/client/v3/account/whoami",
@@ -80,11 +92,11 @@ struct TransportComplianceTests {
         }
     }
 
-    @Test("Stale refresher surfaces the original unknown-token error")
+    @Test("A refresher with no usable token surfaces the original unknown-token error")
     func tokenRefreshStale() async throws {
         try await withHarness { harness in
             let (auth, _, transport) = await harness.authClient()
-            await transport.setTokenRefresher { "harness-token-alice" }
+            await transport.setTokenRefresher { .refreshed("harness-token-alice") }
             await harness.setOverride(
                 method: "GET", path: "/_matrix/client/v3/account/whoami",
                 response: .matrixError(
@@ -92,6 +104,58 @@ struct TransportComplianceTests {
             await #expect(throws: MatrixError.unknownToken(softLogout: nil)) {
                 try await auth.whoAmI()
             }
+        }
+    }
+
+    @Test("A rejected refresh fails fast without a re-check")
+    func tokenRefreshRejectedFailsFast() async throws {
+        try await withHarness { harness in
+            let (auth, _, transport) = await harness.authClient()
+            let calls = RefresherCallLog()
+            await transport.setTokenRefresher {
+                await calls.record()
+                return .rejected
+            }
+            await harness.setOverride(
+                method: "GET", path: "/_matrix/client/v3/account/whoami",
+                response: .matrixError(
+                    code: "M_UNKNOWN_TOKEN", message: "expired", status: 401))
+            await #expect(throws: MatrixError.unknownToken(softLogout: nil)) {
+                try await auth.whoAmI()
+            }
+            // Exactly one consultation: a rejected refresh token skips
+            // the beat-and-recheck the transient path takes.
+            #expect(await calls.count == 1)
+            let requests = await harness.requests.filter {
+                $0.path == "/_matrix/client/v3/account/whoami"
+            }
+            #expect(requests.count == 1)
+        }
+    }
+
+    @Test("A transient refresh recovers on the re-check")
+    func tokenRefreshTransientRecovers() async throws {
+        try await withHarness { harness in
+            let world = await harness.world
+            let (auth, _, transport) = await harness.authClient()
+            let (fresh, _) = await world.mintTokens(
+                userId: UserId(unchecked: "@alice:test"),
+                deviceId: DeviceId("ALICEDEVICE"))
+            let calls = RefresherCallLog()
+            await transport.setTokenRefresher {
+                await calls.record()
+                // The first attempt fails transiently; the beat-and-recheck
+                // hands out the rotated token.
+                if await calls.count == 1 { return .transient }
+                return .refreshed(fresh)
+            }
+            await harness.setOverride(
+                method: "GET", path: "/_matrix/client/v3/account/whoami",
+                response: .matrixError(
+                    code: "M_UNKNOWN_TOKEN", message: "expired", status: 401))
+            let who = try await auth.whoAmI()
+            #expect(who.userId == UserId(unchecked: "@alice:test"))
+            #expect(await calls.count == 2)
         }
     }
 
@@ -156,7 +220,7 @@ struct TransportComplianceTests {
             let (fresh, _) = await world.mintTokens(
                 userId: UserId(unchecked: "@alice:test"),
                 deviceId: DeviceId("ALICEDEVICE"))
-            await transport.setTokenRefresher { fresh }
+            await transport.setTokenRefresher { .refreshed(fresh) }
             await harness.setOverride(
                 method: "POST", path: "/_matrix/media/v3/upload",
                 response: .matrixError(
@@ -167,6 +231,30 @@ struct TransportComplianceTests {
                 $0.path == "/_matrix/media/v3/upload"
             }
             #expect(uploads.count == 2)
+        }
+    }
+
+    @Test("Byte uploads fail fast when the refresh is rejected")
+    func sendBytesRejectedFailsFast() async throws {
+        try await withHarness { harness in
+            let (media, _, transport) = await harness.mediaClient()
+            let calls = RefresherCallLog()
+            await transport.setTokenRefresher {
+                await calls.record()
+                return .rejected
+            }
+            await harness.setOverride(
+                method: "POST", path: "/_matrix/media/v3/upload",
+                response: .matrixError(
+                    code: "M_UNKNOWN_TOKEN", message: "expired", status: 401))
+            await #expect(throws: MatrixError.unknownToken(softLogout: nil)) {
+                _ = try await media.upload(Data("pixels".utf8), mimeType: "image/png")
+            }
+            #expect(await calls.count == 1)
+            let uploads = await harness.requests.filter {
+                $0.path == "/_matrix/media/v3/upload"
+            }
+            #expect(uploads.count == 1)
         }
     }
 
