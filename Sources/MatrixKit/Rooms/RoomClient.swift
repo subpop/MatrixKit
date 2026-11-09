@@ -31,20 +31,29 @@ public actor RoomClient {
         return response.roomId
     }
 
-    /// Join by room ID (`POST /join/{roomId}`).
-    public func join(_ roomId: RoomId, reason: String? = nil) async throws(MatrixError) {
-        let _: JoinResponse = try await transport.send(
+    /// Join by room ID (`POST /join/{roomId}`). Returns the server-resolved
+    /// room ID.
+    @discardableResult
+    public func join(
+        _ roomId: RoomId, reason: String? = nil
+    ) async throws(MatrixError) -> RoomId {
+        let response: JoinResponse = try await transport.send(
             .post, path: "/_matrix/client/v3/join/\(roomId.pathSegmentEncoded)",
             body: JoinRequest(reason: reason), accessToken: try await token()
         )
+        return response.roomId
     }
 
-    /// Join by alias (`POST /join/{alias}`).
-    public func join(_ alias: RoomAlias, reason: String? = nil) async throws(MatrixError) {
-        let _: JoinResponse = try await transport.send(
+    /// Join by alias (`POST /join/{alias}`). Returns the resolved room ID.
+    @discardableResult
+    public func join(
+        _ alias: RoomAlias, reason: String? = nil
+    ) async throws(MatrixError) -> RoomId {
+        let response: JoinResponse = try await transport.send(
             .post, path: "/_matrix/client/v3/join/\(alias.pathSegmentEncoded)",
             body: JoinRequest(reason: reason), accessToken: try await token()
         )
+        return response.roomId
     }
 
     /// Knock on a room by ID (`POST /knock/{roomId}`). Returns the

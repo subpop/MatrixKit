@@ -1488,13 +1488,18 @@ public final class MatrixClient {
         try await rooms.create(request)
     }
 
-    /// Join a room by ID. Syncs after joining so the `.join` membership
-    /// lands in attached stores, and returns the room ID.
+    /// Join a room by ID and return the server-resolved room ID. The
+    /// running sync loop delivers membership and room state separately.
     @discardableResult
     public func joinRoom(_ roomId: RoomId) async throws -> RoomId {
         try await rooms.join(roomId)
-        try await syncOnce()
-        return roomId
+    }
+
+    /// Join a room by alias and return its resolved room ID. The running
+    /// sync loop delivers membership and room state separately.
+    @discardableResult
+    public func joinRoom(_ alias: RoomAlias) async throws -> RoomId {
+        try await rooms.join(alias)
     }
 
     /// Knock on a room by ID. Syncs after knocking so the `.knock`

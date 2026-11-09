@@ -55,19 +55,39 @@ struct FacadeComplianceTests {
         }
     }
 
-    @Test("Join syncs the new membership")
+    @Test("Join returns before sync delivers membership")
     @MainActor
     func joinFlow() async throws {
         try await withHarness { harness in
             let client = await client(harness)
-            let created = try await client.rooms.create(CreateRoomRequest())
-            let roomId = try await client.joinRoom(created)
+            let created = try await client.rooms.create(
+                CreateRoomRequest(roomAliasName: "join-flow"))
+            try await client.rooms.leave(created)
+            let roomId = try await client.joinRoom(
+                RoomAlias(unchecked: "#join-flow:test"))
             #expect(roomId == created)
+            let delta = try await client.sync.syncOnce()
+            #expect(delta.joined[created] != nil)
             let members = try await client.rooms.members(created)
             let alice = members.first {
                 $0.userId == UserId(unchecked: "@alice:test")
             }
             #expect(alice?.content.membership == .join)
+            try? await client.transport.shutdown()
+        }
+    }
+
+    @Test("Join by room ID returns before sync delivers membership")
+    @MainActor
+    func joinRoomIdFlow() async throws {
+        try await withHarness { harness in
+            let client = await client(harness)
+            let created = try await client.rooms.create(CreateRoomRequest())
+            try await client.rooms.leave(created)
+            let roomId = try await client.joinRoom(created)
+            #expect(roomId == created)
+            let delta = try await client.sync.syncOnce()
+            #expect(delta.joined[created] != nil)
             try? await client.transport.shutdown()
         }
     }

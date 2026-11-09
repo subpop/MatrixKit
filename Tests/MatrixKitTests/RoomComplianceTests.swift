@@ -225,9 +225,21 @@ struct RoomComplianceTests {
             let (rooms, _, _) = await harness.roomClient()
             let roomId = try await rooms.create(CreateRoomRequest(roomAliasName: "general"))
             try await rooms.leave(roomId)
-            try await rooms.join(RoomAlias(unchecked: "#general:test"))
+            let joinedRoomId = try await rooms.join(RoomAlias(unchecked: "#general:test"))
+            #expect(joinedRoomId == roomId)
             let members = try await rooms.members(roomId)
             #expect(members.first { $0.stateKey == "@alice:test" }?.content.membership == .join)
+        }
+    }
+
+    @Test("Join by room ID returns the room ID")
+    func joinByRoomId() async throws {
+        try await withHarness { harness in
+            let (rooms, _, _) = await harness.roomClient()
+            let roomId = try await rooms.create(CreateRoomRequest())
+            try await rooms.leave(roomId)
+            let joinedRoomId = try await rooms.join(roomId)
+            #expect(joinedRoomId == roomId)
         }
     }
 
