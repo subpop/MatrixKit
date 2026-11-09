@@ -513,10 +513,9 @@ public struct SyncFilter: Hashable, Sendable, Codable {
 }
 
 extension SyncFilter {
-    /// Lean filter for initial syncs on large homeservers: small timeline,
-    /// lazy-loaded membership (only members in the timeline), no redundant
-    /// member state. Shrinks matrix.org-style initial syncs from tens of
-    /// MiB to a fraction of that.
+    /// Lean filter for large homeservers: bounded timeline, lazy-loaded
+    /// membership (only members in the timeline), and no redundant member
+    /// state. Useful for initial and live syncs in large rooms.
     public static var leanInitial: SyncFilter {
         SyncFilter(
             room: RoomFilter(
