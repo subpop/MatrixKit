@@ -227,8 +227,40 @@ struct RoomComplianceTests {
             try await rooms.leave(roomId)
             let joinedRoomId = try await rooms.join(RoomAlias(unchecked: "#general:test"))
             #expect(joinedRoomId == roomId)
+            let requests = await harness.requests
+            let resolve = try #require(requests.first {
+                $0.method == "GET" && $0.path == "/_matrix/client/v3/directory/room/%23general%3Atest"
+            })
+            #expect(resolve.hadBearer)
+            let join = try #require(requests.first {
+                $0.method == "POST" && $0.path == "/_matrix/client/v3/join/!r1%3Atest"
+            })
+            #expect(join.query["server_name"] == "test")
             let members = try await rooms.members(roomId)
             #expect(members.first { $0.stateKey == "@alice:test" }?.content.membership == .join)
+        }
+    }
+
+    @Test("Join by alias falls back to direct alias join when directory lookup fails")
+    func joinByAliasFallback() async throws {
+        try await withHarness { harness in
+            let (rooms, _, _) = await harness.roomClient()
+            let roomId = try await rooms.create(CreateRoomRequest(roomAliasName: "general"))
+            try await rooms.leave(roomId)
+            await harness.setOverride(
+                method: "GET",
+                path: "/_matrix/client/v3/directory/room/%23general%3Atest",
+                response: .matrixError(code: "M_NOT_FOUND", message: "No such alias", status: 404)
+            )
+            let joinedRoomId = try await rooms.join(RoomAlias(unchecked: "#general:test"))
+            #expect(joinedRoomId == roomId)
+            let requests = await harness.requests
+            #expect(requests.contains {
+                $0.method == "GET" && $0.path == "/_matrix/client/v3/directory/room/%23general%3Atest"
+            })
+            #expect(requests.contains {
+                $0.method == "POST" && $0.path == "/_matrix/client/v3/join/%23general%3Atest"
+            })
         }
     }
 

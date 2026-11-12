@@ -37,8 +37,17 @@ public actor RoomClient {
     public func join(
         _ roomId: RoomId, reason: String? = nil
     ) async throws(MatrixError) -> RoomId {
+        try await join(roomId, reason: reason, serverName: nil)
+    }
+
+    @discardableResult
+    private func join(
+        _ roomId: RoomId, reason: String? = nil, serverName: String?
+    ) async throws(MatrixError) -> RoomId {
+        let query = serverName.map { ["server_name": $0] }
         let response: JoinResponse = try await transport.send(
             .post, path: "/_matrix/client/v3/join/\(roomId.pathSegmentEncoded)",
+            query: query,
             body: JoinRequest(reason: reason), accessToken: try await token()
         )
         return response.roomId
@@ -49,11 +58,19 @@ public actor RoomClient {
     public func join(
         _ alias: RoomAlias, reason: String? = nil
     ) async throws(MatrixError) -> RoomId {
-        let response: JoinResponse = try await transport.send(
-            .post, path: "/_matrix/client/v3/join/\(alias.pathSegmentEncoded)",
-            body: JoinRequest(reason: reason), accessToken: try await token()
-        )
-        return response.roomId
+        do {
+            let resolution = try await resolveAlias(alias)
+            let via = resolution.servers.first ?? alias.serverName
+            return try await join(resolution.roomId, reason: reason, serverName: via)
+        } catch {
+            // Compatibility fallback: some homeservers restrict or fail alias
+            // directory lookups while still permitting direct alias joins.
+            let response: JoinResponse = try await transport.send(
+                .post, path: "/_matrix/client/v3/join/\(alias.pathSegmentEncoded)",
+                body: JoinRequest(reason: reason), accessToken: try await token()
+            )
+            return response.roomId
+        }
     }
 
     /// Knock on a room by ID (`POST /knock/{roomId}`). Returns the
@@ -587,6 +604,14 @@ public actor RoomClient {
             memberCount: memberCount,
             canonicalAlias: canonicalAlias,
             messages: Array(peek.chunk.reversed()))
+    }
+}
+
+private extension RoomAlias {
+    var serverName: String? {
+        guard let colon = value.firstIndex(of: ":") else { return nil }
+        let server = String(value[value.index(after: colon)...])
+        return server.isEmpty ? nil : server
     }
 }
 
