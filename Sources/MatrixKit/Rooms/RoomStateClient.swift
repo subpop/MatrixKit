@@ -133,6 +133,24 @@ public actor RoomStateClient {
             roomId, type: "m.room.power_levels",
             content: settings.applying(to: try await powerLevels(roomId)))
     }
+
+    /// Current guest access policy (`m.room.guest_access`).
+    public func guestAccess(_ roomId: RoomId) async throws(MatrixError) -> RoomGuestAccess {
+        let content = try await getStateEvent(roomId, type: EventType.roomGuestAccess.rawValue)
+        return RoomGuestAccess(rawValue: content["guest_access"]?.stringValue ?? "")
+    }
+
+    /// Set the guest access policy (`m.room.guest_access`).
+    @discardableResult
+    public func setGuestAccess(
+        _ roomId: RoomId, access: RoomGuestAccess
+    ) async throws(MatrixError) -> EventId {
+        try await sendStateEvent(
+            roomId,
+            type: EventType.roomGuestAccess.rawValue,
+            content: ["guest_access": .string(access.rawValue)]
+        )
+    }
 }
 
 /// `GET /rooms/{roomId}/state` response (bare array).

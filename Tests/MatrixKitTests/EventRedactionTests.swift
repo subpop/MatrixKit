@@ -55,6 +55,10 @@ struct EventRedactorTests {
             content: ["history_visibility": .string("shared"), "extra": .string("x")],
             check: { $0.keys.sorted() == ["history_visibility"] }),
         PruneCase(
+            type: "m.room.guest_access",
+            content: ["guest_access": .string("forbidden"), "extra": .string("x")],
+            check: { $0.keys.sorted() == ["guest_access"] }),
+        PruneCase(
             type: "m.room.redaction",
             content: ["redacts": .string("$target"), "reason": .string("spam")],
             check: { $0.keys.sorted() == ["redacts"] }),

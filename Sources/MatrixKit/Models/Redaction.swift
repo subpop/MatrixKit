@@ -38,6 +38,8 @@ public enum EventRedactor {
             return content.filter { Self.powerLevelKeys.contains($0.key) }
         case .roomHistoryVisibility:
             return content.filter { $0.key == "history_visibility" }
+        case .roomGuestAccess:
+            return content.filter { $0.key == "guest_access" }
         case .redaction:
             return content.filter { $0.key == "redacts" }
         default:

@@ -100,6 +100,7 @@ func formatEvent(_ event: MessageEvent, localUser: UserId?) -> String? {
         return "\(time) \(styled("Topic changed", ANSI.dim))"
     case .roomCreate, .roomAvatar, .roomPowerLevels, .roomEncryption, .roomTombstone,
         .roomCanonicalAlias, .roomPinnedEvents, .roomJoinRules, .roomHistoryVisibility,
+        .roomGuestAccess,
         .roomServerACL:
         return "\(time) \(styled("\(sender) updated \(event.type)", ANSI.dim))"
     case .reaction, .pollResponse, .callCandidates, .callNegotiate,

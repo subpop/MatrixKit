@@ -24,6 +24,7 @@ public enum EventType: Hashable, Sendable {
     case roomPinnedEvents
     case roomJoinRules
     case roomHistoryVisibility
+    case roomGuestAccess
     case roomServerACL
     case reaction
     case redaction
@@ -64,6 +65,7 @@ public enum EventType: Hashable, Sendable {
         case .roomPinnedEvents: return "m.room.pinned_events"
         case .roomJoinRules: return "m.room.join_rules"
         case .roomHistoryVisibility: return "m.room.history_visibility"
+        case .roomGuestAccess: return "m.room.guest_access"
         case .roomServerACL: return "m.room.server_acl"
         case .reaction: return "m.reaction"
         case .redaction: return "m.room.redaction"
@@ -106,6 +108,7 @@ public enum EventType: Hashable, Sendable {
         case "m.room.pinned_events": self = .roomPinnedEvents
         case "m.room.join_rules": self = .roomJoinRules
         case "m.room.history_visibility": self = .roomHistoryVisibility
+        case "m.room.guest_access": self = .roomGuestAccess
         case "m.room.server_acl": self = .roomServerACL
         case "m.reaction": self = .reaction
         case "m.room.redaction": self = .redaction
@@ -149,6 +152,44 @@ extension EventType: Codable {
 public enum RoomVisibility: String, Hashable, Sendable, Codable {
     case `public`
     case `private`
+}
+
+/// Guest access policy (`m.room.guest_access`).
+public enum RoomGuestAccess: Hashable, Sendable {
+    /// Guests cannot join the room.
+    case forbidden
+    /// Guests may join the room.
+    case canJoin
+    /// Unknown or future value.
+    case unknown(String)
+
+    public var rawValue: String {
+        switch self {
+        case .forbidden: return "forbidden"
+        case .canJoin: return "can_join"
+        case .unknown(let value): return value
+        }
+    }
+
+    public init(rawValue: String) {
+        switch rawValue {
+        case "forbidden": self = .forbidden
+        case "can_join": self = .canJoin
+        default: self = .unknown(rawValue)
+        }
+    }
+}
+
+extension RoomGuestAccess: Codable {
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        self.init(rawValue: try container.decode(String.self))
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
 }
 
 /// Room preset used at creation time.

@@ -64,6 +64,15 @@
     "Encryption was enabled" : {
       "comment" : "Timeline description: end-to-end encryption was turned on."
     },
+    "Guest access was disabled" : {
+      "comment" : "Timeline description: guest users can no longer join the room."
+    },
+    "Guest access was enabled" : {
+      "comment" : "Timeline description: guest users may join the room."
+    },
+    "Guest access was updated" : {
+      "comment" : "Timeline description: the room's guest access policy changed."
+    },
     "History visibility was updated" : {
       "comment" : "Timeline description: who may read earlier messages changed."
     },

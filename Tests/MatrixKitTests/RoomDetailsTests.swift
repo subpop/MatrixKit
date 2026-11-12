@@ -111,4 +111,20 @@ struct RoomDetailsTests {
                 UserId(unchecked: "@mallory:test")))
         }
     }
+
+    @Test("Guest access state is surfaced in room details")
+    func guestAccess() async throws {
+        try await withHarness { harness in
+            let (rooms, _, _) = await harness.roomClient()
+            let (roomState, _, _) = await harness.roomStateClient()
+            let roomId = try await rooms.create(CreateRoomRequest())
+            _ = try await roomState.sendStateEvent(
+                roomId,
+                type: "m.room.guest_access",
+                content: ["guest_access": .string("can_join")])
+            let details = try await rooms.roomDetails(
+                roomId, localUser: UserId(unchecked: "@alice:test"))
+            #expect(details.guestAccess == "can_join")
+        }
+    }
 }

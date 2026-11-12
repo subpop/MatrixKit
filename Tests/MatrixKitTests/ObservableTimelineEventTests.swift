@@ -519,12 +519,32 @@ struct ObservableTimelineEventTests {
         ("m.room.pinned_events", "Pinned messages were updated"),
         ("m.room.join_rules", "Join rules were updated"),
         ("m.room.history_visibility", "History visibility was updated"),
+        ("m.room.guest_access", "Guest access was updated"),
         ("m.room.topic", "Topic changed"),
     ])
     func roomStateDescriptions(type: String, description: String) {
         let event = messageEvent(type: type, content: [:])
         let wrapper = ObservableTimelineEvent.make(from: event, localUser: nil)
         #expect(wrapper.kind == .state(type: type, description: description))
+    }
+
+    @Test("Guest access state event describes enabled/disabled")
+    func guestAccessDescription() {
+        let enabled = messageEvent(
+            type: "m.room.guest_access",
+            content: ["guest_access": .string("can_join")])
+        let enabledWrapper = ObservableTimelineEvent.make(from: enabled, localUser: nil)
+        #expect(enabledWrapper.kind == .state(
+            type: "m.room.guest_access",
+            description: "Guest access was enabled"))
+
+        let disabled = messageEvent(
+            type: "m.room.guest_access",
+            content: ["guest_access": .string("forbidden")])
+        let disabledWrapper = ObservableTimelineEvent.make(from: disabled, localUser: nil)
+        #expect(disabledWrapper.kind == .state(
+            type: "m.room.guest_access",
+            description: "Guest access was disabled"))
     }
 
     @Test("Timeline descriptions resolve through the package's string bundle")

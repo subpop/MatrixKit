@@ -703,6 +703,18 @@ public final class ObservableTimelineEvent {
             return .state(type: event.type, description: String(localized: "Join rules were updated", bundle: .module, comment: "Timeline description: who may join the room changed."))
         case .roomHistoryVisibility:
             return .state(type: event.type, description: String(localized: "History visibility was updated", bundle: .module, comment: "Timeline description: who may read earlier messages changed."))
+        case .roomGuestAccess:
+            let access = RoomGuestAccess(
+                rawValue: event.content["guest_access"]?.stringValue ?? "")
+            let description = switch access {
+            case .forbidden:
+                String(localized: "Guest access was disabled", bundle: .module, comment: "Timeline description: guest users can no longer join the room.")
+            case .canJoin:
+                String(localized: "Guest access was enabled", bundle: .module, comment: "Timeline description: guest users may join the room.")
+            case .unknown:
+                String(localized: "Guest access was updated", bundle: .module, comment: "Timeline description: the room's guest access policy changed.")
+            }
+            return .state(type: event.type, description: description)
         case .roomServerACL:
             return .state(type: event.type, description: String(localized: "Server access control was updated", bundle: .module, comment: "Timeline description: the room's server ACL changed."))
         case .callMember:

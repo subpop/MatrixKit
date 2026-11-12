@@ -101,6 +101,8 @@ public struct RoomPermissions: Hashable, Sendable {
     public var canEditJoinRules: Bool
     /// May change history visibility.
     public var canEditHistoryVisibility: Bool
+    /// May change guest access.
+    public var canEditGuestAccess: Bool
     /// May change the canonical alias.
     public var canEditCanonicalAlias: Bool
     /// May send `m.room.message` events.
@@ -122,6 +124,7 @@ public struct RoomPermissions: Hashable, Sendable {
         canPin: Bool = false,
         canEditJoinRules: Bool = false,
         canEditHistoryVisibility: Bool = false,
+        canEditGuestAccess: Bool = false,
         canEditCanonicalAlias: Bool = false,
         canSendMessages: Bool = true,
         canSendReactions: Bool = true,
@@ -138,6 +141,7 @@ public struct RoomPermissions: Hashable, Sendable {
         self.canPin = canPin
         self.canEditJoinRules = canEditJoinRules
         self.canEditHistoryVisibility = canEditHistoryVisibility
+        self.canEditGuestAccess = canEditGuestAccess
         self.canEditCanonicalAlias = canEditCanonicalAlias
         self.canSendMessages = canSendMessages
         self.canSendReactions = canSendReactions
@@ -151,6 +155,7 @@ public struct RoomPermissions: Hashable, Sendable {
         canInvite: true, canKick: true, canBan: true,
         canRedactOther: true, canChangePermissions: true,
         canPin: true, canEditJoinRules: true, canEditHistoryVisibility: true,
+        canEditGuestAccess: true,
         canEditCanonicalAlias: true, canSendMessages: true,
         canSendReactions: true, canSendRedactions: true
     )
@@ -192,6 +197,7 @@ public struct RoomPermissions: Hashable, Sendable {
             canEditJoinRules: can(event("m.room.join_rules", fallback: stateDefault)),
             canEditHistoryVisibility: can(
                 event("m.room.history_visibility", fallback: stateDefault)),
+            canEditGuestAccess: can(event("m.room.guest_access", fallback: stateDefault)),
             canEditCanonicalAlias: can(event("m.room.canonical_alias", fallback: stateDefault)),
             canSendMessages: can(event(
                 "m.room.message",
@@ -314,6 +320,8 @@ public struct RoomDetails: Hashable, Sendable {
     public var joinRule: String?
     /// Raw history visibility, if known.
     public var historyVisibility: String?
+    /// Guest access policy (`forbidden` or `can_join`), if known.
+    public var guestAccess: String?
     /// Local user's permissions, if power levels are available.
     public var permissions: RoomPermissions?
     /// Power-level thresholds, if available.
@@ -336,6 +344,7 @@ public struct RoomDetails: Hashable, Sendable {
         pinnedEventIds: [String] = [],
         joinRule: String? = nil,
         historyVisibility: String? = nil,
+        guestAccess: String? = nil,
         permissions: RoomPermissions? = nil,
         powerLevelSettings: RoomPowerLevelSettings? = nil
     ) {
@@ -355,6 +364,7 @@ public struct RoomDetails: Hashable, Sendable {
         self.pinnedEventIds = pinnedEventIds
         self.joinRule = joinRule
         self.historyVisibility = historyVisibility
+        self.guestAccess = guestAccess
         self.permissions = permissions
         self.powerLevelSettings = powerLevelSettings
     }

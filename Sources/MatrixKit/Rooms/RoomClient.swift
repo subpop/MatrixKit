@@ -404,6 +404,7 @@ public actor RoomClient {
         var pinnedEventIds: [String] = []
         var joinRule: String?
         var historyVisibility: String?
+        var guestAccess: String?
         var powerContent: [String: AnyCodable]?
         var creatorSender: UserId?
         var createContent: [String: AnyCodable]?
@@ -430,6 +431,8 @@ public actor RoomClient {
                 joinRule = event.content["join_rule"]?.stringValue
             case .roomHistoryVisibility:
                 historyVisibility = event.content["history_visibility"]?.stringValue
+            case .roomGuestAccess:
+                guestAccess = event.content["guest_access"]?.stringValue
             case .roomCreate:
                 creatorSender = event.sender
                 createContent = event.content
@@ -517,6 +520,7 @@ public actor RoomClient {
             pinnedEventIds: pinnedEventIds,
             joinRule: joinRule,
             historyVisibility: historyVisibility,
+            guestAccess: guestAccess,
             permissions: permissions,
             powerLevelSettings: powerLevels.map(RoomPowerLevelSettings.parse))
     }
