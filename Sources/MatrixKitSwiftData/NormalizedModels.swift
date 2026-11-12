@@ -71,6 +71,8 @@ public final class SDRoom {
     public var isFavourite: Bool
     public var isEncrypted: Bool
     public var isDirect: Bool
+    /// Room version from `m.room.create` (`"1"` when omitted there).
+    public var roomVersion: String?
     public var canonicalAlias: String?
     public var successorRoomId: String?
     /// Invite sender while `membership == "invite"`.
@@ -122,6 +124,7 @@ public final class SDRoom {
         isFavourite: Bool = false,
         isEncrypted: Bool = false,
         isDirect: Bool = false,
+        roomVersion: String? = nil,
         canonicalAlias: String? = nil,
         successorRoomId: String? = nil,
         inviterId: String? = nil
@@ -143,6 +146,7 @@ public final class SDRoom {
         self.isFavourite = isFavourite
         self.isEncrypted = isEncrypted
         self.isDirect = isDirect
+        self.roomVersion = roomVersion
         self.canonicalAlias = canonicalAlias
         self.successorRoomId = successorRoomId
         self.inviterId = inviterId

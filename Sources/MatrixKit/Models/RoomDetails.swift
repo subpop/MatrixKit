@@ -302,8 +302,9 @@ public struct RoomDetails: Hashable, Sendable {
     }
     /// Whether the room is a direct chat.
     public var isDirect: Bool
-    /// Room version (from `m.room.create`; `"1"` when absent).
-    public var roomVersion: String
+    /// Room version from `m.room.create` (`"1"` when omitted in that event),
+    /// or `nil` when the create event has not been observed yet.
+    public var roomVersion: String?
     /// Canonical alias, if any.
     public var canonicalAlias: String?
     /// Alternative aliases.
@@ -335,7 +336,7 @@ public struct RoomDetails: Hashable, Sendable {
         isEncrypted: Bool = false,
         isPublic: Bool = false,
         isDirect: Bool = false,
-        roomVersion: String = "1",
+        roomVersion: String? = nil,
         canonicalAlias: String? = nil,
         alternativeAliases: [String] = [],
         memberCount: Int = 0,

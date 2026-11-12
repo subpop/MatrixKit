@@ -553,6 +553,7 @@ public actor MatrixStoreWriter {
         ).first else { return }
         room.createEventSender = createEventSender.value
         room.createEventContent = try encoder.encode(createEventContent)
+        room.roomVersion = createEventContent["room_version"]?.stringValue ?? "1"
         room.powerLevelsContent = try powerLevels.map { try encoder.encode($0) }
         room.isSpace = createEventContent["type"]?.stringValue == "m.space"
         try modelContext.save()
@@ -960,6 +961,7 @@ public actor MatrixStoreWriter {
             case .roomCreate:
                 room.createEventSender = event.sender.value
                 room.createEventContent = try encoder.encode(event.content)
+                room.roomVersion = event.content["room_version"]?.stringValue ?? "1"
                 room.isSpace = event.content["type"]?.stringValue == "m.space"
             default:
                 break
@@ -1108,6 +1110,7 @@ public actor MatrixStoreWriter {
             case .roomCreate:
                 room.createEventSender = event.sender.value
                 room.createEventContent = try encoder.encode(event.content)
+                room.roomVersion = event.content["room_version"]?.stringValue ?? "1"
                 room.isSpace = event.content["type"]?.stringValue == "m.space"
             default:
                 break

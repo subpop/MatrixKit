@@ -436,7 +436,7 @@ public actor RoomClient {
             case .roomCreate:
                 creatorSender = event.sender
                 createContent = event.content
-                roomVersion = event.content["room_version"]?.stringValue
+                roomVersion = event.content["room_version"]?.stringValue ?? "1"
             case .roomEncryption:
                 isEncrypted = true
             case .roomMember, .roomMessage, .roomTombstone,
@@ -511,7 +511,7 @@ public actor RoomClient {
             isEncrypted: isEncrypted,
             isPublic: joinRule == "public",
             isDirect: isDirect,
-            roomVersion: roomVersion ?? "1",
+            roomVersion: roomVersion,
             canonicalAlias: canonicalAlias,
             alternativeAliases: alternativeAliases,
             memberCount: members.count,

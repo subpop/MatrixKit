@@ -56,6 +56,7 @@ public struct StoredRoomDetail: Hashable, Sendable {
     public var fullyRead: String?
     public var firstUnreadEventId: String?
     public var memberCount: Int
+    public var roomVersion: String?
     public var isSpace: Bool
     public var isDirect: Bool
     public var isFavourite: Bool
@@ -177,6 +178,7 @@ public struct MatrixStoreReader: Sendable {
             fullyRead: room.fullyRead,
             firstUnreadEventId: room.firstUnreadEventId,
             memberCount: members.count,
+            roomVersion: room.roomVersion,
             isSpace: room.isSpace,
             isDirect: room.isDirect,
             isFavourite: room.isFavourite,

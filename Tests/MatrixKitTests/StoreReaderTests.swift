@@ -162,6 +162,9 @@ struct StoreReaderTests {
                 timeline: [unreadMessage("a", ts: 10)],
                 prevBatch: BatchToken("p1"),
                 state: [
+                    stateEvent(
+                        type: "m.room.create",
+                        content: ["room_version": .string("12")]),
                     memberStateEvent(
                         "@alice:x", membership: "join",
                         displayname: "Alice")
@@ -174,6 +177,7 @@ struct StoreReaderTests {
         #expect(detail.highlight == 2)
         #expect(detail.prevBatch == "p1")
         #expect(detail.memberCount == 1)
+        #expect(detail.roomVersion == "12")
         #expect(detail.membership == .join)
         #expect(try reader(container).roomDetail(
             RoomId(unchecked: "!missing:x")) == nil)
