@@ -127,6 +127,34 @@ struct ObservableTimelineEventTests {
             question: "Lunch?",
             answers: [PollSummary.Answer(id: "a1", text: "Pizza")],
             kind: .disclosed,
+             maxSelections: 1)))
+    }
+
+    @Test("Unstable poll start classifies with its question")
+    func unstablePoll() {
+        let event = messageEvent(
+            type: "org.matrix.msc3381.poll.start",
+            content: [
+                "org.matrix.msc1767.text": .string("Lunch?\n1. Pizza"),
+                "org.matrix.msc3381.poll.start": .object([
+                    "kind": .string("org.matrix.msc3381.poll.disclosed"),
+                    "max_selections": .int(1),
+                    "question": .object([
+                        "org.matrix.msc1767.text": .string("Lunch?"),
+                    ]),
+                    "answers": .array([
+                        .object([
+                            "id": .string("a1"),
+                            "org.matrix.msc1767.text": .string("Pizza"),
+                        ]),
+                    ]),
+                ]),
+            ])
+        let wrapper = ObservableTimelineEvent.make(from: event, localUser: nil)
+        #expect(wrapper.kind == .poll(PollSummary(
+            question: "Lunch?",
+            answers: [PollSummary.Answer(id: "a1", text: "Pizza")],
+            kind: .disclosed,
             maxSelections: 1)))
     }
 
@@ -868,6 +896,64 @@ struct ObservableTimelinePollTests {
             start(kind: "org.example.custom"),
         ])
         #expect(result.kind == .undisclosed)
+    }
+
+    @Test("Unstable poll start, votes, and end aggregate")
+    func unstablePollEventsAggregate() {
+        let unstableStart = MessageEvent(
+            type: "org.matrix.msc3381.poll.start", eventId: pollId, sender: alice,
+            originServerTs: 1_000,
+            content: [
+                "org.matrix.msc1767.text": .string("Lunch?\n1. Pizza\n2. Tacos"),
+                "org.matrix.msc3381.poll.start": .object([
+                    "kind": .string("org.matrix.msc3381.poll.disclosed"),
+                    "max_selections": .int(1),
+                    "question": .object([
+                        "org.matrix.msc1767.text": .string("Lunch?"),
+                    ]),
+                    "answers": .array([
+                        .object([
+                            "id": .string("a1"),
+                            "org.matrix.msc1767.text": .string("Pizza"),
+                        ]),
+                        .object([
+                            "id": .string("a2"),
+                            "org.matrix.msc1767.text": .string("Tacos"),
+                        ]),
+                    ]),
+                ]),
+            ])
+        let unstableVote = MessageEvent(
+            type: "org.matrix.msc3381.poll.response",
+            eventId: EventId(unchecked: "$unstable-vote:x"),
+            sender: bob, originServerTs: 2_000,
+            content: [
+                "m.relates_to": .object([
+                    "rel_type": .string("m.reference"),
+                    "event_id": .string("$poll:x"),
+                ]),
+                "org.matrix.msc3381.poll.response": .object([
+                    "answers": .array([.string("a2")]),
+                ]),
+            ])
+        let unstableEnd = MessageEvent(
+            type: "org.matrix.msc3381.poll.end",
+            eventId: EventId(unchecked: "$unstable-end:x"),
+            sender: alice, originServerTs: 3_000,
+            content: [
+                "m.relates_to": .object([
+                    "rel_type": .string("m.reference"),
+                    "event_id": .string("$poll:x"),
+                ]),
+                "org.matrix.msc1767.text": .string("Poll ended"),
+                "org.matrix.msc3381.poll.end": .object([:]),
+            ])
+
+        let result = summary([unstableStart, unstableVote, unstableEnd])
+        #expect(result.answers.map(\.voteCount) == [0, 1])
+        #expect(result.totalVotes == 1)
+        #expect(result.isEnded)
+        #expect(result.winningAnswerIds == ["a2"])
     }
 }
 

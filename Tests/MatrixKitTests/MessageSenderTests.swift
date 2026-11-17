@@ -356,16 +356,39 @@ struct MessageSenderTests {
         }
     }
 
-    @Test("Vote stages an echo and PUTs the response")
+    @Test("Starting a poll stages an unstable echo and PUTs the unstable event")
+    func startPollEcho() async throws {
+        try await withHarness { harness in
+            let (sender, writer, _, _) = try await sender(harness)
+            let room = RoomId(unchecked: "!room:test")
+            let content = PollStartContent(
+                question: "Lunch?", answers: [
+                    PollStartContent.Answer(id: "a1", text: "Pizza"),
+                    PollStartContent.Answer(id: "a2", text: "Tacos"),
+                ])
+            let eventId = await sender.startPoll(room, content: content)
+            #expect(await sends(
+                harness, containing: "/send/org.matrix.msc3381.poll.start/").count == 1)
+            let stored = try await writer.storedEvents(roomId: room)
+            #expect(stored.contains {
+                $0.eventId == eventId
+                    && $0.type == "org.matrix.msc3381.poll.start"
+            })
+        }
+    }
+
+    @Test("Vote stages an unstable echo and PUTs the response")
     func voteEcho() async throws {
         try await withHarness { harness in
             let (sender, writer, _, _) = try await sender(harness)
             let room = RoomId(unchecked: "!room:test")
             await sender.vote(room, poll: EventId(unchecked: "$poll:test"), answers: ["a1"])
-            #expect(await sends(harness, containing: "/send/m.poll.response/").count == 1)
+            #expect(await sends(
+                harness, containing: "/send/org.matrix.msc3381.poll.response/").count == 1)
             let stored = try await writer.storedEvents(roomId: room)
             #expect(stored.contains {
-                $0.eventId.value.hasPrefix("local:") && $0.type == "m.poll.response"
+                $0.eventId.value.hasPrefix("local:")
+                    && $0.type == "org.matrix.msc3381.poll.response"
             })
         }
     }
@@ -381,14 +404,15 @@ struct MessageSenderTests {
         }
     }
 
-    @Test("End poll PUTs the end event")
+    @Test("End poll PUTs the unstable end event")
     func endPoll() async throws {
         try await withHarness { harness in
             let (sender, _, _, _) = try await sender(harness)
             let (rooms, _, _) = await harness.roomClient()
             let room = try await rooms.create(CreateRoomRequest(name: "Polls"))
             try await sender.endPoll(room, poll: EventId(unchecked: "$poll:test"))
-            #expect(await sends(harness, containing: "/send/m.poll.end/").count == 1)
+            #expect(await sends(
+                harness, containing: "/send/org.matrix.msc3381.poll.end/").count == 1)
         }
     }
 
@@ -555,7 +579,7 @@ struct MessageSenderTests {
         }
     }
 
-    @Test("Encrypted poll votes and ends keep their event types")
+    @Test("Encrypted poll start, vote, and end keep unstable event types")
     func encryptedPollTypes() async throws {
         try await withHarness { harness in
             let (sender, writer, sharer, cryptoSender) = try await sender(harness)
@@ -563,6 +587,10 @@ struct MessageSenderTests {
             await sharer.setDevices(["@alice:test": ["ALICEDEVICE", "OTHER"]])
             let room = try await encryptedRoom(harness, writer: writer, name: "E2EE polls")
             let poll = EventId(unchecked: "$poll:test")
+            _ = await sender.startPoll(room, content: PollStartContent(
+                question: "Lunch?", answers: [
+                    PollStartContent.Answer(id: "a1", text: "Pizza"),
+                ]))
             await sender.vote(room, poll: poll, answers: ["a1"])
             try await sender.endPoll(room, poll: poll)
 
@@ -572,7 +600,7 @@ struct MessageSenderTests {
                 type: "m.room_key", sender: UserId(unchecked: "@alice:test"),
                 content: try #require(shares.first).content))
             let sent = await cryptoSender.sent
-            #expect(sent.count == 2)
+            #expect(sent.count == 3)
             var types: [String] = []
             for (index, event) in sent.enumerated() {
                 let decrypted = await receiver.decryptRoomEvent(
@@ -583,7 +611,11 @@ struct MessageSenderTests {
                     in: room)
                 types.append(decrypted?.type ?? "undecryptable")
             }
-            #expect(types == ["m.poll.response", "m.poll.end"])
+            #expect(types == [
+                "org.matrix.msc3381.poll.start",
+                "org.matrix.msc3381.poll.response",
+                "org.matrix.msc3381.poll.end",
+            ])
         }
     }
 

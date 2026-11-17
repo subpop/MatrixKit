@@ -4,6 +4,12 @@ import MatrixKit
 import OSLog
 import SwiftData
 
+private enum UnstablePollEventType {
+    static let start = "org.matrix.msc3381.poll.start"
+    static let response = "org.matrix.msc3381.poll.response"
+    static let end = "org.matrix.msc3381.poll.end"
+}
+
 private nonisolated let messageSendSignposter = OSSignposter(
     subsystem: "app.subpop.Relay.performance", category: "MessageSend")
 /// Store-backed room sends: local echoes, encrypted/plaintext dispatch,
@@ -582,11 +588,11 @@ public actor MessageSender {
 
     // MARK: - Polls
 
-    /// Start a poll (`m.poll.start`) with a local echo: the poll card
-    /// appears immediately and sync confirms it via the shared transaction
-    /// ID. Encrypted rooms encrypt the event. A transport failure marks
-    /// the echo failed instead of throwing. Returns the echo event ID, or
-    /// nil when logged out.
+    /// Start a poll (`org.matrix.msc3381.poll.start`) with a local echo:
+    /// the poll card appears immediately and sync confirms it via the
+    /// shared transaction ID. Encrypted rooms encrypt the event. A
+    /// transport failure marks the echo failed instead of throwing.
+    /// Returns the echo event ID, or nil when logged out.
     /// `onEchoStaged` fires after the local store write and before transport.
     @discardableResult
     public func startPoll(
@@ -597,7 +603,7 @@ public actor MessageSender {
         guard let localUser else { return nil }
         let echo = stagedEcho(
             roomId: roomId, sender: localUser,
-            type: EventType.pollStart.rawValue, content: content,
+            type: UnstablePollEventType.start, content: content,
             transactionId: transactionId)
         try? await writer.stageEcho(echo, roomId: roomId, transactionId: transactionId)
         onEchoStaged?()
@@ -605,11 +611,11 @@ public actor MessageSender {
             if isEncrypted(roomId) {
                 try await ensureShared(roomId)
                 try await roomCrypto.sendEncryptedContent(
-                    roomId, content, eventType: EventType.pollStart.rawValue,
+                    roomId, content, eventType: UnstablePollEventType.start,
                     deviceId: ownDeviceId, transactionId: transactionId)
             } else {
                 try await messages.sendEvent(
-                    roomId, eventType: EventType.pollStart.rawValue,
+                    roomId, eventType: UnstablePollEventType.start,
                     content: content, transactionId: transactionId)
             }
         } catch {
@@ -620,9 +626,10 @@ public actor MessageSender {
     }
 
     /// Cast, change, or retract (`answers: []`) a vote on a poll
-    /// (`m.poll.response`), with optimistic UI: the staged echo counts
-    /// immediately and sync confirms it. Encrypted rooms encrypt the
-    /// response. Transport failures cancel the echo; nothing throws.
+    /// (`org.matrix.msc3381.poll.response`), with optimistic UI: the staged
+    /// echo counts immediately and sync confirms it. Encrypted rooms
+    /// encrypt the response. Transport failures cancel the echo; nothing
+    /// throws.
     /// `onEchoStaged` fires after the local store write and before transport.
     public func vote(
         _ roomId: RoomId, poll: EventId, answers: [String],
@@ -634,7 +641,7 @@ public actor MessageSender {
             relatesTo: RelatesTo(eventId: poll, relType: .reference), answers: answers)
         let echo = stagedEcho(
             roomId: roomId, sender: localUser,
-            type: EventType.pollResponse.rawValue, content: content,
+            type: UnstablePollEventType.response, content: content,
             transactionId: transactionId)
         try? await writer.stageEcho(echo, roomId: roomId, transactionId: transactionId)
         onEchoStaged?()
@@ -642,11 +649,11 @@ public actor MessageSender {
             if isEncrypted(roomId) {
                 try await ensureShared(roomId)
                 try await roomCrypto.sendEncryptedContent(
-                    roomId, content, eventType: EventType.pollResponse.rawValue,
+                    roomId, content, eventType: UnstablePollEventType.response,
                     deviceId: ownDeviceId, transactionId: transactionId)
             } else {
                 try await messages.sendEvent(
-                    roomId, eventType: EventType.pollResponse.rawValue,
+                    roomId, eventType: UnstablePollEventType.response,
                     content: content, transactionId: transactionId)
             }
         } catch {
@@ -654,7 +661,8 @@ public actor MessageSender {
         }
     }
 
-    /// End a poll (`m.poll.end`). Only the poll creator's end takes effect.
+    /// End a poll (`org.matrix.msc3381.poll.end`). Only the poll creator's
+    /// end takes effect.
     public func endPoll(
         _ roomId: RoomId, poll: EventId
     ) async throws(MatrixError) {
@@ -663,11 +671,11 @@ public actor MessageSender {
         if isEncrypted(roomId) {
             try await ensureShared(roomId)
             try await roomCrypto.sendEncryptedContent(
-                roomId, content, eventType: EventType.pollEnd.rawValue,
+                roomId, content, eventType: UnstablePollEventType.end,
                 deviceId: ownDeviceId)
         } else {
             try await messages.sendEvent(
-                roomId, eventType: EventType.pollEnd.rawValue, content: content)
+                roomId, eventType: UnstablePollEventType.end, content: content)
         }
     }
 
