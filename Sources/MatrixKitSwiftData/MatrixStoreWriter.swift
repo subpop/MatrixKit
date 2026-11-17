@@ -320,6 +320,22 @@ public actor MatrixStoreWriter {
         try modelContext.save()
     }
 
+    /// Insert events fetched for a timeline context or forward page without
+    /// changing the room's backward-history cursor.
+    public func insertHistory(_ events: [MessageEvent], roomId: RoomId) throws {
+        let room = try fetchRoom(roomId.value)
+        let known = Set(try eventIds(roomId: roomId.value))
+        for event in deduped(events)
+        where !known.contains(event.eventId.value) {
+            try insertEvent(event, roomId: roomId.value, room: room)
+        }
+        if let latestTs = events.map(\.originServerTs).max() {
+            room.latestMessageTs = max(room.latestMessageTs, latestTs)
+        }
+        try recomputeUnread(room: room)
+        try modelContext.save()
+    }
+
     /// Resolve a history gap using events recovered from `/context`
     /// around `historyGapEventId`. Identical to `prependHistory` —
     /// insertion, cursor adoption, and anchor clearing are the same —
@@ -1222,7 +1238,11 @@ public actor MatrixStoreWriter {
                 ? counted.count : nil
         room.effectiveUnread = max(room.unread, clientCount ?? room.unread)
         room.firstUnreadEventId = counted
-            .sorted { $0.ts < $1.ts }.first?.eventId
+            .sorted {
+                if $0.ts != $1.ts { return $0.ts < $1.ts }
+                return $0.eventId < $1.eventId
+            }
+            .first?.eventId
     }
 }
 

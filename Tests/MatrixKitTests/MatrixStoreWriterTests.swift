@@ -281,6 +281,29 @@ struct MatrixStoreWriterTests {
         #expect(try self.room(container, "!room:x").prevBatch == "p2")
     }
 
+    @Test("Context insertion preserves the backward cursor and deduplicates")
+    func contextInsertion() async throws {
+        let (writer, container) = try writer()
+        try await writer.apply(SyncDelta(
+            nextBatch: BatchToken("s1"),
+            joined: [
+                RoomId(unchecked: "!room:x"): JoinedRoomDelta(
+                    timeline: [unreadMessage("a", ts: 1)],
+                    prevBatch: BatchToken("older"))
+            ]))
+
+        try await writer.insertHistory(
+            [unreadMessage("a", ts: 1), unreadMessage("b", ts: 2)],
+            roomId: RoomId(unchecked: "!room:x"))
+
+        let events = try await writer.storedEvents(
+            roomId: RoomId(unchecked: "!room:x"))
+        let storedRoom = try self.room(container, "!room:x")
+        #expect(events.map(\.eventId.value) == ["$a", "$b"])
+        #expect(storedRoom.prevBatch == "older")
+        #expect(storedRoom.latestMessageTs == 2)
+    }
+
     @Test("Redactions stamp and prune their targets")
     func redactionFold() async throws {
         let (writer, _) = try writer()

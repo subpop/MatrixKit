@@ -123,7 +123,10 @@ public extension SDRoomEvent {
     ) -> FetchDescriptor<SDRoomEvent> {
         var descriptor = FetchDescriptor<SDRoomEvent>(
             predicate: #Predicate { $0.roomId == roomId },
-            sortBy: [SortDescriptor(\.ts)])
+            sortBy: [
+                SortDescriptor(\.ts),
+                SortDescriptor(\.eventId),
+            ])
         descriptor.fetchLimit = fetchLimit
         return descriptor
     }
