@@ -211,6 +211,100 @@ struct StoreReaderTests {
         #expect(window.map(\.eventId.value) == ["$e4", "$e5"])
     }
 
+    @Test("Timeline payload includes delivery states and room markers")
+    func timelinePayload() throws {
+        let container = try MatrixStore.makeInMemory()
+        let context = ModelContext(container)
+        let roomId = "!room:x"
+        let room = SDRoom(
+            roomId: roomId, membership: Membership.join.rawValue,
+            firstUnreadEventId: "$pending", prevBatch: "s1")
+        room.historyGapEventId = "$gap"
+        context.insert(room)
+
+        let encoder = JSONEncoder()
+        let content = try encoder.encode([
+            "msgtype": AnyCodable.string("m.text"),
+            "body": AnyCodable.string("Hi"),
+        ])
+        let pending = SDRoomEvent(
+            roomId: roomId, eventId: "local:pending", ts: 2,
+            type: "m.room.message", sender: "@me:x", content: content,
+            isMessageLike: true, sendState: "pending")
+        pending.room = room
+        context.insert(pending)
+        let failed = SDRoomEvent(
+            roomId: roomId, eventId: "local:failed", ts: 3,
+            type: "m.room.message", sender: "@me:x", content: content,
+            isMessageLike: true, sendState: "failed",
+            sendFailureReason: "Network error")
+        failed.room = room
+        context.insert(failed)
+        try context.save()
+
+        let storeReader = reader(container)
+        let payload = try storeReader.timelinePayload(
+            RoomId(unchecked: roomId), limit: 2)
+        #expect(payload.snapshot.map(\.eventId.value) == ["local:pending", "local:failed"])
+        #expect(payload.sendStates[EventId(unchecked: "local:pending")] == .pending)
+        #expect(
+            payload.sendStates[EventId(unchecked: "local:failed")]
+                == .failed("Network error"))
+        #expect(payload.firstUnreadEventId == "$pending")
+        #expect(payload.prevBatch == "s1")
+        #expect(payload.historyGapEventId == "$gap")
+        #expect(try storeReader.markerSummary(RoomId(unchecked: roomId)).prevBatch == "s1")
+    }
+
+    @Test("Anchored timeline payload preserves stable order and page flags")
+    func anchoredTimelinePayload() throws {
+        let container = try MatrixStore.makeInMemory()
+        let context = ModelContext(container)
+        let roomId = "!room:x"
+        let room = SDRoom(
+            roomId: roomId, membership: Membership.join.rawValue,
+            firstUnreadEventId: "$b", prevBatch: "s1")
+        context.insert(room)
+
+        for id in ["$a", "$b", "$c"] {
+            let event = message(id, roomId: roomId, body: id, ts: 1_000)
+            let row = SDRoomEvent(
+                roomId: roomId, eventId: id, ts: event.originServerTs,
+                type: event.type, sender: event.sender.value,
+                content: try JSONEncoder().encode(event.content),
+                isMessageLike: true)
+            row.room = room
+            context.insert(row)
+        }
+        try context.save()
+
+        let storeReader = reader(container)
+        let payload = try #require(try storeReader.timelinePayloadAround(
+            RoomId(unchecked: roomId),
+            anchorEventId: EventId(unchecked: "$b"),
+            olderLimit: 1,
+            newerLimit: 1))
+        #expect(payload.snapshot.map(\.eventId.value) == ["$a", "$b", "$c"])
+        #expect(!payload.hasOlderStoredEvents)
+        #expect(!payload.hasNewerStoredEvents)
+        #expect(payload.firstUnreadEventId == "$b")
+        #expect(payload.prevBatch == "s1")
+
+        let narrow = try #require(try storeReader.timelinePayloadAround(
+            RoomId(unchecked: roomId),
+            anchorEventId: EventId(unchecked: "$b"),
+            olderLimit: 0,
+            newerLimit: 0))
+        #expect(narrow.snapshot.map(\.eventId.value) == ["$b"])
+        #expect(narrow.hasOlderStoredEvents)
+        #expect(narrow.hasNewerStoredEvents)
+        #expect(try storeReader.timelinePayloadAround(
+            RoomId(unchecked: roomId),
+            anchorEventId: EventId(unchecked: "$missing"),
+            olderLimit: 1,
+            newerLimit: 1) == nil)
+    }
+
     @Test("Search finds messages and edits with optional room scope")
     func messageSearch() async throws {
         let (writer, container) = try writer()

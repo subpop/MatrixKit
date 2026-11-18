@@ -67,6 +67,39 @@ public struct StoredRoomDetail: Hashable, Sendable {
     public var pinnedEventIds: [String]
 }
 
+/// A bounded timeline window and the room markers needed to render it.
+public struct StoredTimelinePayload: Sendable {
+    public var snapshot: [MessageEvent]
+    public var sendStates: [EventId: SendState]
+    public var firstUnreadEventId: String?
+    public var prevBatch: String?
+    public var historyGapEventId: String?
+    public var hasOlderStoredEvents: Bool
+    public var hasNewerStoredEvents: Bool
+
+    public init(
+        snapshot: [MessageEvent],
+        sendStates: [EventId: SendState],
+        firstUnreadEventId: String?,
+        prevBatch: String?,
+        historyGapEventId: String?,
+        hasOlderStoredEvents: Bool = false,
+        hasNewerStoredEvents: Bool = false
+    ) {
+        self.snapshot = snapshot
+        self.sendStates = sendStates
+        self.firstUnreadEventId = firstUnreadEventId
+        self.prevBatch = prevBatch
+        self.historyGapEventId = historyGapEventId
+        self.hasOlderStoredEvents = hasOlderStoredEvents
+        self.hasNewerStoredEvents = hasNewerStoredEvents
+    }
+
+    public static let empty = StoredTimelinePayload(
+        snapshot: [], sendStates: [:],
+        firstUnreadEventId: nil, prevBatch: nil, historyGapEventId: nil)
+}
+
 /// One membership row.
 public struct StoredMember: Hashable, Sendable {
     public var userId: UserId
@@ -208,6 +241,78 @@ public struct MatrixStoreReader: Sendable {
         return try context.fetch(
             SDRoomEvent.timelineDescriptor(roomId: roomId.value))
             .compactMap { try? Self.decodeEvent($0, decoder: decoder) }
+    }
+
+    /// The newest stored event window, oldest first, including delivery
+    /// states and room markers. Uses its own short-lived context so this
+    /// read does not queue behind room-index work.
+    public func timelinePayload(
+        _ roomId: RoomId, limit: Int
+    ) throws -> StoredTimelinePayload {
+        let context = ModelContext(modelContainer)
+        let id = roomId.value
+        var descriptor = FetchDescriptor<SDRoomEvent>(
+            predicate: #Predicate { $0.roomId == id },
+            sortBy: [
+                SortDescriptor(\.ts, order: .reverse),
+                SortDescriptor(\.eventId, order: .reverse),
+            ])
+        descriptor.fetchLimit = max(limit, 0)
+        let rows = Array(try context.fetch(descriptor).reversed())
+        let room = try context.fetch(
+            FetchDescriptor<SDRoom>(
+                predicate: #Predicate { $0.roomId == id })).first
+        return Self.timelinePayload(
+            rows: rows, room: room)
+    }
+
+    /// A bounded event window around a stored anchor, oldest first.
+    /// Returns nil when the anchor is not present in the store.
+    public func timelinePayloadAround(
+        _ roomId: RoomId,
+        anchorEventId: EventId,
+        olderLimit: Int,
+        newerLimit: Int
+    ) throws -> StoredTimelinePayload? {
+        let context = ModelContext(modelContainer)
+        let id = roomId.value
+        let anchorId = anchorEventId.value
+        guard let anchor = try context.fetch(FetchDescriptor<SDRoomEvent>(
+            predicate: #Predicate {
+                $0.roomId == id && $0.eventId == anchorId
+            })).first
+        else { return nil }
+
+        let olderCount = max(olderLimit, 0)
+        let newerCount = max(newerLimit, 0)
+        let olderRows = try context.fetch(Self.olderRows(
+            roomId: id, before: anchor, limit: olderCount + 1))
+        let newerRows = try context.fetch(Self.newerRows(
+            roomId: id, after: anchor, limit: newerCount + 1))
+        let hasOlder = olderRows.count > olderCount
+        let hasNewer = newerRows.count > newerCount
+        var rows = Array(olderRows.prefix(olderCount).reversed())
+        rows.append(anchor)
+        rows.append(contentsOf: newerRows.prefix(newerCount))
+        let room = try context.fetch(
+            FetchDescriptor<SDRoom>(
+                predicate: #Predicate { $0.roomId == id })).first
+        return Self.timelinePayload(
+            rows: rows, room: room,
+            hasOlderStoredEvents: hasOlder,
+            hasNewerStoredEvents: hasNewer)
+    }
+
+    /// Room markers and history cursors without fetching timeline events.
+    public func markerSummary(_ roomId: RoomId) throws -> (
+        firstUnreadEventId: String?, prevBatch: String?, historyGapEventId: String?
+    ) {
+        let context = ModelContext(modelContainer)
+        let id = roomId.value
+        let room = try context.fetch(
+            FetchDescriptor<SDRoom>(
+                predicate: #Predicate { $0.roomId == id })).first
+        return (room?.firstUnreadEventId, room?.prevBatch, room?.historyGapEventId)
     }
 
     /// One stored event, or nil when it isn't in the store. Event IDs are
@@ -481,6 +586,76 @@ public struct MatrixStoreReader: Sendable {
             .map { byId[$0]?.first?.displayname ?? $0 }
         if !heroes.isEmpty { return heroes.joined(separator: ", ") }
         return room.roomId
+    }
+
+    private static func timelinePayload(
+        rows: [SDRoomEvent],
+        room: SDRoom?,
+        hasOlderStoredEvents: Bool = false,
+        hasNewerStoredEvents: Bool = false
+    ) -> StoredTimelinePayload {
+        let decoder = JSONDecoder()
+        var snapshot: [MessageEvent] = []
+        snapshot.reserveCapacity(rows.count)
+        var sendStates: [EventId: SendState] = [:]
+        for row in rows {
+            if let event = try? decodeEvent(row, decoder: decoder) {
+                snapshot.append(event)
+            }
+            switch row.sendState {
+            case "pending":
+                sendStates[EventId(unchecked: row.eventId)] = .pending
+            case "failed":
+                sendStates[EventId(unchecked: row.eventId)] = .failed(
+                    row.sendFailureReason ?? "Send failed")
+            default:
+                break
+            }
+        }
+        return StoredTimelinePayload(
+            snapshot: snapshot,
+            sendStates: sendStates,
+            firstUnreadEventId: room?.firstUnreadEventId,
+            prevBatch: room?.prevBatch,
+            historyGapEventId: room?.historyGapEventId,
+            hasOlderStoredEvents: hasOlderStoredEvents,
+            hasNewerStoredEvents: hasNewerStoredEvents)
+    }
+
+    private static func olderRows(
+        roomId: String, before event: SDRoomEvent, limit: Int
+    ) -> FetchDescriptor<SDRoomEvent> {
+        let id = roomId
+        let ts = event.ts
+        let eventId = event.eventId
+        var descriptor = FetchDescriptor<SDRoomEvent>(
+            predicate: #Predicate {
+                $0.roomId == id && ($0.ts < ts || ($0.ts == ts && $0.eventId < eventId))
+            },
+            sortBy: [
+                SortDescriptor(\.ts, order: .reverse),
+                SortDescriptor(\.eventId, order: .reverse),
+            ])
+        descriptor.fetchLimit = max(limit, 0)
+        return descriptor
+    }
+
+    private static func newerRows(
+        roomId: String, after event: SDRoomEvent, limit: Int
+    ) -> FetchDescriptor<SDRoomEvent> {
+        let id = roomId
+        let ts = event.ts
+        let eventId = event.eventId
+        var descriptor = FetchDescriptor<SDRoomEvent>(
+            predicate: #Predicate {
+                $0.roomId == id && ($0.ts > ts || ($0.ts == ts && $0.eventId > eventId))
+            },
+            sortBy: [
+                SortDescriptor(\.ts, order: .forward),
+                SortDescriptor(\.eventId, order: .forward),
+            ])
+        descriptor.fetchLimit = max(limit, 0)
+        return descriptor
     }
 
     private static func decodeEvent(
