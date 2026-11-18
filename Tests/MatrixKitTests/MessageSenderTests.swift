@@ -641,12 +641,66 @@ struct MessageSenderTests {
             let (sender, writer, _, cryptoSender) = try await sender(harness)
             let room = try await encryptedRoom(harness, writer: writer, name: "E2EE edit guard")
             await #expect(throws: MatrixError.invalidIdentifier(
-                "Not a server event ID: local:txn")) {
+                "Not an editable local text echo: local:txn")) {
                 try await sender.edit(
                     room, eventId: EventId(unchecked: "local:txn"), newBody: "fixed")
             }
             #expect(await cryptoSender.sent.isEmpty)
             #expect(await sends(harness, containing: "/send/").isEmpty)
+        }
+    }
+
+    @Test("Edit rejects a pending local echo")
+    func editRejectsPendingEcho() async throws {
+        try await withHarness { harness in
+            let (sender, writer, _, _) = try await sender(harness)
+            let room = RoomId(unchecked: "!room:test")
+            let echo = try #require(await sender.sendText(room, "pending"))
+            #expect(await writer.echoTransactionId(for: echo) != nil)
+
+            await #expect(throws: MatrixError.invalidIdentifier(
+                "Local echo is not a failed, unsent message: \(echo.value)")) {
+                try await sender.edit(room, eventId: echo, newBody: "fixed")
+            }
+            #expect(await sends(harness, containing: "/send/").count == 1)
+        }
+    }
+
+    @Test("Edit replaces and resends a failed local text echo")
+    func editFailedLocalEcho() async throws {
+        try await withHarness { harness in
+            let (sender, writer, _, _) = try await sender(harness)
+            let room = RoomId(unchecked: "!room:test")
+            let transactionId = TransactionId("first-attempt")
+            let originalPath =
+                "/_matrix/client/v3/rooms/!room%3Atest/send/m.room.message/first-attempt"
+            await harness.setOverride(
+                method: "PUT", path: originalPath,
+                response: .matrixError(
+                    code: "M_UNKNOWN", message: "Temporary failure", status: 500))
+
+            let original = try #require(await sender.sendText(
+                room, "original",
+                relatesTo: .reply(to: EventId(unchecked: "$parent:test")),
+                transactionId: transactionId))
+            #expect(await writer.echoTransactionId(for: original) == nil)
+
+            let edited = try await sender.edit(
+                room, eventId: original, newBody: "corrected")
+            #expect(edited.value.hasPrefix("local:"))
+            #expect(edited != original)
+            #expect(await writer.echoTransactionId(for: edited) != nil)
+
+            let events = try await writer.storedEvents(roomId: room)
+            #expect(!events.contains { $0.eventId == original })
+            let updated = try #require(events.first { $0.eventId == edited })
+            #expect(updated.messageContent?.body == "corrected")
+            #expect(updated.relatesTo?.inReplyTo?.eventId.value == "$parent:test")
+
+            let puts = await sends(harness, containing: "/send/m.room.message/")
+            #expect(puts.count == 2)
+            let sent = try #require(puts.last?.body)
+            #expect(try JSONDecoder().decode(MessageContent.self, from: sent).body == "corrected")
         }
     }
 

@@ -118,19 +118,9 @@ public actor MessageSender {
         messageSendSignposter.endInterval("readRoomEncryptionState", encryptionState)
 
         do {
-            let transportState = messageSendSignposter.beginInterval(
-                "sendTextTransport", id: messageSendSignposter.makeSignpostID(),
-                "encrypted \(encrypted)")
-            defer { messageSendSignposter.endInterval("sendTextTransport", transportState) }
-            if encrypted {
-                try await ensureShared(roomId)
-                _ = try await roomCrypto.sendEncryptedContent(
-                    roomId, content, deviceId: ownDeviceId,
-                    transactionId: transactionId)
-            } else {
-                _ = try await messages.send(
-                    roomId, content: content, transactionId: transactionId)
-            }
+            try await sendTextContent(
+                roomId, content: content, encrypted: encrypted,
+                transactionId: transactionId)
         } catch {
             try? await writer.failEcho(
                 transactionId: transactionId, reason: error.localizedDescription)
@@ -192,8 +182,53 @@ public actor MessageSender {
     @discardableResult
     public func edit(
         _ roomId: RoomId, eventId: EventId, newBody: String,
-        mentions: Mentions? = nil
+        mentions: Mentions? = nil,
+        onEchoStaged: (@Sendable () -> Void)? = nil
     ) async throws(MatrixError) -> EventId {
+        if eventId.value.hasPrefix("local:") {
+            guard let localUser else { throw .notAuthenticated }
+            guard let original = try? reader.event(eventId),
+                  original.roomId == roomId,
+                  original.sender == localUser,
+                  let oldContent = original.messageContent,
+                  oldContent.msgtype == .text
+            else {
+                throw .invalidIdentifier("Not an editable local text echo: \(eventId.value)")
+            }
+
+            let transactionId = TransactionId.random()
+            let content = MessageContent.markdown(
+                newBody, relatesTo: oldContent.relatesTo, mentions: mentions)
+            let echo = stagedEcho(
+                roomId: roomId, sender: localUser,
+                type: EventType.roomMessage.rawValue, content: content,
+                transactionId: transactionId)
+            let replaced: Bool
+            do {
+                replaced = try await writer.replaceFailedEcho(
+                    eventId: eventId, with: echo,
+                    roomId: roomId, transactionId: transactionId)
+            } catch {
+                throw .storeError(error.localizedDescription)
+            }
+            guard replaced else {
+                throw .invalidIdentifier("Local echo is not a failed, unsent message: \(eventId.value)")
+            }
+            onEchoStaged?()
+
+            let encrypted = isEncrypted(roomId)
+            do {
+                try await sendTextContent(
+                    roomId, content: content, encrypted: encrypted,
+                    transactionId: transactionId)
+            } catch {
+                try? await writer.failEcho(
+                    transactionId: transactionId, reason: error.localizedDescription)
+                throw error
+            }
+            return echo.eventId
+        }
+
         guard eventId.value.hasPrefix("$") else {
             throw .invalidIdentifier("Not a server event ID: \(eventId.value)")
         }
@@ -749,6 +784,25 @@ public actor MessageSender {
     }
 
     // MARK: - Private
+
+    private func sendTextContent(
+        _ roomId: RoomId, content: MessageContent,
+        encrypted: Bool, transactionId: TransactionId
+    ) async throws(MatrixError) {
+        let transportState = messageSendSignposter.beginInterval(
+            "sendTextTransport", id: messageSendSignposter.makeSignpostID(),
+            "encrypted \(encrypted)")
+        defer { messageSendSignposter.endInterval("sendTextTransport", transportState) }
+        if encrypted {
+            try await ensureShared(roomId)
+            _ = try await roomCrypto.sendEncryptedContent(
+                roomId, content, deviceId: ownDeviceId,
+                transactionId: transactionId)
+        } else {
+            _ = try await messages.send(
+                roomId, content: content, transactionId: transactionId)
+        }
+    }
 
     /// Encode locally-built content for a local echo (empty on
     /// internal error).

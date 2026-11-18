@@ -240,6 +240,43 @@ public actor MatrixStoreWriter {
         try modelContext.save()
     }
 
+    /// Replace a failed local echo with a fresh pending echo. Active or
+    /// unconfirmed sends cannot be replaced.
+    @discardableResult
+    public func replaceFailedEcho(
+        eventId: EventId, with event: MessageEvent,
+        roomId: RoomId, transactionId: TransactionId
+    ) throws -> Bool {
+        let oldId = eventId.value
+        let newId = event.eventId.value
+        guard oldId.hasPrefix("local:"),
+              newId == "local:\(transactionId.value)",
+              event.roomId == roomId,
+              echoTransactions[oldId] == nil
+        else { return false }
+
+        let descriptor = FetchDescriptor<SDRoomEvent>(
+            predicate: #Predicate {
+                $0.eventId == oldId && $0.roomId == roomId.value
+            })
+        guard let oldRow = try modelContext.fetch(descriptor).first,
+              oldRow.sendState == "failed"
+        else { return false }
+
+        let room = try fetchRoom(roomId.value)
+        modelContext.delete(oldRow)
+        do {
+            try insertEvent(event, roomId: roomId.value, room: room, sendState: "pending")
+            try modelContext.save()
+        } catch {
+            modelContext.rollback()
+            throw error
+        }
+        pendingEchoes[transactionId.value] = newId
+        echoTransactions[newId] = transactionId.value
+        return true
+    }
+
     /// Mark a staged send failed, keeping its echo visible with the reason.
     public func failEcho(transactionId: TransactionId, reason: String) throws {
         guard let echoId = pendingEchoes.removeValue(forKey: transactionId.value) else { return }

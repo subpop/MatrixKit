@@ -4,6 +4,8 @@ import Foundation
 public enum MatrixError: Error, Sendable, Hashable {
     /// A malformed Matrix identifier was supplied (bad sigil, missing parts).
     case invalidIdentifier(String)
+    /// A local-store operation failed.
+    case storeError(String)
     /// A URL could not be constructed (bad homeserver, unencodable path).
     case invalidURL(String)
     /// No session / access token is available for an authenticated call.
@@ -49,6 +51,7 @@ extension MatrixError: CustomStringConvertible {
     public var description: String {
         switch self {
         case .invalidIdentifier(let msg): return "Invalid identifier: \(msg)"
+        case .storeError(let msg): return "Store error: \(msg)"
         case .invalidURL(let msg): return "Invalid URL: \(msg)"
         case .notAuthenticated: return "Not authenticated: no access token"
         case .transportClosed: return "Transport is closed"
