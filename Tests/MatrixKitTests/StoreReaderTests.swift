@@ -253,6 +253,9 @@ struct StoreReaderTests {
         #expect(payload.firstUnreadEventId == "$pending")
         #expect(payload.prevBatch == "s1")
         #expect(payload.historyGapEventId == "$gap")
+        let narrow = try storeReader.timelinePayload(RoomId(unchecked: roomId), limit: 1)
+        #expect(narrow.hasOlderStoredEvents)
+        #expect(narrow.snapshot.map(\.eventId.value) == ["local:failed"])
         #expect(try storeReader.markerSummary(RoomId(unchecked: roomId)).prevBatch == "s1")
     }
 

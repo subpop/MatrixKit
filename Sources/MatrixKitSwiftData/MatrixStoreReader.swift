@@ -53,6 +53,7 @@ public struct StoredRoomDetail: Hashable, Sendable {
     /// When set, `prevBatch` is unusable for back-pagination; resume
     /// before this event using `/context`. See `SDRoom.historyGapEventId`.
     public var historyGapEventId: String?
+    public var timelineGaps: [StoredTimelineGap]
     public var fullyRead: String?
     public var firstUnreadEventId: String?
     public var memberCount: Int
@@ -74,6 +75,7 @@ public struct StoredTimelinePayload: Sendable {
     public var firstUnreadEventId: String?
     public var prevBatch: String?
     public var historyGapEventId: String?
+    public var timelineGaps: [StoredTimelineGap]
     public var hasOlderStoredEvents: Bool
     public var hasNewerStoredEvents: Bool
 
@@ -83,6 +85,7 @@ public struct StoredTimelinePayload: Sendable {
         firstUnreadEventId: String?,
         prevBatch: String?,
         historyGapEventId: String?,
+        timelineGaps: [StoredTimelineGap] = [],
         hasOlderStoredEvents: Bool = false,
         hasNewerStoredEvents: Bool = false
     ) {
@@ -91,6 +94,7 @@ public struct StoredTimelinePayload: Sendable {
         self.firstUnreadEventId = firstUnreadEventId
         self.prevBatch = prevBatch
         self.historyGapEventId = historyGapEventId
+        self.timelineGaps = timelineGaps
         self.hasOlderStoredEvents = hasOlderStoredEvents
         self.hasNewerStoredEvents = hasNewerStoredEvents
     }
@@ -208,6 +212,7 @@ public struct MatrixStoreReader: Sendable {
             effectiveUnread: room.effectiveUnread,
             prevBatch: room.prevBatch,
             historyGapEventId: room.historyGapEventId,
+            timelineGaps: Self.decodeGaps(room.timelineGaps),
             fullyRead: room.fullyRead,
             firstUnreadEventId: room.firstUnreadEventId,
             memberCount: members.count,
@@ -257,13 +262,15 @@ public struct MatrixStoreReader: Sendable {
                 SortDescriptor(\.ts, order: .reverse),
                 SortDescriptor(\.eventId, order: .reverse),
             ])
-        descriptor.fetchLimit = max(limit, 0)
-        let rows = Array(try context.fetch(descriptor).reversed())
+        descriptor.fetchLimit = max(limit, 0) + 1
+        let fetched = try context.fetch(descriptor)
+        let rows = Array(fetched.prefix(max(limit, 0)).reversed())
         let room = try context.fetch(
             FetchDescriptor<SDRoom>(
                 predicate: #Predicate { $0.roomId == id })).first
         return Self.timelinePayload(
-            rows: rows, room: room)
+            rows: rows, room: room,
+            hasOlderStoredEvents: fetched.count > max(limit, 0))
     }
 
     /// A bounded event window around a stored anchor, oldest first.
@@ -618,8 +625,14 @@ public struct MatrixStoreReader: Sendable {
             firstUnreadEventId: room?.firstUnreadEventId,
             prevBatch: room?.prevBatch,
             historyGapEventId: room?.historyGapEventId,
+            timelineGaps: Self.decodeGaps(room?.timelineGaps),
             hasOlderStoredEvents: hasOlderStoredEvents,
             hasNewerStoredEvents: hasNewerStoredEvents)
+    }
+
+    private static func decodeGaps(_ data: Data?) -> [StoredTimelineGap] {
+        guard let data else { return [] }
+        return (try? JSONDecoder().decode([StoredTimelineGap].self, from: data)) ?? []
     }
 
     private static func olderRows(

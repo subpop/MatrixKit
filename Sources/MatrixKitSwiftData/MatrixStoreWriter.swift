@@ -124,13 +124,43 @@ public actor MatrixStoreWriter {
 
     private func applyJoined(_ delta: JoinedRoomDelta, roomId: String) throws {
         let room = try fetchRoom(roomId)
+        var openedGap = false
+        var cursorOverlaps = false
         if !delta.timeline.isEmpty {
-            // Full history is kept, so `limited` only governs the
-            // `prevBatch` adoption below — existing rows are never
-            // deleted. Incoming rows merge with dedupe, like the
-            // append path in `RoomActor.applyJoined`.
+            // Existing rows survive limited windows; discontinuities keep
+            // their own pagination cursors instead of replacing the older one.
             var incoming = try confirmEchoes(in: delta.timeline, room: room)
             let known = Set(try eventIds(roomId: roomId))
+            let id = roomId
+            var oldestDescriptor = FetchDescriptor<SDRoomEvent>(
+                predicate: #Predicate { $0.roomId == id },
+                sortBy: [SortDescriptor(\.ts), SortDescriptor(\.eventId)])
+            oldestDescriptor.fetchLimit = 1
+            let oldestKnownId = try modelContext.fetch(oldestDescriptor).first?.eventId
+            cursorOverlaps = oldestKnownId == nil ||
+                incoming.contains { $0.eventId.value == oldestKnownId }
+            if delta.timelineLimited, let prevBatch = delta.prevBatch,
+                !known.isEmpty,
+                !incoming.contains(where: { known.contains($0.eventId.value) }),
+                let oldest = incoming.min(by: { $0.originServerTs < $1.originServerTs })
+            {
+                var newestDescriptor = FetchDescriptor<SDRoomEvent>(
+                    predicate: #Predicate { $0.roomId == id && $0.sendState == nil },
+                    sortBy: [SortDescriptor(\.ts, order: .reverse),
+                             SortDescriptor(\.eventId, order: .reverse)])
+                newestDescriptor.fetchLimit = 1
+                let olderEventId = try modelContext.fetch(newestDescriptor).first?.eventId
+                var gaps = try room.timelineGaps.map {
+                    try decoder.decode([StoredTimelineGap].self, from: $0)
+                } ?? []
+                if let olderEventId {
+                    gaps.append(StoredTimelineGap(
+                        newerEventId: oldest.eventId.value,
+                        olderEventId: olderEventId, prevBatch: prevBatch.value))
+                    room.timelineGaps = try encoder.encode(gaps)
+                    openedGap = true
+                }
+            }
             incoming.removeAll { known.contains($0.eventId.value) }
             incoming = deduped(incoming)
             for event in incoming {
@@ -142,12 +172,11 @@ public actor MatrixStoreWriter {
             try foldRedactions(incoming: incoming, roomId: roomId)
         }
         if let prevBatch = delta.prevBatch {
-            if delta.timelineLimited || room.prevBatch == nil {
+            if !openedGap && cursorOverlaps && room.timelineGaps == nil
+                && (delta.timelineLimited || room.prevBatch == nil)
+            {
                 room.prevBatch = prevBatch.value
                 room.prevBatchTs = delta.timeline.map(\.originServerTs).min()
-                if delta.timelineLimited {
-                    room.historyGapEventId = nil
-                }
             }
         }
         if !delta.state.isEmpty {
@@ -357,6 +386,32 @@ public actor MatrixStoreWriter {
         try modelContext.save()
     }
 
+    /// Backfill one interior gap from its own cursor. Only an event-ID
+    /// overlap proves that the two retained windows have joined.
+    public func fillTimelineGap(
+        _ events: [MessageEvent], roomId: RoomId,
+        newerEventId: String, end: BatchToken?
+    ) throws {
+        let room = try fetchRoom(roomId.value)
+        var gaps = try room.timelineGaps.map {
+            try decoder.decode([StoredTimelineGap].self, from: $0)
+        } ?? []
+        guard let index = gaps.firstIndex(where: { $0.newerEventId == newerEventId }) else { return }
+        let known = Set(try eventIds(roomId: roomId.value))
+        let bridged = events.contains { $0.eventId.value == gaps[index].olderEventId }
+        for event in deduped(events) where !known.contains(event.eventId.value) {
+            try insertEvent(event, roomId: roomId.value, room: room)
+        }
+        if bridged {
+            gaps.remove(at: index)
+        } else if let end {
+            gaps[index].prevBatch = end.value
+        }
+        room.timelineGaps = gaps.isEmpty ? nil : try encoder.encode(gaps)
+        try recomputeUnread(room: room)
+        try modelContext.save()
+    }
+
     /// Insert events fetched for a timeline context or forward page without
     /// changing the room's backward-history cursor.
     public func insertHistory(_ events: [MessageEvent], roomId: RoomId) throws {
@@ -429,6 +484,23 @@ public actor MatrixStoreWriter {
                 $0.roomId == id && $0.ts < threshold && $0.sendState == nil
             }))
         guard !toDelete.isEmpty else { return false }
+        if let data = room.timelineGaps {
+            let deleted = Set(toDelete.map(\.eventId))
+            var gaps = try decoder.decode([StoredTimelineGap].self, from: data)
+            if let frontier = gaps.last(where: {
+                deleted.contains($0.olderEventId) && !deleted.contains($0.newerEventId)
+            }) {
+                let anchor = frontier.newerEventId
+                room.prevBatch = frontier.prevBatch
+                room.prevBatchTs = try modelContext.fetch(FetchDescriptor<SDRoomEvent>(
+                    predicate: #Predicate { $0.roomId == id && $0.eventId == anchor }
+                )).first?.ts
+            }
+            gaps.removeAll {
+                deleted.contains($0.olderEventId) || deleted.contains($0.newerEventId)
+            }
+            room.timelineGaps = gaps.isEmpty ? nil : try encoder.encode(gaps)
+        }
         for row in toDelete {
             modelContext.delete(row)
         }

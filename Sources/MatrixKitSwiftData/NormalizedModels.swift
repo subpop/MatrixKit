@@ -7,7 +7,21 @@ import SwiftData
 /// (never migrated — a full sync rebuilds it), same policy as the
 /// snapshot caches.
 public enum NormalizedStoreVersion {
-    public static let current = 3
+    public static let current = 4
+}
+
+/// A discontinuity immediately before `newerEventId`. Backfill from
+/// `prevBatch` until a page reaches `olderEventId` in the older segment.
+public struct StoredTimelineGap: Codable, Hashable, Sendable {
+    public var newerEventId: String
+    public var olderEventId: String
+    public var prevBatch: String
+
+    public init(newerEventId: String, olderEventId: String, prevBatch: String) {
+        self.newerEventId = newerEventId
+        self.olderEventId = olderEventId
+        self.prevBatch = prevBatch
+    }
 }
 
 /// Single-row store metadata (`id == "meta"`).
@@ -53,6 +67,7 @@ public final class SDRoom {
     public var effectiveUnread: Int
     /// Oldest message-like event newer than the read marker, if any.
     public var firstUnreadEventId: String?
+    /// Backward cursor for the oldest retained segment, not interior gaps.
     public var prevBatch: String?
     /// `originServerTs` of the oldest event `prevBatch` sits just before.
     /// Nil when unknown (e.g. existing stores predating this field).
@@ -61,6 +76,8 @@ public final class SDRoom {
     /// local trim opened a gap directly before this event. The client
     /// should resume history before it using `/context` instead.
     public var historyGapEventId: String?
+    /// JSON-encoded `[StoredTimelineGap]`; interior gaps between retained windows.
+    public var timelineGaps: Data?
     public var fullyRead: String?
     /// Client-side read-marker timestamp (ms since epoch), if known.
     public var readMarkerTs: Int?

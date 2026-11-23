@@ -335,12 +335,19 @@ public struct SlidingSyncRoom: Hashable, Sendable, Codable {
     public var avatar: String?
     /// True when `requiredState`/`timeline` carry full (not incremental) data.
     public var initial: Bool
+    /// Current own membership. Omitted on older unstable servers.
+    public var membership: String?
+    /// Invite/knock state (no event IDs or joined-room timeline).
+    public var strippedState: [StrippedStateEvent]
+    /// The unstable invite flag used by older Synapse implementations.
+    public var isInvite: Bool?
     /// Requested state events (name, membership, encryption, …).
     public var requiredState: [MessageEvent]
     /// Timeline events, oldest first.
     public var timeline: [MessageEvent]
     /// True when `timeline` is a window after a gap — replace, don't append.
     public var limited: Bool
+    public var numLive: Int?
     /// Pagination cursor for older history (`GET /messages`).
     public var prevBatch: String?
     /// Total unread notifications (server-computed); `nil` when omitted.
@@ -357,9 +364,13 @@ public struct SlidingSyncRoom: Hashable, Sendable, Codable {
         name: String? = nil,
         avatar: String? = nil,
         initial: Bool = false,
+        membership: String? = nil,
+        strippedState: [StrippedStateEvent] = [],
+        isInvite: Bool? = nil,
         requiredState: [MessageEvent] = [],
         timeline: [MessageEvent] = [],
         limited: Bool = false,
+        numLive: Int? = nil,
         prevBatch: String? = nil,
         unreadCount: Int? = nil,
         highlightCount: Int? = nil,
@@ -369,9 +380,13 @@ public struct SlidingSyncRoom: Hashable, Sendable, Codable {
         self.name = name
         self.avatar = avatar
         self.initial = initial
+        self.membership = membership
+        self.strippedState = strippedState
+        self.isInvite = isInvite
         self.requiredState = requiredState
         self.timeline = timeline
         self.limited = limited
+        self.numLive = numLive
         self.prevBatch = prevBatch
         self.unreadCount = unreadCount
         self.highlightCount = highlightCount
@@ -384,9 +399,14 @@ public struct SlidingSyncRoom: Hashable, Sendable, Codable {
         self.name = try container.decodeIfPresent(String.self, forKey: .name)
         self.avatar = try container.decodeIfPresent(String.self, forKey: .avatar)
         self.initial = try container.decodeIfPresent(Bool.self, forKey: .initial) ?? false
+        self.membership = try container.decodeIfPresent(String.self, forKey: .membership)
+        self.strippedState = try container.decodeIfPresent([StrippedStateEvent].self, forKey: .strippedState)
+            ?? container.decodeIfPresent([StrippedStateEvent].self, forKey: .inviteState) ?? []
+        self.isInvite = try container.decodeIfPresent(Bool.self, forKey: .isInvite)
         self.requiredState = try container.decodeIfPresent([MessageEvent].self, forKey: .requiredState) ?? []
         self.timeline = try container.decodeIfPresent([MessageEvent].self, forKey: .timeline) ?? []
         self.limited = try container.decodeIfPresent(Bool.self, forKey: .limited) ?? false
+        self.numLive = try container.decodeIfPresent(Int.self, forKey: .numLive)
         self.prevBatch = try container.decodeIfPresent(String.self, forKey: .prevBatch)
         let unread = try container.decodeIfPresent(UnreadNotifications.self, forKey: .unreadNotifications)
         self.unreadCount = unread?.notificationCount
@@ -400,9 +420,13 @@ public struct SlidingSyncRoom: Hashable, Sendable, Codable {
         try container.encodeIfPresent(name, forKey: .name)
         try container.encodeIfPresent(avatar, forKey: .avatar)
         try container.encode(initial, forKey: .initial)
+        try container.encodeIfPresent(membership, forKey: .membership)
+        if !strippedState.isEmpty { try container.encode(strippedState, forKey: .strippedState) }
+        try container.encodeIfPresent(isInvite, forKey: .isInvite)
         try container.encode(requiredState, forKey: .requiredState)
         try container.encode(timeline, forKey: .timeline)
         try container.encode(limited, forKey: .limited)
+        try container.encodeIfPresent(numLive, forKey: .numLive)
         try container.encodeIfPresent(prevBatch, forKey: .prevBatch)
         try container.encode(
             UnreadNotifications(notificationCount: unreadCount, highlightCount: highlightCount),
@@ -415,9 +439,14 @@ public struct SlidingSyncRoom: Hashable, Sendable, Codable {
         case name
         case avatar
         case initial
+        case membership
+        case strippedState = "stripped_state"
+        case inviteState = "invite_state"
+        case isInvite = "is_invite"
         case requiredState = "required_state"
         case timeline
         case limited
+        case numLive = "num_live"
         case prevBatch = "prev_batch"
         case unreadNotifications = "unread_notifications"
         case heroes
@@ -437,12 +466,31 @@ public enum SlidingSyncResponseParser {
     /// `deviceLeft` for the shared crypto hooks. The typing extension
     /// (MSC4508) becomes one synthetic `m.typing` ephemeral event per
     /// room for live display. The account-data extension (MSC3959) lands
-    /// in the delta's global `accountData`; its room-scoped entries are
-    /// not mapped.
+    /// in the delta's global and per-room account data.
     public static func parse(_ response: SlidingSyncResponse) -> SyncDelta {
         var joined: [RoomId: JoinedRoomDelta] = [:]
+        var invited: [RoomId: InvitedRoomDelta] = [:]
+        var left: [RoomId: LeftRoomDelta] = [:]
+        var knocked: [RoomId: KnockedRoomDelta] = [:]
+        var liveEventIds: [RoomId: Set<EventId>] = [:]
+        let roomAccountData = roomAccountData(in: response.extensions)
         for (roomIdString, room) in response.rooms {
             let roomId = RoomId(unchecked: roomIdString)
+            switch room.membership ?? (room.isInvite == true ? "invite" : nil) {
+            case "invite":
+                invited[roomId] = InvitedRoomDelta(
+                    events: room.strippedState,
+                    inviter: room.strippedState.first(where: { $0.type == "m.room.member" })?.sender)
+                continue
+            case "knock":
+                knocked[roomId] = KnockedRoomDelta(events: room.strippedState)
+                continue
+            case "leave", "ban":
+                left[roomId] = LeftRoomDelta(
+                    timeline: room.timeline, state: room.requiredState)
+                continue
+            default: break
+            }
             joined[roomId] = JoinedRoomDelta(
                 timeline: room.timeline,
                 timelineLimited: room.limited,
@@ -450,12 +498,19 @@ public enum SlidingSyncResponseParser {
                 state: room.requiredState,
                 unreadCount: room.unreadCount,
                 highlightCount: room.highlightCount,
-                heroes: room.heroes.map { $0.userId }
+                heroes: room.heroes.map { $0.userId },
+                accountData: roomAccountData[roomId] ?? []
             )
+            // Without `num_live` there is no reliable way to distinguish
+            // new messages from history delivered for a list/subscription.
+            let liveCount = room.numLive ?? 0
+            liveEventIds[roomId] = Set(room.timeline.suffix(max(0, liveCount)).map(\.eventId))
         }
-        let (toDevice, changed, left) = extensions(in: response.extensions)
+        let (toDevice, changed, deviceLeft) = extensions(in: response.extensions)
         for (roomIdString, userIds) in typing(in: response.extensions) {
             let roomId = RoomId(unchecked: roomIdString)
+            guard invited[roomId] == nil, knocked[roomId] == nil, left[roomId] == nil
+            else { continue }
             var delta = joined[roomId] ?? JoinedRoomDelta()
             delta.ephemeral.append(BasicEvent(
                 type: "m.typing",
@@ -463,9 +518,30 @@ public enum SlidingSyncResponseParser {
             joined[roomId] = delta
         }
         return SyncDelta(
-            nextBatch: BatchToken(response.pos), joined: joined,
+            nextBatch: BatchToken(response.pos), liveEventIds: liveEventIds,
+            joined: joined,
+            invited: invited, left: left, knocked: knocked,
             accountData: globalAccountData(in: response.extensions),
-            toDevice: toDevice, deviceChanged: changed, deviceLeft: left)
+            toDevice: toDevice, deviceChanged: changed, deviceLeft: deviceLeft)
+    }
+
+    static func roomAccountData(
+        in extensions: [String: AnyCodable]?
+    ) -> [RoomId: [BasicEvent]] {
+        guard let rooms = extensions?["account_data"]?.objectValue?["rooms"]?.objectValue
+        else { return [:] }
+        var result: [RoomId: [BasicEvent]] = [:]
+        for (roomId, value) in rooms {
+            var events: [BasicEvent] = []
+            for event in value.arrayValue ?? [] {
+                guard let data = try? JSONEncoder().encode(event),
+                      let decoded = try? JSONDecoder().decode(BasicEvent.self, from: data)
+                else { continue }
+                events.append(decoded)
+            }
+            result[RoomId(unchecked: roomId)] = events
+        }
+        return result
     }
 
     /// Parse the global events of the account-data extension (MSC3959).

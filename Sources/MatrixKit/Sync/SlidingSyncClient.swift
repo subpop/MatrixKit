@@ -7,7 +7,7 @@ import os
 ///
 /// Runs alongside `SyncClient`, not instead of it: rooms route through
 /// `applySliding` (not `apply`), which leaves the v2 `syncToken`
-/// untouched. The `pos` cursor lives here (in memory).
+/// untouched. The connection-scoped `pos` cursor lives here (in memory).
 /// Accepts the same `SyncCryptoHooks` as `SyncClient` so one
 /// `MatrixClient.configureEncryption()` call arms both engines.
 public actor SlidingSyncClient {
@@ -38,17 +38,21 @@ public actor SlidingSyncClient {
     private let session: Session
     private let endpointPath: String
     private var cryptoHooks: SyncCryptoHooks?
-    /// Delta consumers. Failures are logged, never thrown: the next
-    /// batch replays from the first sink's cursor.
+    /// The first sink is the authoritative store; its failure prevents
+    /// acknowledging the response. Other sinks are best-effort observers.
     private var sinks: [any SyncDeltaSink] = []
     private var currentTask: Task<Void, Never>?
     private var connId = ""
     private var currentPos: String?
+    private var requestInFlight = false
+    private var generation = 0
     /// To-device stream position. Tracked separately from `pos`;
     /// only advances while E2EE extensions are enabled.
     private var toDeviceSince: String?
     private var lists: [String: SlidingSyncList] = [:]
+    private var listCounts: [String: Int] = [:]
     private var subscriptions: [RoomId: SlidingSyncRoomSubscription] = [:]
+    private var pendingUnsubscriptions: Set<RoomId> = []
 
     public init(
         transport: MatrixTransport,
@@ -78,8 +82,7 @@ public actor SlidingSyncClient {
         sinks.removeAll()
     }
 
-    /// Current `pos` cursor. Nil before the first successful response;
-    /// resumes across `stop()`/`start()` until the process exits.
+    /// Current connection's `pos`; a new connection starts without one.
     public var pos: String? { currentPos }
 
     /// Whether `start` has been called without a matching `stop`.
@@ -96,8 +99,11 @@ public actor SlidingSyncClient {
         guard await session.isValid else { throw .notAuthenticated }
         stop()
         connId = UUID().uuidString
+        currentPos = nil
         self.lists = lists
+        listCounts.removeAll()
         self.subscriptions = subscriptions
+        pendingUnsubscriptions.removeAll()
         MatrixKitLog.slidingSync.info(
             "Starting sliding sync (pos: \(self.currentPos ?? "<initial>", privacy: .public))"
         )
@@ -162,15 +168,18 @@ public actor SlidingSyncClient {
     ) {
         subscriptions[roomId] = SlidingSyncRoomSubscription(
             requiredState: requiredState, timelineLimit: timelineLimit)
+        pendingUnsubscriptions.remove(roomId)
     }
 
     /// Drop a room subscription; takes effect on the next request.
     public func unsubscribe(_ roomId: RoomId) {
         subscriptions.removeValue(forKey: roomId)
+        pendingUnsubscriptions.insert(roomId)
     }
 
     /// Stop the loop and finish the stream.
     public func stop() {
+        generation += 1
         currentTask?.cancel()
         currentTask = nil
     }
@@ -199,6 +208,7 @@ public actor SlidingSyncClient {
             lists: lists,
             roomSubscriptions: Dictionary(
                 uniqueKeysWithValues: subscriptions.map { ($0.key.value, $0.value) }),
+            unsubscribeRooms: pendingUnsubscriptions.map(\.value).sorted(),
             extensions: extensions
         )
     }
@@ -212,14 +222,23 @@ public actor SlidingSyncClient {
         return false
     }
 
-    /// One `POST` round-trip: send the current `pos`, advance it from the
-    /// response, run crypto hooks, and apply to the store. On
-    /// `M_UNKNOWN_POS` the cursor resets so the next request starts a
-    /// fresh connection, then the error is rethrown.
+    /// One serialized round-trip. A response is acknowledged only after
+    /// the authoritative sink has successfully persisted it.
     private func requestOnce(timeoutMs: Int) async throws(MatrixError) -> SyncDelta {
+        guard !requestInFlight else { throw .networkError("Sliding sync request already in flight") }
+        requestInFlight = true
+        defer { requestInFlight = false }
+        if connId.isEmpty { connId = UUID().uuidString }
+        let requestGeneration = generation
         let token = await session.accessToken
         guard !token.isEmpty else { throw .notAuthenticated }
-        let request = makeRequest(timeoutMs: timeoutMs)
+        let expanding = lists.contains { name, list in
+            guard let end = list.ranges.first?.last else { return false }
+            return end < (listCounts[name] ?? 0) - 1
+        }
+        let request = makeRequest(timeoutMs: expanding ? 0 : timeoutMs)
+        MatrixKitLog.slidingSync.debug(
+            "Request conn=\(self.connId, privacy: .private) pos=\(self.currentPos ?? "<initial>", privacy: .private) subscriptions=\(self.subscriptions.count)")
         let response: SlidingSyncResponse
         do {
             response = try await transport.send(
@@ -228,21 +247,57 @@ public actor SlidingSyncClient {
                 timeoutSeconds: timeoutMs / 1000 + 30
             )
         } catch {
-            if Self.isUnknownPos(error) { currentPos = nil }
+            if Self.isUnknownPos(error), requestGeneration == generation {
+                currentPos = nil
+                connId = UUID().uuidString
+            }
             throw error
         }
-        currentPos = response.pos
-        if let batch = SlidingSyncResponseParser.toDeviceBatch(in: response.extensions) {
-            toDeviceSince = batch
+        guard requestGeneration == generation, !Task.isCancelled else {
+            throw .networkError("Sliding sync request cancelled")
         }
+        MatrixKitLog.slidingSync.debug(
+            "Response pos=\(response.pos, privacy: .private) rooms=\(response.rooms.count)")
         var delta = SlidingSyncResponseParser.parse(response)
+        for (roomId, room) in delta.joined where room.timelineLimited {
+            MatrixKitLog.slidingSync.debug(
+                "Limited room=\(roomId.value, privacy: .private(mask: .hash)) events=\(room.timeline.count) prevBatch=\(room.prevBatch?.value ?? "<none>", privacy: .private)")
+        }
         delta = await applySyncCryptoHooks(cryptoHooks, to: delta)
-        for sink in sinks {
+        guard requestGeneration == generation, !Task.isCancelled else {
+            throw .networkError("Sliding sync request cancelled")
+        }
+        if let store = sinks.first {
             do {
-                try await sink.applySliding(delta)
+                try await store.applySliding(delta)
             } catch {
                 MatrixKitLog.slidingSync.error(
                     "Delta sink failed: \(error, privacy: .public)")
+                throw .networkError("Sliding sync store apply failed: \(error.localizedDescription)")
+            }
+        }
+        guard requestGeneration == generation, !Task.isCancelled else {
+            throw .networkError("Sliding sync request cancelled")
+        }
+        currentPos = response.pos
+        pendingUnsubscriptions.subtract(request.unsubscribeRooms?.map(RoomId.init(unchecked:)) ?? [])
+        for (name, result) in response.lists {
+            listCounts[name] = result.count
+            guard var list = lists[name], let end = list.ranges.first?.last,
+                end < result.count - 1
+            else { continue }
+            list.ranges = [[0, min(end + 80, result.count - 1)]]
+            lists[name] = list
+        }
+        MatrixKitLog.slidingSync.debug("Applied pos=\(response.pos, privacy: .private)")
+        if let batch = SlidingSyncResponseParser.toDeviceBatch(in: response.extensions) {
+            toDeviceSince = batch
+        }
+        for sink in sinks.dropFirst() {
+            do {
+                try await sink.applySliding(delta)
+            } catch {
+                MatrixKitLog.slidingSync.error("Delta observer failed: \(error, privacy: .public)")
             }
         }
         return delta

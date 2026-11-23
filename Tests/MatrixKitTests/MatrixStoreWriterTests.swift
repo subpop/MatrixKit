@@ -261,7 +261,7 @@ struct MatrixStoreWriterTests {
         #expect(events.map(\.eventId.value) == row.expected)
     }
 
-    @Test("Limited syncs merge and adopt the cursor")
+    @Test("Limited syncs merge without replacing the older cursor")
     func limitedMerge() async throws {
         let (writer, container) = try writer()
         try await writer.apply(joinedTimelineDelta(
@@ -278,7 +278,103 @@ struct MatrixStoreWriterTests {
         let events = try await writer.storedEvents(
             roomId: RoomId(unchecked: "!room:x"))
         #expect(events.map(\.eventId.value) == ["$a", "$b"])
-        #expect(try self.room(container, "!room:x").prevBatch == "p2")
+        #expect(try self.room(container, "!room:x").prevBatch == nil)
+        #expect(try MatrixStoreReader(modelContainer: container)
+            .roomDetail(RoomId(unchecked: "!room:x"))?.timelineGaps.first?.prevBatch == "p2")
+    }
+
+    @Test("Limited catch-up retains the older cursor and an independently pageable gap")
+    func limitedCatchUpGap() async throws {
+        let (writer, container) = try writer()
+        let roomId = RoomId(unchecked: "!room:x")
+        try await writer.apply(joinedTimelineDelta(
+            [unreadMessage("a", ts: 1)], nextBatch: "s1"))
+        try await writer.apply(SyncDelta(
+            nextBatch: BatchToken("s2"), joined: [roomId: JoinedRoomDelta(
+                timeline: [unreadMessage("d", ts: 4)], timelineLimited: true,
+                prevBatch: BatchToken("before-d"))]))
+        let reader = MatrixStoreReader(modelContainer: container)
+        #expect(try reader.timelinePayload(roomId, limit: 10).timelineGaps == [
+            StoredTimelineGap(newerEventId: "$d", olderEventId: "$a", prevBatch: "before-d")
+        ])
+        #expect(try self.room(container, "!room:x").prevBatch == nil)
+
+        try await writer.fillTimelineGap(
+            [unreadMessage("c", ts: 3)], roomId: roomId,
+            newerEventId: "$d", end: BatchToken("before-c"))
+        #expect(try reader.roomDetail(roomId)?.timelineGaps.first?.prevBatch == "before-c")
+        try await writer.fillTimelineGap(
+            [unreadMessage("c", ts: 3)], roomId: roomId,
+            newerEventId: "$d", end: BatchToken("before-c-again"))
+        #expect(try reader.roomDetail(roomId)?.timelineGaps.count == 1)
+        try await writer.fillTimelineGap(
+            [unreadMessage("b", ts: 2), unreadMessage("a", ts: 1)], roomId: roomId,
+            newerEventId: "$d", end: BatchToken("before-a"))
+        #expect(try reader.roomDetail(roomId)?.timelineGaps == [])
+        #expect(try await writer.storedEvents(roomId: roomId).map(\.eventId.value) == [
+            "$a", "$b", "$c", "$d"
+        ])
+    }
+
+    @Test("Separate limited windows keep separate gap cursors")
+    func successiveLimitedWindows() async throws {
+        let (writer, container) = try writer()
+        let roomId = RoomId(unchecked: "!room:x")
+        try await writer.apply(joinedTimelineDelta(
+            [unreadMessage("a", ts: 1)], nextBatch: "s1"))
+        for (id, ts, cursor) in [("d", 4, "before-d"), ("g", 7, "before-g")] {
+            try await writer.apply(SyncDelta(
+                nextBatch: BatchToken("s\(ts)"), joined: [roomId: JoinedRoomDelta(
+                    timeline: [unreadMessage(id, ts: ts)], timelineLimited: true,
+                    prevBatch: BatchToken(cursor))]))
+        }
+        #expect(try MatrixStoreReader(modelContainer: container)
+            .roomDetail(roomId)?.timelineGaps == [
+                StoredTimelineGap(newerEventId: "$d", olderEventId: "$a", prevBatch: "before-d"),
+                StoredTimelineGap(newerEventId: "$g", olderEventId: "$d", prevBatch: "before-g"),
+            ])
+    }
+
+    @Test("A ten-event catch-up after a busy offline period records the missing interval")
+    func busyOfflineRoom() async throws {
+        let (writer, container) = try writer()
+        let roomId = RoomId(unchecked: "!room:x")
+        try await writer.apply(joinedTimelineDelta(
+            [unreadMessage("0", ts: 0)], nextBatch: "s0"))
+        try await writer.applySliding(SyncDelta(
+            nextBatch: BatchToken("p1"), joined: [roomId: JoinedRoomDelta(
+                timeline: (91...100).map { unreadMessage("\($0)", ts: $0) },
+                timelineLimited: true, prevBatch: BatchToken("before-91"))]))
+        let payload = try MatrixStoreReader(modelContainer: container)
+            .timelinePayload(roomId, limit: 20)
+        #expect(payload.snapshot.count == 11)
+        #expect(payload.timelineGaps == [
+            StoredTimelineGap(newerEventId: "$91", olderEventId: "$0", prevBatch: "before-91")
+        ])
+    }
+
+    @Test("Retention promotes the surviving gap cursor to oldest history")
+    func trimInteriorGaps() async throws {
+        let (writer, container) = try writer()
+        let roomId = RoomId(unchecked: "!room:x")
+        try await writer.apply(joinedTimelineDelta(
+            [unreadMessage("a", ts: 10)], nextBatch: "s1"))
+        for (id, ts, cursor) in [("d", 100, "before-d"), ("g", 200, "before-g")] {
+            try await writer.apply(SyncDelta(
+                nextBatch: BatchToken("s\(ts)"), joined: [roomId: JoinedRoomDelta(
+                    timeline: [unreadMessage(id, ts: ts)], timelineLimited: true,
+                    prevBatch: BatchToken(cursor))]))
+        }
+        try await writer.apply(joinedTimelineDelta(
+            [unreadMessage("h", ts: 210), unreadMessage("i", ts: 220)],
+            nextBatch: "s3"))
+        _ = try await writer.trimEvents(
+            olderThan: date(ms: 150), keepingLatestMessages: 3)
+        let stored = try MatrixStoreReader(modelContainer: container).roomDetail(roomId)
+        let detail = try #require(stored)
+        #expect(detail.timelineGaps.isEmpty)
+        #expect(detail.prevBatch == "before-g")
+        #expect(detail.historyGapEventId == nil)
     }
 
     @Test("Context insertion preserves the backward cursor and deduplicates")
@@ -539,14 +635,16 @@ struct MatrixStoreWriterTests {
                 timeline: [unreadMessage("b", ts: 2)],
                 prevBatch: BatchToken("p9"))]))
         #expect(try self.room(container, "!room:x").prevBatch == "p0")
-        // A gapped (`limited`) window re-anchors the cursor.
+        // A gapped (`limited`) window retains the oldest-history cursor.
         try await writer.apply(SyncDelta(
             nextBatch: BatchToken("s3"),
             joined: [roomId: JoinedRoomDelta(
                 timeline: [unreadMessage("c", ts: 3)],
                 timelineLimited: true,
                 prevBatch: BatchToken("p2"))]))
-        #expect(try self.room(container, "!room:x").prevBatch == "p2")
+        #expect(try self.room(container, "!room:x").prevBatch == "p0")
+        #expect(try MatrixStoreReader(modelContainer: container)
+            .roomDetail(roomId)?.timelineGaps.first?.prevBatch == "p2")
     }
 
     @Test("Hierarchy rows persist on the space")
@@ -1208,7 +1306,7 @@ struct MatrixStoreWriterTests {
         #expect(stored.prevBatch == "p0")
     }
 
-    @Test("prependHistory, resolveHistoryGap, and a limited apply each clear the anchor")
+    @Test("History backfill clears trim anchors; limited sync retains them")
     func trimAnchorClearing() async throws {
         let (writer, container) = try writer()
         // Event IDs are globally unique, so each room needs its own set.
@@ -1244,7 +1342,9 @@ struct MatrixStoreWriterTests {
                 timeline: [unreadMessage("f", ts: 130)],
                 timelineLimited: true,
                 prevBatch: BatchToken("p2"))]))
-        #expect(try self.room(container, "!limited:x").historyGapEventId == nil)
+        #expect(try self.room(container, "!limited:x").historyGapEventId == "$c3")
+        #expect(try MatrixStoreReader(modelContainer: container)
+            .roomDetail(RoomId(unchecked: "!limited:x"))?.timelineGaps.count == 1)
     }
 
     @Test("prevBatchTs records the oldest event at the pagination boundary")

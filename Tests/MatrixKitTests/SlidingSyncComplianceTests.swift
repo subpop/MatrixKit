@@ -12,6 +12,54 @@ import MatrixKitTesting
 /// (registry override — the unstable path the SDK targets).
 @Suite("SlidingSyncCompliance")
 struct SlidingSyncComplianceTests {
+    @Test("List count expands the next request without waiting for a long poll")
+    func growsRoomList() async throws {
+        try await withHarness { harness in
+            await harness.setOverride(
+                method: "POST",
+                path: SlidingSyncClient.defaultEndpointPath,
+                response: .raw(#"{"pos":"p1","lists":{"main":{"count":120}},"rooms":{}}"#))
+            let (sliding, _, _) = await harness.slidingSyncClient()
+            _ = try await sliding.syncOnce(lists: SlidingSyncClient.defaultLists)
+            _ = try await sliding.syncOnce()
+            let posts = await harness.requests.filter { $0.method == "POST" }
+            #expect(posts.count == 2)
+            let next = try JSONDecoder().decode(SlidingSyncRequest.self, from: posts[1].body)
+            #expect(next.lists["main"]?.ranges == [[0, 99]])
+            #expect(posts[1].query["timeout"] == "0")
+        }
+    }
+
+    actor FailingStore: SyncDeltaSink {
+        var shouldFail = true
+        var syncToken: BatchToken? { nil }
+        func apply(_ delta: SyncDelta) throws {}
+        func applySliding(_ delta: SyncDelta) throws {
+            if shouldFail { throw MatrixError.networkError("test write failure") }
+        }
+        func allowWrites() { shouldFail = false }
+    }
+
+    @Test("A failed authoritative store write does not advance pos")
+    func failedStoreWrite() async throws {
+        try await withHarness { harness in
+            let (sliding, _, _) = await harness.slidingSyncClient()
+            let store = FailingStore()
+            await sliding.addDeltaSink(store)
+            await #expect(throws: MatrixError.self) {
+                try await sliding.syncOnce(lists: SlidingSyncClient.defaultLists)
+            }
+            #expect(await sliding.pos == nil)
+            await store.allowWrites()
+            _ = try await sliding.syncOnce()
+            #expect(await sliding.pos != nil)
+            let posts = await harness.requests.filter { $0.method == "POST" }
+            #expect(posts.count == 2)
+            #expect(posts[0].query["pos"] == nil)
+            #expect(posts[1].query["pos"] == nil)
+        }
+    }
+
     @Test("Sync applies rooms and advances pos")
     func syncAppliesRooms() async throws {
         try await withHarness { harness in

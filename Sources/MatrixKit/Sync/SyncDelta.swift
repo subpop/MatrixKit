@@ -6,6 +6,9 @@ public struct SyncDelta: Hashable, Sendable {
     /// Pagination cursor for the next sync (`since`). Persist this to make
     /// the next launch an incremental sync instead of a full one.
     public var nextBatch: BatchToken
+    /// Sliding-sync event IDs known to be live rather than historical.
+    /// Nil for classic sync, which does not provide `num_live`.
+    public var liveEventIds: [RoomId: Set<EventId>]?
     /// Changed joined rooms, keyed by room ID.
     public var joined: [RoomId: JoinedRoomDelta]
     /// New/updated invites, keyed by room ID.
@@ -28,6 +31,7 @@ public struct SyncDelta: Hashable, Sendable {
 
     public init(
         nextBatch: BatchToken,
+        liveEventIds: [RoomId: Set<EventId>]? = nil,
         joined: [RoomId: JoinedRoomDelta] = [:],
         invited: [RoomId: InvitedRoomDelta] = [:],
         left: [RoomId: LeftRoomDelta] = [:],
@@ -39,6 +43,7 @@ public struct SyncDelta: Hashable, Sendable {
         signedKeyCount: Int? = nil
     ) {
         self.nextBatch = nextBatch
+        self.liveEventIds = liveEventIds
         self.joined = joined
         self.invited = invited
         self.left = left

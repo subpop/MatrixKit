@@ -165,6 +165,42 @@ struct SlidingSyncModelsTests {
 
 @Suite("SlidingSyncResponseParser")
 struct SlidingSyncResponseParserTests {
+    @Test("Only the num_live suffix can trigger sliding notifications")
+    func liveEvents() throws {
+        let response = try JSONDecoder().decode(SlidingSyncResponse.self, from: Data(#"""
+            {"pos":"p1","rooms":{"!r:x":{"initial":true,"num_live":1,"timeline":[
+              {"type":"m.room.message","event_id":"$old","sender":"@a:x","origin_server_ts":1,"content":{"msgtype":"m.text","body":"old"}},
+              {"type":"m.room.message","event_id":"$new","sender":"@a:x","origin_server_ts":2,"content":{"msgtype":"m.text","body":"new"}}
+            ]}}}
+            """#.utf8))
+        let ids = SlidingSyncResponseParser.parse(response)
+            .liveEventIds?[RoomId(unchecked: "!r:x")]
+        #expect(ids == [EventId(unchecked: "$new")])
+        var withoutLiveCount = response
+        withoutLiveCount.rooms["!r:x"]?.numLive = nil
+        #expect(SlidingSyncResponseParser.parse(withoutLiveCount)
+            .liveEventIds?[RoomId(unchecked: "!r:x")] == [])
+    }
+
+    @Test("Invite, knock and leave payloads do not become joined rooms")
+    func memberships() throws {
+        let json = #"""
+            {"pos":"p1","rooms":{
+              "!invite:x":{"membership":"invite","stripped_state":[
+                {"type":"m.room.member","state_key":"@me:x","sender":"@alice:x",
+                 "content":{"membership":"invite"}}]},
+              "!knock:x":{"membership":"knock","stripped_state":[]},
+              "!left:x":{"membership":"leave"}
+            }}
+            """#
+        let response = try JSONDecoder().decode(SlidingSyncResponse.self, from: Data(json.utf8))
+        let delta = SlidingSyncResponseParser.parse(response)
+        #expect(delta.joined.isEmpty)
+        #expect(delta.invited[RoomId(unchecked: "!invite:x")]?.inviter?.value == "@alice:x")
+        #expect(delta.knocked[RoomId(unchecked: "!knock:x")] != nil)
+        #expect(delta.left[RoomId(unchecked: "!left:x")] != nil)
+    }
+
     @Test("Maps rooms to joined deltas with pos as nextBatch")
     func parse() throws {
         let response = try JSONDecoder().decode(
@@ -307,6 +343,11 @@ struct SlidingSyncClientTests {
         await client.unsubscribe(roomId)
         request = await client.makeRequest(timeoutMs: 1000)
         #expect(request.roomSubscriptions.isEmpty)
+        #expect(request.unsubscribeRooms == [roomId.value])
+        await client.subscribe(roomId, timelineLimit: 8)
+        request = await client.makeRequest(timeoutMs: 1000)
+        #expect(request.unsubscribeRooms?.isEmpty == true)
+        #expect(request.roomSubscriptions[roomId.value]?.timelineLimit == 8)
         try? await transport.shutdown()
     }
 
