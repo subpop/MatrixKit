@@ -1,12 +1,8 @@
 import MatrixKit
 
 /// Marker healer whose first `markersNeedingResolution()` call parks
-/// until the test releases it. The sync consumer runs that call from
-/// inside its delta loop (via `resolveReadMarkers`), so a parked first
-/// call suspends the consumer mid-loop at a test-controlled point.
-/// That lets a suite stop and restart sync while a superseded
-/// generation's consumer is still unwinding — the shape of the
-/// late-epilogue race the start/stop generation guards protect against.
+/// until the test releases it, to exercise live delta delivery while
+/// marker resolution is pending.
 public actor ParkedMarkerHealer: MarkerHealingStore {
     /// Waiters for the first `markersNeedingResolution()` call parking.
     private var parkedWaiters: [CheckedContinuation<Void, Never>] = []

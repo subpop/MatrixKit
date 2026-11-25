@@ -103,6 +103,8 @@ public final class MatrixClient {
     private let keystore: (any KeyStore)?
     private var syncTask: Task<Void, Never>?
     private var slidingSyncTask: Task<Void, Never>?
+    private var markerHealingTask: Task<Void, Never>?
+    private var markerHealingRequested = false
     /// Monotonic start/stop generation for the classic sync loop.
     /// Ending a loop finishes its delta stream asynchronously
     /// (cancelled long-poll → finished streams → consumer epilogue), so
@@ -519,13 +521,12 @@ public final class MatrixClient {
             syncTask = Task { [weak self] in
                 guard let self else { return }
                 for await delta in stream {
-                    // New fully-read IDs only arrive via room account data;
-                    // resolve their timestamps so badges stop counting from
-                    // the stale receipt position.
-                    if delta.joined.values.contains(where: { !$0.accountData.isEmpty }) {
-                        await self.resolveReadMarkers()
-                    }
                     self.notifyDelta(delta)
+                    // New fully-read IDs arrive via room account data;
+                    // heal their timestamps without delaying live deltas.
+                    if delta.joined.values.contains(where: { !$0.accountData.isEmpty }) {
+                        self.scheduleReadMarkerResolution()
+                    }
                 }
                 // A superseding start/stop took over the state; this
                 // stream ending is old teardown catching up, not the
@@ -648,6 +649,22 @@ public final class MatrixClient {
         }
     }
 
+    /// Keep network-based marker healing off the live delta delivery path.
+    /// Coalesce further requests while a pass is in flight.
+    private func scheduleReadMarkerResolution() {
+        guard markerHealer != nil else { return }
+        markerHealingRequested = true
+        guard markerHealingTask == nil else { return }
+        markerHealingTask = Task { [weak self] in
+            guard let self else { return }
+            while self.markerHealingRequested {
+                self.markerHealingRequested = false
+                await self.resolveReadMarkers()
+            }
+            self.markerHealingTask = nil
+        }
+    }
+
     /// Start the sliding sync loop. Runs independently of `startSync`;
     /// E2EE/to-device extensions ride along whenever crypto hooks are
     /// installed, so the sliding path delivers keys and decrypts
@@ -673,10 +690,10 @@ public final class MatrixClient {
             slidingSyncTask = Task { [weak self] in
                 guard let self else { return }
                 for await delta in stream {
-                    if delta.joined.values.contains(where: { !$0.accountData.isEmpty }) {
-                        await self.resolveReadMarkers()
-                    }
                     self.notifyDelta(delta)
+                    if delta.joined.values.contains(where: { !$0.accountData.isEmpty }) {
+                        self.scheduleReadMarkerResolution()
+                    }
                 }
                 // A superseding start/stop took over the state; this
                 // stream ending is old teardown catching up, not the

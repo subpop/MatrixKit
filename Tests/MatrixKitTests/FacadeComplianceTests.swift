@@ -112,7 +112,39 @@ struct FacadeComplianceTests {
         }
     }
 
-    @Test("A superseded sync generation cannot reset a running loop's status")
+    @Test("Read-marker healing does not hold up live deltas", .timeLimit(.minutes(1)))
+    @MainActor
+    func parkedMarkerHealingDoesNotBlockDeltas() async throws {
+        try await withHarness { harness in
+            let world = await harness.world
+            let roomId = RoomId(unchecked: "!marker:test")
+            await world.stageMessage(roomId: roomId.value, body: "first")
+            let client = await client(harness)
+            try await client.accountData.setFullyRead(
+                roomId, eventId: EventId(unchecked: "$marker:test"))
+            let healer = ParkedMarkerHealer()
+            client.setMarkerHealer(healer)
+            let deltas = client.deltas()
+            try await client.startSync()
+            await healer.waitForFirstPark()
+            let after = await world.stageMessage(
+                roomId: roomId.value, body: "while healing")
+            var delivered = false
+            for await delta in deltas {
+                if delta.joined[roomId]?.timeline.contains(
+                    where: { $0.eventId == after.eventId }) == true {
+                    delivered = true
+                    break
+                }
+            }
+            #expect(delivered)
+            await healer.release()
+            await client.stopSync()
+            try? await client.transport.shutdown()
+        }
+    }
+
+    @Test("Restarting sync during marker healing keeps the new loop running")
     @MainActor
     func supersededSyncGenerationLeavesRestartAlone() async throws {
         try await withHarness { harness in
@@ -121,25 +153,19 @@ struct FacadeComplianceTests {
             await world.stageMessage(roomId: roomId.value, body: "hello")
             let client = await client(harness)
             // Room account data rides in every harness sync response, so
-            // the consumer runs `resolveReadMarkers()` on each delta. The
-            // parked healer suspends generation 1's consumer mid-loop at a
-            // test-controlled point.
+            // the parked healer can overlap a sync restart.
             try await client.accountData.setFullyRead(
                 roomId, eventId: EventId(unchecked: "$marker:test"))
             let healer = ParkedMarkerHealer()
             client.setMarkerHealer(healer)
             try await client.startSync()
             await healer.waitForFirstPark()
-            // Restart while generation 1's consumer is still parked.
+            // Restart while generation 1's marker healing is still parked.
             await client.stopSync()
             try await client.startSync()
             #expect(client.syncStatus == .syncing)
-            // Unpark generation 1: its epilogue turn is queued on the main
-            // actor now, ahead of everything below. Delivery of the staged
-            // message requires a full sync round-trip through generation
-            // 2's consumer, so gating on it also guarantees the superseded
-            // epilogue has landed — where the generation guard must leave
-            // the running loop's status alone.
+            // Delivery of a post-restart message confirms the new generation
+            // remains live after the old generation has stopped.
             await healer.release()
             let deltas = client.deltas()
             let after = await world.stageMessage(
