@@ -51,7 +51,9 @@ struct MatrixHTMLGeneratorTests {
     @Test("Markdown edit repeats full formatted content in m.new_content")
     func markdownEdit() throws {
         let eventId = EventId(unchecked: "$x:example.com")
-        let edit = EditContent.markdown(editing: eventId, "new *text*")
+        let replyTo = EventId(unchecked: "$reply:example.com")
+        let edit = EditContent.markdown(
+            editing: eventId, "new *text*", relatesTo: .reply(to: replyTo))
         #expect(edit.body == " * new *text*")
         #expect(edit.newContent.body == "new *text*")
         #expect(
@@ -62,6 +64,9 @@ struct MatrixHTMLGeneratorTests {
         #expect(
             json["m.new_content"]?["formatted_body"]?.stringValue
                 == "<p>new <em>text</em></p>")
+        let editedReplyTo =
+            json["m.new_content"]?["m.relates_to"]?["m.in_reply_to"]?["event_id"]?.stringValue
+        #expect(editedReplyTo == replyTo.value)
         #expect(json["m.relates_to"]?["rel_type"]?.stringValue == "m.replace")
     }
 }

@@ -304,6 +304,45 @@ struct MessageSenderTests {
         }
     }
 
+    @Test("Edit keeps a reply relation in replacement content")
+    func editReplyRelation() async throws {
+        try await withHarness { harness in
+            let (sender, writer, _, _) = try await sender(harness)
+            let room = RoomId(unchecked: "!room:test")
+            let target = EventId(unchecked: "$reply:test")
+            let replyTo = EventId(unchecked: "$parent:test")
+            try await writer.apply(joinedTimelineDelta([
+                MessageEvent(
+                    type: EventType.roomMessage.rawValue,
+                    eventId: target,
+                    sender: UserId(unchecked: "@alice:test"),
+                    roomId: room,
+                    originServerTs: 1,
+                    content: [
+                        "msgtype": .string("m.text"),
+                        "body": .string("reply"),
+                        "m.relates_to": .object([
+                            "m.in_reply_to": .object([
+                                "event_id": .string(replyTo.value),
+                            ])
+                        ]),
+                    ])
+            ], roomId: room.value))
+
+            _ = try await sender.edit(room, eventId: target, newBody: "edited reply")
+
+            let request = try #require(
+                await sends(harness, containing: "/send/m.room.message/").last)
+            let body = request.body
+            let content = try JSONDecoder().decode(
+                [String: AnyCodable].self, from: body)
+            let editedReplyTo =
+                content["m.new_content"]?["m.relates_to"]?["m.in_reply_to"]?["event_id"]?.stringValue
+            #expect(editedReplyTo == replyTo.value)
+            #expect(content["m.relates_to"]?["rel_type"]?.stringValue == "m.replace")
+        }
+    }
+
     @Test("Toggle adds a reaction")
     func toggleReaction() async throws {
         try await withHarness { harness in
@@ -622,9 +661,28 @@ struct MessageSenderTests {
     @Test("Encrypted rooms encrypt replies, thread replies, and edits")
     func encryptedVerbs() async throws {
         try await withHarness { harness in
-            let (sender, writer, _, cryptoSender) = try await sender(harness)
+            let (sender, writer, sharer, cryptoSender) = try await sender(harness)
+            await sharer.setDevices(["@alice:test": ["ALICEDEVICE", "OTHER"]])
             let room = try await encryptedRoom(harness, writer: writer, name: "E2EE verbs")
             let target = EventId(unchecked: "$target:test")
+            let replyTo = EventId(unchecked: "$parent:test")
+            try await writer.apply(joinedTimelineDelta([
+                MessageEvent(
+                    type: EventType.roomMessage.rawValue,
+                    eventId: target,
+                    sender: UserId(unchecked: "@alice:test"),
+                    roomId: room,
+                    originServerTs: 1,
+                    content: [
+                        "msgtype": .string("m.text"),
+                        "body": .string("reply"),
+                        "m.relates_to": .object([
+                            "m.in_reply_to": .object([
+                                "event_id": .string(replyTo.value),
+                            ])
+                        ]),
+                    ])
+            ], roomId: room.value))
             _ = try await sender.reply(room, to: target, body: "reply")
             _ = try await sender.threadReply(room, root: target, body: "thread")
             _ = try await sender.edit(room, eventId: target, newBody: "edited")
@@ -632,6 +690,22 @@ struct MessageSenderTests {
             #expect(sent.count == 3)
             #expect(sent.allSatisfy { $0.type == "m.room.encrypted" })
             #expect(await sends(harness, containing: "/send/m.room.message/").isEmpty)
+
+            let receiver = RoomCrypto(sharer: FakeSharer(), sender: FakeRoomSender())
+            await receiver.receiveRoomKey(BasicEvent(
+                type: "m.room_key", sender: UserId(unchecked: "@alice:test"),
+                content: try #require(await sharer.shares.first).content))
+            let decrypted = await receiver.decryptRoomEvent(
+                MessageEvent(
+                    type: sent[2].type, eventId: EventId(unchecked: "$edit"),
+                    sender: UserId(unchecked: "@alice:test"), roomId: room,
+                    originServerTs: 2, content: sent[2].content),
+                in: room)
+            let edit = try #require(decrypted)
+            let newContent = edit.content["m.new_content"]
+            let editedReplyTo =
+                newContent?["m.relates_to"]?["m.in_reply_to"]?["event_id"]?.stringValue
+            #expect(editedReplyTo == replyTo.value)
         }
     }
 

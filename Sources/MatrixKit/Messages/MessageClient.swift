@@ -116,13 +116,13 @@ public actor MessageClient {
     @discardableResult
     public func edit(
         _ roomId: RoomId, eventId: EventId, newBody: String,
-        mentions: Mentions? = nil
+        mentions: Mentions? = nil, relatesTo: RelatesTo? = nil
     ) async throws(MatrixError) -> EventId {
         guard eventId.value.hasPrefix("$") else {
             throw .invalidIdentifier("Not a server event ID: \(eventId.value)")
         }
         let content = EditContent.markdown(
-            editing: eventId, newBody, mentions: mentions)
+            editing: eventId, newBody, relatesTo: relatesTo, mentions: mentions)
         return try await sendEvent(roomId, content: content)
     }
 
@@ -410,11 +410,12 @@ extension EditContent {
     /// Replacement content for editing a markdown text message.
     /// `m.new_content` repeats the full formatted content per spec.
     public static func markdown(
-        editing eventId: EventId, _ newBody: String, mentions: Mentions? = nil
+        editing eventId: EventId, _ newBody: String,
+        relatesTo: RelatesTo? = nil, mentions: Mentions? = nil
     ) -> EditContent {
         EditContent(
             body: " * \(newBody)",
-            newContent: .markdown(newBody, mentions: mentions),
+            newContent: .markdown(newBody, relatesTo: relatesTo, mentions: mentions),
             relatesTo: .edit(of: eventId))
     }
 }

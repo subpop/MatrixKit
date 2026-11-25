@@ -232,15 +232,23 @@ public actor MessageSender {
         guard eventId.value.hasPrefix("$") else {
             throw .invalidIdentifier("Not a server event ID: \(eventId.value)")
         }
+        let relatesTo: RelatesTo?
+        do {
+            relatesTo = try reader.event(eventId)?.messageContent?.relatesTo
+        } catch {
+            throw .storeError(error.localizedDescription)
+        }
         if isEncrypted(roomId) {
             try await ensureShared(roomId)
             return try await roomCrypto.sendEncryptedContent(
                 roomId,
-                EditContent.markdown(editing: eventId, newBody, mentions: mentions),
+                EditContent.markdown(
+                    editing: eventId, newBody, relatesTo: relatesTo, mentions: mentions),
                 deviceId: ownDeviceId)
         }
         return try await messages.edit(
-            roomId, eventId: eventId, newBody: newBody, mentions: mentions)
+            roomId, eventId: eventId, newBody: newBody,
+            mentions: mentions, relatesTo: relatesTo)
     }
 
     // MARK: - Attachments
