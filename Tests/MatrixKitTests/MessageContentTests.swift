@@ -65,6 +65,25 @@ struct MessageContentTests {
         #expect(event.timestamp.timeIntervalSince1970 == 1_700_000_000)
     }
 
+    @Test("MessageEvent decodes sticker content")
+    func stickerContent() throws {
+        let event = MessageEvent(
+            type: "m.sticker",
+            eventId: EventId(unchecked: "$sticker"),
+            sender: UserId(unchecked: "@a:b"),
+            originServerTs: 1_700_000_000_000,
+            content: [
+                "body": .string("wave"),
+                "url": .string("mxc://example.com/wave"),
+                "info": .object(["mimetype": .string("image/png")]),
+            ])
+
+        let sticker = try #require(event.stickerContent)
+        #expect(sticker.body == "wave")
+        #expect(sticker.url == "mxc://example.com/wave")
+        #expect(sticker.info.mimeType == "image/png")
+    }
+
     @Test("ContextResponse defaults omitted event arrays to empty")
     func contextResponseMissingEventArrays() throws {
         let decoder = JSONDecoder()

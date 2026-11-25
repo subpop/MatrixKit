@@ -503,6 +503,16 @@ public struct MessageEvent: Hashable, Sendable, Codable {
         return decoded
     }
 
+    /// Decode `content` as `m.sticker`.
+    public var stickerContent: StickerContent? {
+        // Re-encode through JSON to decode the concrete content type.
+        guard
+            let data = try? JSONEncoder().encode(content),
+            let decoded = try? JSONDecoder().decode(StickerContent.self, from: data)
+        else { return nil }
+        return decoded
+    }
+
     /// Decode `content` as a stable or MSC3381 unstable poll start.
     /// Legacy or malformed poll shapes do not decode.
     public var pollStartContent: PollStartContent? {
