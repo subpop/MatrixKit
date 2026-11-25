@@ -30,13 +30,28 @@ public actor SyncConnection {
         syncTimeoutMs: Int = 30_000,
         onError: (@Sendable (MatrixError) -> Void)? = nil
     ) -> AsyncStream<SyncResponse> {
+        stream(
+            since: since, filterJSON: filterJSON,
+            syncTimeoutMs: syncTimeoutMs, onError: onError,
+            process: { $0 })
+    }
+
+    /// Process each response before advancing `since` or requesting another.
+    /// A failed store write retries from the previous cursor with backoff.
+    func stream<Output: Sendable>(
+        since: BatchToken?,
+        filterJSON: String? = nil,
+        syncTimeoutMs: Int = 30_000,
+        onError: (@Sendable (MatrixError) -> Void)? = nil,
+        process: @escaping @Sendable (SyncResponse) async throws -> Output
+    ) -> AsyncStream<Output> {
         stop()
         let transport = self.transport
         let session = self.session
         var cursor = since?.value
         var backoffSeconds = 1
 
-        let (stream, continuation) = AsyncStream<SyncResponse>.makeStream()
+        let (stream, continuation) = AsyncStream<Output>.makeStream()
 
         currentTask = Task {
             defer { continuation.finish() }
@@ -53,9 +68,12 @@ public actor SyncConnection {
                         accessToken: token,
                         timeoutSeconds: syncTimeoutMs / 1000 + 30
                     )
+                    if Task.isCancelled { break }
+                    let output = try await process(response)
+                    if Task.isCancelled { break }
                     cursor = response.nextBatch
                     backoffSeconds = 1
-                    continuation.yield(response)
+                    continuation.yield(output)
                 } catch let error as MatrixError {
                     if Task.isCancelled { break }
                     let isFatal: Bool
@@ -76,7 +94,7 @@ public actor SyncConnection {
                     try? await Task.sleep(for: .seconds(backoffSeconds))
                     backoffSeconds = min(backoffSeconds * 2, 30)
                 } catch {
-                    // Unreachable: transport only throws MatrixError.
+                    // Transport and the SDK's store processor only throw MatrixError.
                     MatrixKitLog.syncConnection.error("Unexpected sync error: \(error, privacy: .public)")
                     break
                 }

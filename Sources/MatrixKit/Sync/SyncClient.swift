@@ -36,9 +36,7 @@ public actor SyncClient {
     private let connection: SyncConnection
     private let session: Session
     private var cryptoHooks: SyncCryptoHooks?
-    /// Delta consumers, first entry's cursor drives `since`. Failures
-    /// are logged, never thrown: the next batch replays from the
-    /// cursor, so delivery is at-least-once.
+    /// Delta consumers; the first is the authoritative cursor-owning store.
     private var sinks: [any SyncDeltaSink]
 
     public init(
@@ -74,20 +72,14 @@ public actor SyncClient {
         let filterJSON = try filter.map(SyncResponseParser.encodeFilter)
         MatrixKitLog.sync.info("Starting sync (since: \(since?.value ?? "<initial>", privacy: .public))")
 
-        let rawStream = await connection.stream(since: since, filterJSON: filterJSON) { error in
-            MatrixKitLog.sync.error("Sync terminated: \(error, privacy: .public)")
-        }
-        let (stream, continuation) = AsyncStream<SyncDelta>.makeStream()
-        Task { [self] in
-            for await response in rawStream {
-                var delta = SyncResponseParser.parse(response)
-                delta = await self.applyCrypto(delta)
-                await self.fanOut(delta)
-                continuation.yield(delta)
-            }
-            continuation.finish()
-        }
-        return stream
+        return await connection.stream(
+            since: since, filterJSON: filterJSON,
+            onError: { error in
+                MatrixKitLog.sync.error("Sync terminated: \(error, privacy: .public)")
+            },
+            process: { [self] response in
+                try await self.process(response)
+            })
     }
 
     /// Single sync round-trip (initial sync / catch-up), applied to the sinks.
@@ -97,10 +89,7 @@ public actor SyncClient {
         let since = await sinceToken()
         let filterJSON = try filter.map(SyncResponseParser.encodeFilter)
         let response = try await connection.syncOnce(since: since, filterJSON: filterJSON)
-        var delta = SyncResponseParser.parse(response)
-        delta = await applyCrypto(delta)
-        await fanOut(delta)
-        return delta
+        return try await process(response)
     }
 
     /// The first sink's cursor, or nil for a full sync.
@@ -110,16 +99,30 @@ public actor SyncClient {
         return token
     }
 
-    /// Deliver a parsed delta to every sink in order. Sink errors are
-    /// logged and swallowed so storage hiccups never break sync; the
-    /// next batch replays from the cursor.
-    private func fanOut(_ delta: SyncDelta) async {
-        for sink in sinks {
+    private func process(_ response: SyncResponse) async throws(MatrixError) -> SyncDelta {
+        var delta = SyncResponseParser.parse(response)
+        delta = await applyCrypto(delta)
+        try await fanOut(delta)
+        return delta
+    }
+
+    /// Only acknowledge a delta after the cursor-owning store applies it.
+    /// Failures in later observers do not block the authoritative cursor.
+    private func fanOut(_ delta: SyncDelta) async throws(MatrixError) {
+        if let store = sinks.first {
+            do {
+                try await store.apply(delta)
+            } catch {
+                MatrixKitLog.sync.error("Delta sink failed: \(error, privacy: .public)")
+                throw .networkError("Sync store apply failed: \(error.localizedDescription)")
+            }
+        }
+        for sink in sinks.dropFirst() {
             do {
                 try await sink.apply(delta)
             } catch {
                 MatrixKitLog.sync.error(
-                    "Delta sink failed: \(error, privacy: .public)")
+                    "Delta observer failed: \(error, privacy: .public)")
             }
         }
     }

@@ -206,6 +206,51 @@ struct SyncComplianceTests {
         }
     }
 
+    @Test("A failed store write replays the same sync events before advancing since")
+    func failedStoreWriteReplays() async throws {
+        try await withHarness { harness in
+            let world = await harness.world
+            let message = await world.stageMessage(body: "must not skip")
+            let (sync, _, _, _) = await harness.syncClient()
+            let store = FailOnceSyncSink()
+            await sync.addDeltaSink(store)
+            let stream = try await sync.start()
+            var delivered: SyncDelta?
+            for await delta in stream {
+                delivered = delta
+                break
+            }
+            await sync.stop()
+
+            let requests = await harness.requests.filter { $0.path == "/_matrix/client/v3/sync" }
+            #expect(requests.count == 2)
+            #expect(requests.allSatisfy { $0.query["since"] == nil })
+            #expect(await store.applyCount == 2)
+            #expect(await store.syncToken == delivered?.nextBatch)
+            #expect(delivered?.joined[RoomId(unchecked: "!room:test")]?.timeline.contains {
+                $0.eventId == message.eventId
+            } == true)
+        }
+    }
+
+    @Test("A one-shot sync reports a failed store write without advancing the cursor")
+    func oneShotStoreFailure() async throws {
+        try await withHarness { harness in
+            let (sync, _, _, _) = await harness.syncClient()
+            let store = FailOnceSyncSink()
+            await sync.addDeltaSink(store)
+            await #expect(throws: MatrixError.self) {
+                try await sync.syncOnce()
+            }
+            #expect(await store.syncToken == nil)
+            let delta = try await sync.syncOnce()
+            let requests = await harness.requests.filter { $0.path == "/_matrix/client/v3/sync" }
+            #expect(requests.count == 2)
+            #expect(requests.allSatisfy { $0.query["since"] == nil })
+            #expect(await store.syncToken == delta.nextBatch)
+        }
+    }
+
     @Test("Fatal token errors end the stream via onError")
     func fatalError() async throws {
         actor ErrorBox {
