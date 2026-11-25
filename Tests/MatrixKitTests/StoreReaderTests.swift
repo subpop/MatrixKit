@@ -199,6 +199,41 @@ struct StoreReaderTests {
         #expect(try reader.eventJSON(EventId(unchecked: "$missing")) == nil)
     }
 
+    @Test("Event source bundles the latest replacement")
+    func eventSourceJSON() async throws {
+        let (writer, container) = try writer()
+        let roomId = "!room:x"
+        let eventId = EventId(unchecked: "$original")
+        let replyTo = EventId(unchecked: "$parent")
+        let originalContent = try JSONEncoder().encode(
+            MessageContent.markdown("reply", relatesTo: .reply(to: replyTo)))
+        let original = MessageEvent(
+            type: EventType.roomMessage.rawValue,
+            eventId: eventId,
+            sender: UserId(unchecked: "@alice:x"),
+            roomId: RoomId(unchecked: roomId),
+            originServerTs: 1,
+            content: try JSONDecoder().decode(
+                [String: AnyCodable].self, from: originalContent))
+        try await writer.apply(joinedTimelineDelta([
+            original,
+            edit("$edit1", roomId: roomId, target: eventId.value, body: "first edit", ts: 2),
+            edit("$edit2", roomId: roomId, target: eventId.value, body: "latest edit", ts: 3),
+        ], roomId: roomId))
+
+        let data = try #require(try reader(container).eventSourceJSON(eventId))
+        let source = try JSONDecoder().decode([String: AnyCodable].self, from: data)
+        let originalReplyTo =
+            source["content"]?["m.relates_to"]?["m.in_reply_to"]?["event_id"]?.stringValue
+        let replacementEventId =
+            source["unsigned"]?["m.relations"]?["m.replace"]?["event_id"]?.stringValue
+        let replacementBody =
+            source["unsigned"]?["m.relations"]?["m.replace"]?["content"]?["m.new_content"]?["body"]?.stringValue
+        #expect(originalReplyTo == replyTo.value)
+        #expect(replacementEventId == "$edit2")
+        #expect(replacementBody == "latest edit")
+    }
+
     @Test("Timeline limit returns the newest window oldest-first")
     func timelineLimit() async throws {
         let (writer, container) = try writer()

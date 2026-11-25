@@ -345,6 +345,48 @@ public struct MatrixStoreReader: Sendable {
         return try encoder.encode(event)
     }
 
+    /// One stored event with its latest replacement bundled under
+    /// `unsigned.m.relations.m.replace`, as returned by event-source APIs.
+    public func eventSourceJSON(_ eventId: EventId) throws -> Data? {
+        guard var event = try event(eventId) else { return nil }
+        if let roomId = event.roomId?.value,
+            let replacement = try latestReplacement(of: eventId, in: roomId)
+        {
+            var unsigned = event.unsigned ?? [:]
+            var relations = unsigned["m.relations"]?.objectValue ?? [:]
+            let replacementData = try JSONEncoder().encode(replacement)
+            relations["m.replace"] = .object(
+                try JSONDecoder().decode([String: AnyCodable].self, from: replacementData))
+            unsigned["m.relations"] = .object(relations)
+            event.unsigned = unsigned
+        }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        return try encoder.encode(event)
+    }
+
+    private func latestReplacement(
+        of eventId: EventId, in roomId: String
+    ) throws -> MessageEvent? {
+        let context = ModelContext(modelContainer)
+        let descriptor = FetchDescriptor<SDRoomEvent>(
+            predicate: #Predicate {
+                $0.roomId == roomId && $0.relType == "m.replace"
+            },
+            sortBy: [
+                SortDescriptor(\.ts, order: .reverse),
+                SortDescriptor(\.eventId, order: .reverse),
+            ])
+        for row in try context.fetch(descriptor) {
+            guard let replacement = row.messageEvent(),
+                replacement.relatesTo?.relType == .replacement,
+                replacement.relatesTo?.eventId == eventId
+            else { continue }
+            return replacement
+        }
+        return nil
+    }
+
     /// Search stored message text, newest first. Edit hits navigate to the
     /// original event and display the matched replacement body.
     public func searchMessages(
